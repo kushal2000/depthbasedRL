@@ -1,3 +1,4 @@
+import os
 import subprocess
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -40,10 +41,10 @@ class LaunchTrainingArgs:
     """Number of SAPG blocks."""
 
     # === Wandb ===
-    wandb_entity: str = "tylerlum"
+    wandb_entity: str = "samratsahoo-stanford-university"
     """Wandb entity (user or team)."""
 
-    wandb_project: str = "simtoolreal"
+    wandb_project: str = "simpretrain"
     """Wandb project name."""
 
     wandb_group: str = f"{datetime.now().strftime('%Y-%m-%d')}"
@@ -57,6 +58,9 @@ class LaunchTrainingArgs:
 
     wandb_notes: str = ""
     """Wandb notes."""
+
+    use_rl: bool = False
+    """Use the simple SAPG RL agent (rl/) instead of rl_games."""
 
     @property
     def sapg_block_size(self) -> int:
@@ -122,9 +126,16 @@ def launch_training(args: LaunchTrainingArgs) -> None:
     if args.checkpoint is not None:
         cmd_parts.append(f"checkpoint={args.checkpoint}")
 
+    if args.use_rl:
+        cmd_parts.append("++use_rl=True")
+
     cmd = " ".join(cmd_parts)
     print(f"Running command:\n{cmd}")
-    subprocess.run(cmd, shell=True, check=True)
+    env = os.environ.copy()
+    conda_prefix = os.environ.get("CONDA_PREFIX", "")
+    if conda_prefix:
+        env["LD_LIBRARY_PATH"] = f"{conda_prefix}/lib:" + env.get("LD_LIBRARY_PATH", "")
+    subprocess.run(cmd, shell=True, check=True, env=env)
 
 
 def main() -> None:

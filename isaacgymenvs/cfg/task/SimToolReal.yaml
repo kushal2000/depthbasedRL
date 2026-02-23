@@ -23,7 +23,7 @@ env:
   stiffnessScale: 1.0
   forceLimitScale: 1.0
   useRelativeControl: False
-  dofSpeedScale: 1.5  # often set to 1.0
+  dofSpeedScale: 10  # often set to 1.0
   handMovingAverage: 0.1  # often set to 0.1 or 1.0
   armMovingAverage: 0.1  # often set to 0.1 or 1.0
   dofSpeedScaleFinal: ${eval:"None"}  # often set to 1.0

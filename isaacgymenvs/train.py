@@ -278,6 +278,46 @@ def launch_rlg_hydra(cfg: DictConfig, vec_env=None):
         print(f"Saved config to {save_dir}")
         breakpoint()
 
+    # ── Minimal rl/ agent path ──
+    if cfg.get('use_rl', False):
+        from rl.agent import SAPGAgent
+        from tensorboardX import SummaryWriter as TBWriter
+
+        train_cfg = omegaconf_to_dict(cfg.train)
+        train_cfg = preprocess_train_config(cfg, train_cfg)
+        config = train_cfg['params']['config']
+
+        # Create the vec env via rl_games machinery (reuse existing registration)
+        if vec_env is None:
+            rlgpu_env = vecenv.create_vec_env('rlgpu', config['num_actors'])
+        else:
+            rlgpu_env = vec_env
+
+        # WandB — must init before creating SummaryWriter so sync_tensorboard can patch it
+        if cfg.wandb_activate:
+            import wandb
+            wandb.init(
+                project=cfg.wandb_project,
+                entity=cfg.wandb_entity,
+                group=cfg.get('wandb_group', None),
+                name=cfg.wandb_name,
+                config=omegaconf_to_dict(cfg),
+                sync_tensorboard=True,
+            )
+
+        # Tensorboard writer
+        summaries_dir = os.path.join(config.get('train_dir', 'runs'), config['name'], 'summaries')
+        os.makedirs(summaries_dir, exist_ok=True)
+        writer = TBWriter(summaries_dir)
+
+        agent = SAPGAgent(rlgpu_env, config, writer)
+
+        if cfg.checkpoint:
+            agent.restore(cfg.checkpoint)
+
+        agent.train()
+        return None
+
     cfg_n_env = runner.run(
         {
             "train": not cfg.test,
