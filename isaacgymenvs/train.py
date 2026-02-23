@@ -98,7 +98,14 @@ def launch_rlg_hydra(cfg: DictConfig, vec_env=None):
 
     import os
 
+    import torch
     import gym
+
+    # ── Global CUDA performance settings ──
+    # Enable TF32 on Ampere+ GPUs for ~3x faster matmuls with minimal precision loss
+    torch.set_float32_matmul_precision('high')
+    torch.backends.cuda.matmul.allow_tf32 = True
+    torch.backends.cudnn.allow_tf32 = True
 
     # noinspection PyUnresolvedReferences
     from hydra.utils import to_absolute_path

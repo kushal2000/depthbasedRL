@@ -6,360 +6,33 @@ Ported from:
   - rl_games/algos_torch/central_value.py (CentralValueTrain)
 """
 
-import copy
 import math
 import os
 import time
-from collections import deque, OrderedDict
 
-import gym
 import numpy as np
 import torch
 import torch.nn as nn
 from torch import optim
 
-from rl.network import ActorNetwork, CriticNetwork, RunningMeanStd
+from rl.buffer import ExperienceBuffer, PPODataset
+from rl.logging import AverageMeter, EnvInfoObserver
+from rl.network import ActorNetwork, CriticNetwork
+from rl.timing import CudaTimer
+from rl.utils import (
+    filter_leader,
+    policy_kl,
+    rescale_actions,
+    shuffle_batch,
+    swap_and_flatten01,
+)
 
-
-# ── Helpers ──────────────────────────────────────────────────────────────────
-
-def swap_and_flatten01(arr):
-    if arr is None:
-        return arr
-    s = arr.size()
-    return arr.transpose(0, 1).reshape(s[0] * s[1], *s[2:])
-
-
-def filter_leader(val, orig_len, repeat_idxs, num_blocks):
-    if len(val) > 1:
-        bsize = orig_len // num_blocks
-        filtered = []
-        for i, idx in enumerate(repeat_idxs):
-            if idx == 0:
-                filtered.append(val[i * orig_len:(i + 1) * orig_len])
-            else:
-                filtered.append(val[i * orig_len + (idx - 1) * bsize:i * orig_len + idx * bsize])
-        return torch.cat(filtered, dim=0)
-    else:
-        bsize = orig_len // num_blocks
-        filtered = []
-        for i, idx in enumerate(repeat_idxs):
-            if idx == 0:
-                filtered.append(val[:, i * orig_len:(i + 1) * orig_len])
-            else:
-                filtered.append(val[:, i * orig_len + (idx - 1) * bsize:i * orig_len + idx * bsize])
-        return torch.cat(filtered, dim=1)
-
-
-def shuffle_batch(batch_dict, horizon_length):
-    device = batch_dict['returns'].device
-    n = len(batch_dict['returns']) // horizon_length
-    indices = (
-        torch.randperm(n, device=device).reshape(-1, 1) * horizon_length
-        + torch.arange(horizon_length, device=device).reshape(1, -1)
-    )
-    flat = indices.reshape(-1)
-    for key in batch_dict:
-        if key == 'rnn_states':
-            if batch_dict[key] is None:
-                continue
-            batch_dict[key] = [s[:, indices[:, 0] // horizon_length] for s in batch_dict[key]]
-        elif key in ['played_frames', 'step_time']:
-            continue
-        else:
-            batch_dict[key] = batch_dict[key][flat]
-    return batch_dict
-
-
-def rescale_actions(low, high, action):
-    d = (high - low) / 2.0
-    m = (high + low) / 2.0
-    return action * d + m
-
-
-def policy_kl(p0_mu, p0_sigma, p1_mu, p1_sigma, reduce=True):
-    c1 = torch.log(p1_sigma / p0_sigma + 1e-5)
-    c2 = (p0_sigma ** 2 + (p1_mu - p0_mu) ** 2) / (2.0 * (p1_sigma ** 2 + 1e-5))
-    c3 = -1.0 / 2.0
-    kl = (c1 + c2 + c3).sum(dim=-1)
-    return kl.mean() if reduce else kl
-
-
-def flatten_dict(d, prefix='', separator='/'):
-    """Flatten nested dicts: {'a': {'b': 1}} -> {'a/b': 1}."""
-    res = {}
-    for key, value in d.items():
-        if isinstance(value, (dict, OrderedDict)):
-            res.update(flatten_dict(value, prefix + key + separator, separator))
-        else:
-            res[prefix + key] = value
-    return res
-
-
-def remove_envs_from_info(infos, num_envs):
-    """Remove first num_envs entries from info tensors (for ignore_env_boundary)."""
-    for key in list(infos.keys()):
-        if isinstance(infos[key], dict):
-            infos[key] = remove_envs_from_info(infos[key], num_envs)
-        elif isinstance(infos[key], (list, np.ndarray, torch.Tensor)):
-            if key in ['successes', 'closest_keypoint_max_dist']:
-                block_size = len(infos[key]) - num_envs
-                if block_size > 0 and len(infos[key]) % block_size == 0:
-                    for i in range(len(infos[key]) // block_size):
-                        infos[f"{key}_per_block/block_{i}"] = infos[key][i * block_size:(i + 1) * block_size]
-            infos[key] = infos[key][num_envs:]
-    return infos
-
-
-# ── Env Info Observer ────────────────────────────────────────────────────────
-
-class EnvInfoObserver:
-    """Processes env infos and logs metrics — mirrors RLGPUAlgoObserver."""
-
-    def __init__(self, writer, device, games_to_track=3000, ignore_env_boundary=0):
-        self.writer = writer
-        self.device = device
-        self.games_to_track = games_to_track
-        self.ignore_env_boundary = ignore_env_boundary
-        self.ep_infos = []
-        self.direct_info = {}
-        self.episode_cumulative = {}
-        self.episode_cumulative_avg = {}
-        self.new_finished_episodes = False
-
-    def process_infos(self, infos, done_indices):
-        if not isinstance(infos, dict):
-            return
-
-        if self.ignore_env_boundary > 0:
-            infos = remove_envs_from_info(copy.deepcopy(infos), self.ignore_env_boundary)
-            done_indices = done_indices[done_indices >= self.ignore_env_boundary].unsqueeze(-1) - self.ignore_env_boundary
-
-        if 'episode' in infos:
-            self.ep_infos.append(infos['episode'])
-
-        if 'episode_cumulative' in infos:
-            for key, value in infos['episode_cumulative'].items():
-                if key not in self.episode_cumulative:
-                    self.episode_cumulative[key] = torch.zeros_like(value)
-                self.episode_cumulative[key] += value
-
-            for done_idx in done_indices:
-                self.new_finished_episodes = True
-                done_idx = done_idx.item()
-                for key, value in infos['episode_cumulative'].items():
-                    if key not in self.episode_cumulative_avg:
-                        self.episode_cumulative_avg[key] = deque([], maxlen=self.games_to_track)
-                    self.episode_cumulative_avg[key].append(self.episode_cumulative[key][done_idx].item())
-                    self.episode_cumulative[key][done_idx] = 0
-
-        # Flatten nested dicts into summary keys
-        if len(infos) > 0 and isinstance(infos, dict):
-            infos_flat = flatten_dict(infos, prefix='', separator='/')
-            self.direct_info = {}
-            for k, v in infos_flat.items():
-                if isinstance(v, float) or isinstance(v, int) or (isinstance(v, torch.Tensor) and len(v.shape) == 0):
-                    self.direct_info[k] = v
-
-        # Special handling for successes, keypoint dist, etc.
-        for tag in ['successes', 'closest_keypoint_max_dist', 'discounted_reward']:
-            if tag in infos:
-                self.direct_info[tag] = infos[tag].mean()
-                self.direct_info[f'{tag}_median'] = torch.median(infos[tag]).item()
-                self.direct_info[f'{tag}_max'] = infos[tag].max()
-                for key in infos:
-                    if key.startswith(f'{tag}_per_block'):
-                        self.direct_info[key] = torch.mean(infos[key]).item()
-
-        if 'true_objective' in infos:
-            self.direct_info['true_objective_mean'] = infos['true_objective'].mean()
-            self.direct_info['true_objective_max'] = infos['true_objective'].max()
-
-    def log_stats(self, frame, epoch_num, total_time):
-        if self.writer is None:
-            return
-
-        # Episode info
-        if self.ep_infos:
-            for key in self.ep_infos[0]:
-                infotensor = torch.tensor([], device=self.device)
-                for ep_info in self.ep_infos:
-                    if not isinstance(ep_info[key], torch.Tensor):
-                        ep_info[key] = torch.Tensor([ep_info[key]])
-                    if len(ep_info[key].shape) == 0:
-                        ep_info[key] = ep_info[key].unsqueeze(0)
-                    infotensor = torch.cat((infotensor, ep_info[key].to(self.device)))
-                value = torch.mean(infotensor)
-                self.writer.add_scalar('Episode/' + key, value, frame)
-            self.ep_infos.clear()
-
-        # Episode cumulative metrics
-        if self.new_finished_episodes:
-            for key in self.episode_cumulative_avg:
-                self.writer.add_scalar(f'episode_cumulative/{key}', np.mean(self.episode_cumulative_avg[key]), frame)
-                self.writer.add_scalar(f'episode_cumulative_min/{key}_min', np.min(self.episode_cumulative_avg[key]), frame)
-                self.writer.add_scalar(f'episode_cumulative_max/{key}_max', np.max(self.episode_cumulative_avg[key]), frame)
-            self.new_finished_episodes = False
-
-        # Direct info (scalars from env)
-        for k, v in self.direct_info.items():
-            self.writer.add_scalar(f'{k}/frame', v, frame)
-            self.writer.add_scalar(f'{k}/iter', v, frame)
-            self.writer.add_scalar(f'{k}/time', v, frame)
-
-
-class AverageMeter(nn.Module):
-    def __init__(self, in_shape, max_size):
-        super().__init__()
-        self.max_size = max_size
-        self.register_buffer("current_size", torch.tensor(0, dtype=torch.int32))
-        self.register_buffer("mean", torch.zeros(in_shape, dtype=torch.float32))
-
-    def update(self, values):
-        size = values.size(0)
-        if size == 0:
-            return
-        new_mean = torch.mean(values.float(), dim=0).reshape(self.mean.shape)
-        size = np.clip(size, 0, self.max_size)
-        old_size = min(self.max_size - size, self.current_size)
-        size_sum = old_size + size
-        self.current_size = torch.tensor(size_sum, dtype=torch.int32)
-        self.mean = (self.mean * old_size + new_mean * size) / size_sum
-
-    def clear(self):
-        self.current_size = torch.tensor(0, dtype=torch.int32)
-        self.mean.fill_(0)
-
-    def get_mean(self):
-        return self.mean.cpu().numpy()
-
-
-# ── PPO Dataset ──────────────────────────────────────────────────────────────
-
-class PPODataset:
-    def __init__(self, batch_size, minibatch_size, is_rnn, device, seq_length):
-        self.is_rnn = is_rnn
-        self.seq_length = seq_length
-        self.batch_size = batch_size
-        self.minibatch_size = minibatch_size
-        self.device = device
-        self.length = batch_size // minibatch_size
-        total_games = batch_size // seq_length
-        self.num_games_batch = minibatch_size // seq_length
-        self.values_dict = None
-        self.last_range = (0, 0)
-
-    def update_values_dict(self, values_dict):
-        self.values_dict = values_dict
-        if values_dict is not None and 'returns' in values_dict:
-            self.length = len(values_dict['returns']) // self.minibatch_size
-
-    def update_mu_sigma(self, mu, sigma):
-        start, end = self.last_range
-        self.values_dict['mu'][start:end] = mu
-        self.values_dict['sigma'][start:end] = sigma
-
-    def __len__(self):
-        return self.length
-
-    def __getitem__(self, idx):
-        if self.is_rnn:
-            return self._get_item_rnn(idx)
-        return self._get_item(idx)
-
-    def _get_item_rnn(self, idx):
-        gstart = idx * self.num_games_batch
-        gend = (idx + 1) * self.num_games_batch
-        if idx == self.length - 1:
-            gend = len(self.values_dict['returns']) // self.seq_length
-        start = gstart * self.seq_length
-        end = gend * self.seq_length
-        self.last_range = (start, end)
-
-        input_dict = {}
-        for k, v in self.values_dict.items():
-            if k == 'rnn_states':
-                continue
-            if v is not None:
-                input_dict[k] = v[start:end]
-            else:
-                input_dict[k] = None
-
-        rnn_states = self.values_dict['rnn_states']
-        input_dict['rnn_states'] = [s[:, gstart:gend, :].contiguous() for s in rnn_states]
-        return input_dict
-
-    def _get_item(self, idx):
-        start = idx * self.minibatch_size
-        end = (idx + 1) * self.minibatch_size
-        if idx == self.length - 1:
-            end = len(self.values_dict['returns'])
-        self.last_range = (start, end)
-        input_dict = {}
-        for k, v in self.values_dict.items():
-            if k != 'rnn_states' and v is not None:
-                input_dict[k] = v[start:end]
-        return input_dict
-
-
-# ── Experience Buffer ────────────────────────────────────────────────────────
-
-class ExperienceBuffer:
-    def __init__(self, env_info, num_actors, horizon_length, has_central_value, device, extra_obs_dim=None):
-        self.device = device
-        self.num_actors = num_actors
-        self.horizon_length = horizon_length
-        self.has_central_value = has_central_value
-        num_agents = env_info.get('agents', 1)
-        batch_size = num_actors * num_agents
-        obs_base_shape = (horizon_length, batch_size)
-        state_base_shape = (horizon_length, num_actors)
-        action_space = env_info['action_space']
-        obs_space = env_info['observation_space']
-        actions_num = action_space.shape[0]
-        value_size = env_info.get('value_size', 1)
-
-        def _make(shape, dtype=torch.float32, base=obs_base_shape):
-            return torch.zeros(base + shape, dtype=dtype, device=device)
-
-        obs_shape = obs_space.shape
-        if extra_obs_dim is not None:
-            obs_shape = (obs_shape[0] + extra_obs_dim,)
-        state_space = env_info.get('state_space', None)
-
-        self.tensor_dict = {}
-        self.tensor_dict['obses'] = _make(obs_shape)
-        if has_central_value and state_space is not None:
-            state_shape = state_space.shape
-            if extra_obs_dim is not None:
-                state_shape = (state_shape[0] + extra_obs_dim,)
-            self.tensor_dict['states'] = _make(state_shape, base=state_base_shape)
-        self.tensor_dict['rewards'] = _make((value_size,))
-        self.tensor_dict['intr_rewards'] = _make((1,))
-        self.tensor_dict['values'] = _make((value_size,))
-        self.tensor_dict['neglogpacs'] = _make(())
-        self.tensor_dict['dones'] = _make((), dtype=torch.uint8)
-        self.tensor_dict['actions'] = _make((actions_num,))
-        self.tensor_dict['mus'] = _make((actions_num,))
-        self.tensor_dict['sigmas'] = _make((actions_num,))
-
-    def update_data(self, name, index, val):
-        self.tensor_dict[name][index, :] = val
-
-    def get_transformed_list(self, transform_op, tensor_list):
-        res = {}
-        for k in tensor_list:
-            v = self.tensor_dict.get(k)
-            if v is None:
-                continue
-            res[k] = transform_op(v)
-        return res
-
-
-# ── SAPGAgent ────────────────────────────────────────────────────────────────
 
 class SAPGAgent:
     """PPO + SAPG agent that trains on an Isaac Gym vec env."""
+
+    SOFT_BOUND = 1.1
+    VALUE_BATCH_CHUNK = 8192
 
     def __init__(self, vec_env, config, writer=None):
         self.vec_env = vec_env
@@ -428,11 +101,12 @@ class SAPGAgent:
 
         # SAPG exploration
         self.expl_type = c.get('expl_type', 'none')
+        self.is_mixed_expl = self.expl_type.startswith('mixed_expl')
         self.use_others_experience = c.get('use_others_experience', 'none')
         self.off_policy_ratio = c.get('off_policy_ratio', 1.0)
         self.ignore_env_boundary = c.get('good_reset_boundary', 0)
 
-        if self.expl_type.startswith('mixed_expl'):
+        if self.is_mixed_expl:
             self.intr_coef_block_size = c.get('expl_coef_block_size', 4096)
             assert self.num_actors % self.intr_coef_block_size == 0
             env_ids = torch.arange(self.num_actors // self.intr_coef_block_size).repeat_interleave(
@@ -465,9 +139,12 @@ class SAPGAgent:
             self.intr_reward_coef_embd = None
             self.intr_reward_model = None
 
-        # Policy index (from experiment name)
+        # Policy index (from experiment name, e.g. "00_default" -> 0)
         exp_name = c.get('full_experiment_name') or c.get('name', '00_default')
-        self.policy_idx = int(exp_name.split('_')[0])
+        try:
+            self.policy_idx = int(exp_name.split('_')[0])
+        except ValueError:
+            self.policy_idx = 0
         self.experiment_name = exp_name
 
         # Directories
@@ -511,6 +188,13 @@ class SAPGAgent:
         else:
             self.central_value_net = None
 
+        # torch.compile for faster forward/backward (opt-in via config)
+        if c.get('torch_compile', False):
+            compile_mode = c.get('torch_compile_mode', 'reduce-overhead')
+            self.model.actor_mlp = torch.compile(self.model.actor_mlp, mode=compile_mode)
+            if self.has_central_value:
+                self.central_value_net.actor_mlp = torch.compile(self.central_value_net.actor_mlp, mode=compile_mode)
+
         self.has_value_loss = self.use_experimental_cv or not self.has_central_value
 
         # ── Optimizers ──────────────────────────────────────────────────
@@ -543,7 +227,6 @@ class SAPGAgent:
         self.game_shaped_rewards = AverageMeter(self.value_size, self.games_to_track).to(self.ppo_device)
         self.game_lengths = AverageMeter(1, self.games_to_track).to(self.ppo_device)
 
-        # Env info observer (for episode_cumulative, successes, etc.)
         self.env_observer = EnvInfoObserver(
             writer=self.writer,
             device=self.ppo_device,
@@ -559,9 +242,6 @@ class SAPGAgent:
         self.dones = None
         self.rnn_states = None
         self.current_rewards = None
-
-        # Central value RNN states (if critic had RNN, but it doesn't in this config)
-        self.cv_rnn_states = None
 
     # ── Env interaction helpers ──────────────────────────────────────────
 
@@ -597,14 +277,13 @@ class SAPGAgent:
         rewards = rewards.to(self.ppo_device)
         dones = dones.to(self.ppo_device)
 
-        intr_rewards = torch.zeros_like(rewards)
+        intr_rewards = self._zero_intr_rewards
 
-        tr_obs = self._obs_to_tensors(obs)
         if self.intr_reward_coef_embd is not None:
-            tr_obs['obs'] = torch.cat([tr_obs['obs'], self.intr_reward_coef_embd], dim=1)
-            tr_obs['states'] = torch.cat([tr_obs['states'], self.intr_reward_coef_embd], dim=1)
+            obs['obs'] = torch.cat([obs['obs'], self.intr_reward_coef_embd], dim=1)
+            obs['states'] = torch.cat([obs['states'], self.intr_reward_coef_embd], dim=1)
 
-        return tr_obs, rewards, intr_rewards, dones, infos
+        return obs, rewards, intr_rewards, dones, infos
 
     # ── Init tensors ─────────────────────────────────────────────────────
 
@@ -618,6 +297,10 @@ class SAPGAgent:
             has_central_value=self.has_central_value,
             device=self.ppo_device,
             extra_obs_dim=extra_obs_dim,
+        )
+
+        self._zero_intr_rewards = torch.zeros(
+            (batch_size, self.value_size), dtype=torch.float32, device=self.ppo_device
         )
 
         if self.current_rewards is None:
@@ -657,7 +340,6 @@ class SAPGAgent:
             'rnn_states': rnn_states,
         }
         with torch.no_grad():
-            # Forward actor
             mu, logstd, value, states = self.model(input_dict)
             sigma = torch.exp(logstd)
             distr = torch.distributions.Normal(mu, sigma, validate_args=False)
@@ -911,14 +593,15 @@ class SAPGAgent:
             flattened_mb_obs = mb_obs.reshape(-1, *mb_obs.shape[2:])
             flattened_mb_states = mb_states.reshape(-1, *mb_states.shape[2:]) if mb_states is not None else None
 
+            chunk = self.VALUE_BATCH_CHUNK
             mb_values = []
-            for i in range((flattened_mb_obs.shape[0] + 8191) // 8192):
+            for i in range((flattened_mb_obs.shape[0] + chunk - 1) // chunk):
                 mb_values.append(self.get_values(
                     {
-                        'obs': flattened_mb_obs[i * 8192:(i + 1) * 8192],
-                        'states': flattened_mb_states[i * 8192:(i + 1) * 8192] if mb_states is not None else None,
+                        'obs': flattened_mb_obs[i * chunk:(i + 1) * chunk],
+                        'states': flattened_mb_states[i * chunk:(i + 1) * chunk] if mb_states is not None else None,
                     },
-                    rnn_states=[s[:, i * 8192:(i + 1) * 8192] for s in flattened_rnn_states] if flattened_rnn_states is not None else None,
+                    rnn_states=[s[:, i * chunk:(i + 1) * chunk] for s in flattened_rnn_states] if flattened_rnn_states is not None else None,
                 ))
             mb_values = torch.cat(mb_values, dim=0)
             last_values = self.get_values(last_obs_and_states, last_rnn_states)
@@ -1062,15 +745,14 @@ class SAPGAgent:
 
             # Bounds loss
             if self.bounds_loss_coef is not None:
-                soft_bound = 1.1
-                mu_loss_high = torch.clamp_min(mu - soft_bound, 0.0) ** 2
-                mu_loss_low = torch.clamp_max(mu + soft_bound, 0.0) ** 2
+                mu_loss_high = torch.clamp_min(mu - self.SOFT_BOUND, 0.0) ** 2
+                mu_loss_low = torch.clamp_max(mu + self.SOFT_BOUND, 0.0) ** 2
                 b_loss = (mu_loss_low + mu_loss_high).sum(axis=-1)
             else:
                 b_loss = torch.zeros(len(mu), device=self.ppo_device)
 
             # Entropy coefficient (per-actor for SAPG)
-            if self.expl_type.startswith('mixed_expl') and self.config.get('expl_reward_type') == 'entropy':
+            if self.is_mixed_expl and self.config.get('expl_reward_type') == 'entropy':
                 ec_candidates = self.intr_reward_coef[::self.intr_coef_block_size]
                 ec_identifiers = self.intr_reward_coef_embd[::self.intr_coef_block_size, 0].reshape(-1, 1)
                 ec_indices = torch.argmax((obs_batch[:, -self.intr_reward_coef_embd.shape[1]] == ec_identifiers).float(), dim=0)
@@ -1078,7 +760,6 @@ class SAPGAgent:
             else:
                 entropy_coef = self.entropy_coef
 
-            # Combine losses (apply_masks with mask=None -> just mean)
             a_loss = torch.mean(a_loss.unsqueeze(1))
             c_loss = torch.mean(c_loss)
             entropy_loss = torch.mean((entropy_coef * entropy).unsqueeze(1))
@@ -1086,18 +767,10 @@ class SAPGAgent:
 
             loss = a_loss + 0.5 * c_loss * self.critic_coef - entropy_loss + b_loss * self.bounds_loss_coef
 
-        # Backward + grad clip + step
         for param in self.model.parameters():
             param.grad = None
 
         self.scaler.scale(loss).backward()
-
-        # Collect all grads before clipping (for auxiliary stats)
-        all_grads_list = []
-        for param in self.model.parameters():
-            if param.grad is not None:
-                all_grads_list.append(param.grad.view(-1))
-        all_grads = torch.cat(all_grads_list)
 
         if self.truncate_grads:
             self.scaler.unscale_(self.optimizer)
@@ -1106,11 +779,9 @@ class SAPGAgent:
         self.scaler.step(self.optimizer)
         self.scaler.update()
 
-        # KL divergence
         with torch.no_grad():
             kl_dist = policy_kl(mu.detach(), sigma.detach(), old_mu_batch, old_sigma_batch, reduce=True)
 
-        # Build extras dict for auxiliary stats
         ratio = torch.exp(old_action_log_probs_batch - action_log_probs)
         contrib = torch.logical_and(ratio < 1.0 + curr_e_clip, ratio > 1.0 - curr_e_clip).float()
 
@@ -1123,18 +794,14 @@ class SAPGAgent:
             extras = {
                 "off_policy_contrib": contrib_off.item(),
                 "on_policy_contrib": contrib_on.item(),
-                "off_policy_grads": all_grads.detach().cpu(),
-                "on_policy_grads": all_grads.detach().cpu(),
             }
         else:
             extras = {
                 "on_policy_contrib": contrib.mean().item(),
                 "off_policy_contrib": 0,
-                "on_policy_grads": all_grads.detach().cpu(),
-                "off_policy_grads": torch.zeros_like(all_grads).cpu(),
             }
 
-        if self.expl_type.startswith('mixed_expl'):
+        if self.is_mixed_expl:
             bl_ids = self.intr_reward_coef_embd[::self.intr_coef_block_size, 0].reshape(-1, 1)
             bl_idxs = torch.argmax((obs_batch[:, -self.intr_reward_coef_embd.shape[1]] == bl_ids).float(), dim=0)
             extras["entropies"] = [
@@ -1149,9 +816,6 @@ class SAPGAgent:
             mu.detach(), sigma.detach(), b_loss,
             extras,
         )
-
-    def train_actor_critic(self, input_dict):
-        return self.calc_gradients(input_dict)
 
     # ── Central value training ───────────────────────────────────────────
 
@@ -1174,27 +838,30 @@ class SAPGAgent:
         value_preds_batch = batch['old_values']
         returns_batch = batch['returns']
 
-        res = self.central_value_net({'obs': obs_batch, 'is_train': True})
-        values = res['values']
+        with torch.cuda.amp.autocast(enabled=self.mixed_precision):
+            res = self.central_value_net({'obs': obs_batch, 'is_train': True})
+            values = res['values']
 
-        if self.cv_clip_value:
-            value_pred_clipped = value_preds_batch + (values - value_preds_batch).clamp(-self.cv_e_clip, self.cv_e_clip)
-            value_losses = (values - returns_batch) ** 2
-            value_losses_clipped = (value_pred_clipped - returns_batch) ** 2
-            loss = torch.max(value_losses, value_losses_clipped)
-        else:
-            loss = (returns_batch - values) ** 2
+            if self.cv_clip_value:
+                value_pred_clipped = value_preds_batch + (values - value_preds_batch).clamp(-self.cv_e_clip, self.cv_e_clip)
+                value_losses = (values - returns_batch) ** 2
+                value_losses_clipped = (value_pred_clipped - returns_batch) ** 2
+                loss = torch.max(value_losses, value_losses_clipped)
+            else:
+                loss = (returns_batch - values) ** 2
 
-        loss = torch.mean(loss)
+            loss = torch.mean(loss)
 
         for param in self.central_value_net.parameters():
             param.grad = None
-        loss.backward()
+        self.scaler.scale(loss).backward()
 
         if self.cv_truncate_grads:
+            self.scaler.unscale_(self.cv_optimizer)
             nn.utils.clip_grad_norm_(self.central_value_net.parameters(), self.cv_grad_norm)
 
-        self.cv_optimizer.step()
+        self.scaler.step(self.cv_optimizer)
+        self.scaler.update()
         return loss.item()
 
     # ── LR update ────────────────────────────────────────────────────────
@@ -1216,11 +883,11 @@ class SAPGAgent:
         with torch.no_grad():
             orig_batch_dict, ps_extras = self.play_steps()
 
-            if self.expl_type.startswith('mixed_expl') and self.use_others_experience != 'none':
+            if self.is_mixed_expl and self.use_others_experience != 'none':
                 batch_dict = self.augment_batch_for_mixed_expl(orig_batch_dict, ps_extras)
             else:
                 batch_dict = orig_batch_dict
-            if self.expl_type.startswith('mixed_expl'):
+            if self.is_mixed_expl:
                 batch_dict = shuffle_batch(batch_dict, self.seq_length)
 
         play_time_end = time.time()
@@ -1245,8 +912,6 @@ class SAPGAgent:
         extra_infos = {
             'on_policy_contrib': [],
             'off_policy_contrib': [],
-            'on_policy_grads': [],
-            'off_policy_grads': [],
             'entropies': [],
             'mb_intr_rewards': ps_extras['mb_intr_rewards'],
             'mb_extr_rewards': ps_extras['rewards'],
@@ -1255,11 +920,9 @@ class SAPGAgent:
         for mini_ep in range(self.mini_epochs_num):
             ep_kls = []
             for i in range(len(self.dataset)):
-                a_loss, c_loss, entropy, kl, last_lr, lr_mul, cmu, csigma, b_loss, extras = self.train_actor_critic(self.dataset[i])
+                a_loss, c_loss, entropy, kl, last_lr, lr_mul, cmu, csigma, b_loss, extras = self.calc_gradients(self.dataset[i])
                 extra_infos['on_policy_contrib'].append(extras['on_policy_contrib'])
-                extra_infos['on_policy_grads'].append(extras['on_policy_grads'])
                 extra_infos['off_policy_contrib'].append(extras['off_policy_contrib'])
-                extra_infos['off_policy_grads'].append(extras['off_policy_grads'])
                 if 'entropies' in extras:
                     extra_infos['entropies'].append(extras['entropies'])
                 a_losses.append(a_loss)
@@ -1389,14 +1052,12 @@ class SAPGAgent:
             curr_frames = self.curr_frames
             self.frame += curr_frames
 
-            # Scaled times (play_time includes both env step + inference)
             scaled_play_time = max(play_time, 1e-9)
             scaled_time = max(play_time + update_time, 1e-9)
             step_time_safe = max(step_time, 1e-9)
 
             # ── Logging ──
             if self.writer is not None:
-                # Performance metrics
                 self.writer.add_scalar('performance/step_inference_rl_update_fps', curr_frames / scaled_time, frame)
                 self.writer.add_scalar('performance/step_inference_fps', curr_frames / scaled_play_time, frame)
                 self.writer.add_scalar('performance/step_fps', curr_frames / step_time_safe, frame)
@@ -1404,7 +1065,6 @@ class SAPGAgent:
                 self.writer.add_scalar('performance/step_inference_time', play_time, frame)
                 self.writer.add_scalar('performance/step_time', step_time, frame)
 
-                # Loss metrics
                 a_loss_mean = torch.mean(torch.stack(a_losses)).item() if a_losses else 0
                 c_loss_mean = torch.mean(torch.stack(c_losses)).item() if c_losses else 0
                 ent_mean = torch.mean(torch.stack(entropies)).item() if entropies else 0
@@ -1413,7 +1073,6 @@ class SAPGAgent:
                 self.writer.add_scalar('losses/c_loss', c_loss_mean, frame)
                 self.writer.add_scalar('losses/entropy', ent_mean, frame)
 
-                # Info metrics
                 self.writer.add_scalar('info/last_lr', last_lr * lr_mul, frame)
                 self.writer.add_scalar('info/lr_mul', lr_mul, frame)
                 self.writer.add_scalar('info/e_clip', self.e_clip * lr_mul, frame)
@@ -1449,29 +1108,14 @@ class SAPGAgent:
                 if self.writer is not None:
                     for i in range(self.value_size):
                         rewards_name = 'rewards' if i == 0 else f'rewards{i}'
-                        self.writer.add_scalar(f'{rewards_name}/step', mean_rewards[i], frame)
-                        self.writer.add_scalar(f'{rewards_name}/iter', mean_rewards[i], frame)
-                        self.writer.add_scalar(f'{rewards_name}/time', mean_rewards[i], frame)
-                        self.writer.add_scalar(f'shaped_{rewards_name}/step', mean_shaped_rewards[i], frame)
-                        self.writer.add_scalar(f'shaped_{rewards_name}/iter', mean_shaped_rewards[i], frame)
-                        self.writer.add_scalar(f'shaped_{rewards_name}/time', mean_shaped_rewards[i], frame)
+                        self.writer.add_scalar(rewards_name, mean_rewards[i], frame)
+                        self.writer.add_scalar(f'shaped_{rewards_name}', mean_shaped_rewards[i], frame)
 
-                    self.writer.add_scalar('episode_lengths/step', mean_lengths, frame)
-                    self.writer.add_scalar('episode_lengths/iter', mean_lengths, frame)
-                    self.writer.add_scalar('episode_lengths/time', mean_lengths, frame)
+                    self.writer.add_scalar('episode_lengths', mean_lengths, frame)
 
-                    # Auxiliary stats (off-policy)
-                    self.writer.add_histogram('auxiliary_stats/off_policy_contrib', np.array(extra_infos['off_policy_contrib']), frame)
-                    self.writer.add_histogram('auxiliary_stats/on_policy_contrib', np.array(extra_infos['on_policy_contrib']), frame)
+                    self.writer.add_scalar('auxiliary_stats/off_policy_contrib', np.mean(extra_infos['off_policy_contrib']), frame)
+                    self.writer.add_scalar('auxiliary_stats/on_policy_contrib', np.mean(extra_infos['on_policy_contrib']), frame)
 
-                    on_policy_grads = torch.stack(extra_infos['on_policy_grads'])
-                    off_policy_grads = torch.stack(extra_infos['off_policy_grads'])
-                    self.writer.add_scalar('auxiliary_stats/off_on_grad_similarity',
-                                           torch.cosine_similarity(on_policy_grads, off_policy_grads).diag().mean(), frame)
-                    self.writer.add_scalar('auxiliary_stats/off_on_relative_grad_norms',
-                                           torch.norm(off_policy_grads, dim=-1).mean() / max(torch.norm(on_policy_grads, dim=-1).mean(), 1e-8), frame)
-
-                    # Intrinsic reward per-block logging
                     if extra_infos['mb_intr_rewards'] is not None:
                         if hasattr(self, 'intr_coef_block_size'):
                             num_blocks = self.num_actors // self.intr_coef_block_size
@@ -1482,14 +1126,12 @@ class SAPGAgent:
                             self.writer.add_scalar('intr_rewards/block_0', extra_infos['mb_intr_rewards'].mean(), frame)
                         self.writer.add_scalar('intr_rewards/extr_rewards', extra_infos['mb_extr_rewards'].mean(), frame)
 
-                    # Per-block entropy logging
                     if extra_infos['entropies']:
                         num_blocks = self.num_actors // self.intr_coef_block_size
                         for bl in range(num_blocks):
                             self.writer.add_scalar(f'intr_rewards/entropy_block_{bl}',
                                                    torch.tensor(extra_infos['entropies'])[:, bl].mean(), frame)
 
-                # Env observer logging (episode_cumulative, successes, direct_info)
                 self.env_observer.log_stats(frame, epoch_num, total_time)
 
                 print(f"\nPolicy {self.policy_idx}: mean_reward={mean_rewards[0]:.2f}")
