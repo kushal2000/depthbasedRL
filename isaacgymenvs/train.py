@@ -288,20 +288,36 @@ def launch_rlg_hydra(cfg: DictConfig, vec_env=None):
     # ── Minimal rl/ agent path ──
     if cfg.get('use_rl', False):
         from rl.agent import SAPGAgent
+        from rl.vec_env import IsaacVecEnv
         from tensorboardX import SummaryWriter as TBWriter
+
+        # Multi-GPU: split envs across ranks before building config
+        world_size = int(os.getenv("WORLD_SIZE", "1"))
+        local_rank = int(os.getenv("LOCAL_RANK", "0"))
+        multi_gpu = cfg.get('multi_gpu', False) and world_size > 1
+
+        if multi_gpu:
+            num_envs_total = cfg.task.env.numEnvs
+            assert num_envs_total % world_size == 0, \
+                f"num_envs ({num_envs_total}) must be divisible by world_size ({world_size})"
+            with open_dict(cfg):
+                cfg.task.env.numEnvs = num_envs_total // world_size
+            print(f"[Rank {global_rank}] Running {cfg.task.env.numEnvs} envs (total {num_envs_total})")
 
         train_cfg = omegaconf_to_dict(cfg.train)
         train_cfg = preprocess_train_config(cfg, train_cfg)
         config = train_cfg['params']['config']
+        config['multi_gpu'] = multi_gpu
 
-        # Create the vec env via rl_games machinery (reuse existing registration)
+        # Create the vec env — self-contained, no rl_games dependency
         if vec_env is None:
-            rlgpu_env = vecenv.create_vec_env('rlgpu', config['num_actors'])
+            raw_env = create_isaacgym_env()
+            rlgpu_env = IsaacVecEnv(raw_env)
         else:
             rlgpu_env = vec_env
 
-        # WandB — must init before creating SummaryWriter so sync_tensorboard can patch it
-        if cfg.wandb_activate:
+        # WandB — only rank 0 initializes
+        if cfg.wandb_activate and global_rank == 0:
             import wandb
             wandb.init(
                 project=cfg.wandb_project,
@@ -312,10 +328,12 @@ def launch_rlg_hydra(cfg: DictConfig, vec_env=None):
                 sync_tensorboard=True,
             )
 
-        # Tensorboard writer
-        summaries_dir = os.path.join(config.get('train_dir', 'runs'), config['name'], 'summaries')
-        os.makedirs(summaries_dir, exist_ok=True)
-        writer = TBWriter(summaries_dir)
+        # Tensorboard writer (rank 0 only)
+        writer = None
+        if global_rank == 0:
+            summaries_dir = os.path.join(config.get('train_dir', 'runs'), config['name'], 'summaries')
+            os.makedirs(summaries_dir, exist_ok=True)
+            writer = TBWriter(summaries_dir)
 
         agent = SAPGAgent(rlgpu_env, config, writer)
 

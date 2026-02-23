@@ -12,13 +12,13 @@ import time
 
 import numpy as np
 import torch
+import torch.distributed as dist
 import torch.nn as nn
 from torch import optim
 
 from rl.buffer import ExperienceBuffer, PPODataset
 from rl.logging import AverageMeter, EnvInfoObserver
 from rl.network import ActorNetwork, CriticNetwork
-from rl.timing import CudaTimer
 from rl.utils import (
     filter_leader,
     policy_kl,
@@ -40,6 +40,16 @@ class SAPGAgent:
         self.config = c = config
 
         self.ppo_device = c.get('device', 'cuda:0')
+
+        # Multi-GPU distributed setup
+        self.multi_gpu = c.get('multi_gpu', False)
+        self.local_rank = int(os.getenv("LOCAL_RANK", "0"))
+        self.global_rank = int(os.getenv("RANK", "0"))
+        self.world_size = int(os.getenv("WORLD_SIZE", "1"))
+
+        if self.multi_gpu and self.world_size > 1:
+            dist.init_process_group("nccl")
+
         self.env_info = vec_env.get_env_info()
         self.num_actors = c['num_actors']
         self.num_agents = self.env_info.get('agents', 1)
@@ -83,6 +93,8 @@ class SAPGAgent:
         self.save_freq = c.get('save_frequency', 0)
         self.save_best_after = c.get('save_best_after', 100)
         self.print_stats = c.get('print_stats', True)
+        if self.multi_gpu and self.world_size > 1 and self.global_rank != 0:
+            self.print_stats = False
         self.games_to_track = c.get('games_to_track', 3000)
 
         self.bound_loss_type = c.get('bound_loss_type', 'bound')
@@ -242,6 +254,9 @@ class SAPGAgent:
         self.dones = None
         self.rnn_states = None
         self.current_rewards = None
+
+        # Env-level profiling — logs every N epochs
+        self._profile_every = c.get('profile_every', 10)
 
     # ── Env interaction helpers ──────────────────────────────────────────
 
@@ -449,6 +464,7 @@ class SAPGAgent:
             self.current_rewards += rewards
             self.current_shaped_rewards += shaped_rewards
             self.current_lengths += 1
+
             all_done_indices = self.dones.nonzero(as_tuple=False)
             env_done_indices = all_done_indices[::self.num_agents]
 
@@ -772,7 +788,19 @@ class SAPGAgent:
 
         self.scaler.scale(loss).backward()
 
-        if self.truncate_grads:
+        # Unscale before all-reduce so we sync unscaled gradients
+        if self.multi_gpu and self.world_size > 1:
+            self.scaler.unscale_(self.optimizer)
+            all_grads = torch.cat([p.grad.view(-1) for p in self.model.parameters() if p.grad is not None])
+            dist.all_reduce(all_grads, op=dist.ReduceOp.SUM)
+            offset = 0
+            for p in self.model.parameters():
+                if p.grad is not None:
+                    p.grad.data.copy_(all_grads[offset:offset + p.numel()].view_as(p.grad) / self.world_size)
+                    offset += p.numel()
+            if self.truncate_grads:
+                nn.utils.clip_grad_norm_(self.model.parameters(), self.grad_norm)
+        elif self.truncate_grads:
             self.scaler.unscale_(self.optimizer)
             nn.utils.clip_grad_norm_(self.model.parameters(), self.grad_norm)
 
@@ -856,7 +884,18 @@ class SAPGAgent:
             param.grad = None
         self.scaler.scale(loss).backward()
 
-        if self.cv_truncate_grads:
+        if self.multi_gpu and self.world_size > 1:
+            self.scaler.unscale_(self.cv_optimizer)
+            all_grads = torch.cat([p.grad.view(-1) for p in self.central_value_net.parameters() if p.grad is not None])
+            dist.all_reduce(all_grads, op=dist.ReduceOp.SUM)
+            offset = 0
+            for p in self.central_value_net.parameters():
+                if p.grad is not None:
+                    p.grad.data.copy_(all_grads[offset:offset + p.numel()].view_as(p.grad) / self.world_size)
+                    offset += p.numel()
+            if self.cv_truncate_grads:
+                nn.utils.clip_grad_norm_(self.central_value_net.parameters(), self.cv_grad_norm)
+        elif self.cv_truncate_grads:
             self.scaler.unscale_(self.cv_optimizer)
             nn.utils.clip_grad_norm_(self.central_value_net.parameters(), self.cv_grad_norm)
 
@@ -867,6 +906,10 @@ class SAPGAgent:
     # ── LR update ────────────────────────────────────────────────────────
 
     def update_lr(self, lr):
+        if self.multi_gpu and self.world_size > 1:
+            lr_tensor = torch.tensor([lr], device=self.ppo_device)
+            dist.broadcast(lr_tensor, 0)
+            lr = lr_tensor.item()
         for param_group in self.optimizer.param_groups:
             param_group['lr'] = lr
 
@@ -884,7 +927,20 @@ class SAPGAgent:
             orig_batch_dict, ps_extras = self.play_steps()
 
             if self.is_mixed_expl and self.use_others_experience != 'none':
-                batch_dict = self.augment_batch_for_mixed_expl(orig_batch_dict, ps_extras)
+                # Broadcast repeat_idxs from rank 0 so all ranks use same augmentation
+                if self.multi_gpu and self.world_size > 1:
+                    num_blocks = self.num_actors // self.intr_coef_block_size
+                    num_repeat = min(num_blocks, int(self.off_policy_ratio) + 1)
+                    if self.global_rank == 0:
+                        repeat_idxs = [0] + [int(x) for x in np.random.choice(range(1, num_blocks), num_repeat - 1, replace=False)]
+                    else:
+                        repeat_idxs = [0] * num_repeat
+                    repeat_idxs_t = torch.tensor(repeat_idxs, device=self.ppo_device, dtype=torch.long)
+                    dist.broadcast(repeat_idxs_t, 0)
+                    repeat_idxs = repeat_idxs_t.tolist()
+                    batch_dict = self.augment_batch_for_mixed_expl(orig_batch_dict, ps_extras, repeat_idxs=repeat_idxs)
+                else:
+                    batch_dict = self.augment_batch_for_mixed_expl(orig_batch_dict, ps_extras)
             else:
                 batch_dict = orig_batch_dict
             if self.is_mixed_expl:
@@ -935,11 +991,17 @@ class SAPGAgent:
                 self.dataset.update_mu_sigma(cmu, csigma)
                 if self.schedule_type == 'legacy':
                     av_kls = kl
+                    if self.multi_gpu and self.world_size > 1:
+                        dist.all_reduce(av_kls, op=dist.ReduceOp.SUM)
+                        av_kls /= self.world_size
                     if self.is_adaptive_lr:
                         self.last_lr, self.entropy_coef = self._scheduler_update(self.last_lr, self.entropy_coef, av_kls.item())
                     self.update_lr(self.last_lr)
 
             av_kls = torch.mean(torch.stack(ep_kls))
+            if self.multi_gpu and self.world_size > 1:
+                dist.all_reduce(av_kls, op=dist.ReduceOp.SUM)
+                av_kls /= self.world_size
             if self.schedule_type == 'standard':
                 if self.is_adaptive_lr:
                     self.last_lr, self.entropy_coef = self._scheduler_update(self.last_lr, self.entropy_coef, av_kls.item())
@@ -949,10 +1011,16 @@ class SAPGAgent:
             if self.normalize_input:
                 self.model.running_mean_std.eval()
 
+        # ── Flush env-level CUDA profiler timings ──
+        profile_results = self.vec_env.flush_profile()
+
         update_time_end = time.time()
         play_time = play_time_end - play_time_start
         update_time = update_time_end - update_time_start
         total_time = update_time_end - play_time_start
+
+        # Attach profiling results so train() can log them
+        extra_infos['cuda_profile'] = profile_results
 
         return batch_dict['step_time'], play_time, update_time, total_time, a_losses, c_losses, b_losses, entropies, kls, last_lr, lr_mul, extra_infos
 
@@ -968,6 +1036,8 @@ class SAPGAgent:
     # ── Checkpointing ────────────────────────────────────────────────────
 
     def save(self, fn):
+        if self.multi_gpu and self.world_size > 1 and self.global_rank != 0:
+            return  # Only rank 0 saves
         state = self.get_full_state_weights()
         print(f"=> saving checkpoint '{fn}.pth'")
         torch.save({0: state}, fn + '.pth')
@@ -1041,6 +1111,16 @@ class SAPGAgent:
             self.epoch_num += 1
             epoch_num = self.epoch_num
 
+            # Broadcast model params from rank 0 at start of each epoch
+            if self.multi_gpu and self.world_size > 1:
+                model_params = [self.model.state_dict()]
+                dist.broadcast_object_list(model_params, 0)
+                self.model.load_state_dict(model_params[0])
+                if self.has_central_value:
+                    cv_params = [self.central_value_net.state_dict()]
+                    dist.broadcast_object_list(cv_params, 0)
+                    self.central_value_net.load_state_dict(cv_params[0])
+
             step_time, play_time, update_time, sum_time, a_losses, c_losses, b_losses, entropies, kls, last_lr, lr_mul, extra_infos = self.train_epoch()
             self.total_time += sum_time
             total_time = self.total_time
@@ -1049,15 +1129,16 @@ class SAPGAgent:
             self.dataset.update_values_dict(None)
             should_exit = False
 
-            curr_frames = self.curr_frames
+            curr_frames = self.curr_frames * self.world_size if self.multi_gpu else self.curr_frames
             self.frame += curr_frames
 
             scaled_play_time = max(play_time, 1e-9)
             scaled_time = max(play_time + update_time, 1e-9)
             step_time_safe = max(step_time, 1e-9)
 
-            # ── Logging ──
-            if self.writer is not None:
+            # ── Logging (rank 0 only) ──
+            is_rank0 = self.global_rank == 0
+            if self.writer is not None and is_rank0:
                 self.writer.add_scalar('performance/step_inference_rl_update_fps', curr_frames / scaled_time, frame)
                 self.writer.add_scalar('performance/step_inference_fps', curr_frames / scaled_play_time, frame)
                 self.writer.add_scalar('performance/step_fps', curr_frames / step_time_safe, frame)
@@ -1093,13 +1174,30 @@ class SAPGAgent:
                 print(f"  epoch                       : {epoch_str}")
                 print(f"  frames                      : {frame:,.0f}")
 
-            print(f"\nTiming:")
-            print(f"  Play time               : {play_time:.3f} s")
-            print(f"  Update time             : {update_time:.3f} s")
-            print(f"  Time to train epoch     : {sum_time:.3f} s\n")
+            if is_rank0:
+                print(f"\nTiming:")
+                print(f"  Play time               : {play_time:.3f} s")
+                print(f"  Update time             : {update_time:.3f} s")
+                print(f"  Time to train epoch     : {sum_time:.3f} s\n")
 
-            # ── Rewards tracking ──
-            if self.game_rewards.current_size > 0:
+                # ── CUDA profiler breakdown ──
+                cuda_profile = extra_infos.get('cuda_profile', {})
+                if cuda_profile and epoch_num % self._profile_every == 0:
+                    print("CUDA Profiler (ms):")
+                    total_profiled = sum(cuda_profile.values())
+                    for name, ms in sorted(cuda_profile.items(), key=lambda x: -x[1]):
+                        pct = 100.0 * ms / total_profiled if total_profiled > 0 else 0
+                        print(f"  {name:45s}: {ms:9.1f} ms  ({pct:5.1f}%)")
+                    print(f"  {'TOTAL PROFILED':45s}: {total_profiled:9.1f} ms")
+                    print()
+
+                # Log CUDA profile to wandb every epoch
+                if self.writer is not None and cuda_profile:
+                    for name, ms in cuda_profile.items():
+                        self.writer.add_scalar(f'cuda_profile/{name}', ms, frame)
+
+            # ── Rewards tracking (rank 0 only) ──
+            if self.game_rewards.current_size > 0 and is_rank0:
                 mean_rewards = self.game_rewards.get_mean()
                 mean_shaped_rewards = self.game_shaped_rewards.get_mean()
                 mean_lengths = self.game_lengths.get_mean()
@@ -1166,4 +1264,6 @@ class SAPGAgent:
                 should_exit = True
 
             if should_exit:
+                if self.multi_gpu and self.world_size > 1:
+                    dist.destroy_process_group()
                 return self.last_mean_rewards, epoch_num

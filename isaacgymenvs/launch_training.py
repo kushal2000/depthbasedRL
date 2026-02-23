@@ -62,12 +62,31 @@ class LaunchTrainingArgs:
     use_rl: bool = False
     """Use the simple SAPG RL agent (rl/) instead of rl_games."""
 
+    # === Multi-GPU ===
+    num_gpus: int = 1
+    """Number of GPUs for data-parallel training. Uses torchrun when > 1."""
+
+    # === PhysX Tuning ===
+    physx_position_iters: Optional[int] = None
+    """Override PhysX num_position_iterations (default in YAML: 8). Lower = faster sim, less accurate."""
+
+    physx_substeps: Optional[int] = None
+    """Override PhysX substeps (default in YAML: 2). Lower = faster sim, less stable."""
+
+    physx_num_subscenes: Optional[int] = None
+    """Override PhysX num_subscenes (default in YAML: 4). Controls GPU threading of broadphase."""
+
     @property
     def sapg_block_size(self) -> int:
         return self.num_envs // self.num_blocks
 
     def __post_init__(self) -> None:
         assert self.num_envs % self.num_blocks == 0, "num_envs must be divisible by num_blocks"
+        if self.num_gpus > 1:
+            assert self.num_envs % self.num_gpus == 0, "num_envs must be divisible by num_gpus"
+            assert self.num_blocks % self.num_gpus == 0, \
+                f"num_blocks ({self.num_blocks}) must be divisible by num_gpus ({self.num_gpus}) " \
+                f"so expl_coef_block_size divides per-rank env count"
 
 
 def launch_training(args: LaunchTrainingArgs) -> None:
@@ -84,16 +103,27 @@ def launch_training(args: LaunchTrainingArgs) -> None:
 
     wandb_tags_str = "[" + ",".join(args.wandb_tags) + "]"
 
-    cmd_parts = [
-        "python",
-        "-m",
-        "isaacgymenvs.train",
+    if args.num_gpus > 1:
+        cmd_parts = [
+            "torchrun",
+            f"--nproc_per_node={args.num_gpus}",
+            "-m",
+            "isaacgymenvs.train",
+        ]
+    else:
+        cmd_parts = [
+            "python",
+            "-m",
+            "isaacgymenvs.train",
+        ]
+
+    cmd_parts += [
         "++task.env.useSparseReward=False",
         "headless=True",
         f"task.env.numEnvs={args.num_envs}",
         # === Training ===
         "train.params.config.minibatch_size=98304",
-        "multi_gpu=False",
+        f"multi_gpu={'True' if args.num_gpus > 1 else 'False'}",
         "train.params.config.good_reset_boundary=0",
         "task.env.goodResetBoundary=0",
         "train.params.config.use_others_experience=lf",
@@ -122,6 +152,14 @@ def launch_training(args: LaunchTrainingArgs) -> None:
         f"task.env.torqueScale={args.torque_scale}",
         f"task.env.objectAngVelPenaltyScale={args.object_ang_vel_penalty_scale}",
     ]
+
+    # PhysX tuning overrides
+    if args.physx_position_iters is not None:
+        cmd_parts.append(f"sim.physx.num_position_iterations={args.physx_position_iters}")
+    if args.physx_substeps is not None:
+        cmd_parts.append(f"sim.substeps={args.physx_substeps}")
+    if args.physx_num_subscenes is not None:
+        cmd_parts.append(f"sim.physx.num_subscenes={args.physx_num_subscenes}")
 
     if args.checkpoint is not None:
         cmd_parts.append(f"checkpoint={args.checkpoint}")

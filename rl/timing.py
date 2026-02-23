@@ -7,6 +7,7 @@ class CudaTimer:
     """Accumulates GPU timings using CUDA events.
 
     Usage:
+    
         timer = CudaTimer(device)
         timer.start('section_name')
         ... gpu work ...
