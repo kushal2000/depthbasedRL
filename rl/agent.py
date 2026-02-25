@@ -17,6 +17,7 @@ import torch.nn as nn
 from torch import optim
 
 from rl.buffer import ExperienceBuffer, PPODataset
+from rl.debug_logging import DistributedDebugger
 from rl.logging import AverageMeter, EnvInfoObserver
 from rl.network import ActorNetwork, CriticNetwork
 from rl.utils import (
@@ -39,8 +40,6 @@ class SAPGAgent:
         self.writer = writer
         self.config = c = config
 
-        self.ppo_device = c.get('device', 'cuda:0')
-
         # Multi-GPU distributed setup
         self.multi_gpu = c.get('multi_gpu', False)
         self.local_rank = int(os.getenv("LOCAL_RANK", "0"))
@@ -48,7 +47,11 @@ class SAPGAgent:
         self.world_size = int(os.getenv("WORLD_SIZE", "1"))
 
         if self.multi_gpu and self.world_size > 1:
+            self.ppo_device = f'cuda:{self.local_rank}'
+            torch.cuda.set_device(self.local_rank)
             dist.init_process_group("nccl")
+        else:
+            self.ppo_device = c.get('device', 'cuda:0')
 
         self.env_info = vec_env.get_env_info()
         self.num_actors = c['num_actors']
@@ -110,6 +113,7 @@ class SAPGAgent:
         self.schedule_type = c.get('schedule_type', 'legacy')
         if self.is_adaptive_lr:
             self.kl_threshold = c['kl_threshold']
+            self.lr_max_cap = c.get('lr_max_cap', 1e-2)
 
         # SAPG exploration
         self.expl_type = c.get('expl_type', 'none')
@@ -257,6 +261,21 @@ class SAPGAgent:
 
         # Env-level profiling — logs every N epochs
         self._profile_every = c.get('profile_every', 10)
+
+        # ── Debug logging for multi-GPU crash diagnosis ──
+        debug_log_dir = os.path.join(self.experiment_dir, 'debug_logs')
+        self.dbg = DistributedDebugger(
+            rank=self.local_rank,
+            world_size=self.world_size,
+            log_dir=debug_log_dir,
+            memory_interval_s=60,
+        )
+        self.dbg.logger.info(
+            f"Agent config: num_actors={self.num_actors}, horizon={self.horizon_length}, "
+            f"batch_size={self.batch_size}, minibatch_size={self.minibatch_size}, "
+            f"num_minibatches={self.num_minibatches}, multi_gpu={self.multi_gpu}, "
+            f"mixed_precision={self.mixed_precision}"
+        )
 
     # ── Env interaction helpers ──────────────────────────────────────────
 
@@ -788,16 +807,18 @@ class SAPGAgent:
 
         self.scaler.scale(loss).backward()
 
-        # Unscale before all-reduce so we sync unscaled gradients
         if self.multi_gpu and self.world_size > 1:
-            self.scaler.unscale_(self.optimizer)
+            # All-reduce SCALED gradients first so any rank's inf propagates
+            # to all ranks before unscale checks for it.
+            self.dbg.log_grad_stats(self.model, "actor_pre_allreduce")
             all_grads = torch.cat([p.grad.view(-1) for p in self.model.parameters() if p.grad is not None])
-            dist.all_reduce(all_grads, op=dist.ReduceOp.SUM)
+            self.dbg.all_reduce_with_check(all_grads, "actor_gradients")
             offset = 0
             for p in self.model.parameters():
                 if p.grad is not None:
                     p.grad.data.copy_(all_grads[offset:offset + p.numel()].view_as(p.grad) / self.world_size)
                     offset += p.numel()
+            self.scaler.unscale_(self.optimizer)
             if self.truncate_grads:
                 nn.utils.clip_grad_norm_(self.model.parameters(), self.grad_norm)
         elif self.truncate_grads:
@@ -885,14 +906,15 @@ class SAPGAgent:
         self.scaler.scale(loss).backward()
 
         if self.multi_gpu and self.world_size > 1:
-            self.scaler.unscale_(self.cv_optimizer)
+            self.dbg.log_grad_stats(self.central_value_net, "cv_pre_allreduce")
             all_grads = torch.cat([p.grad.view(-1) for p in self.central_value_net.parameters() if p.grad is not None])
-            dist.all_reduce(all_grads, op=dist.ReduceOp.SUM)
+            self.dbg.all_reduce_with_check(all_grads, "cv_gradients")
             offset = 0
             for p in self.central_value_net.parameters():
                 if p.grad is not None:
                     p.grad.data.copy_(all_grads[offset:offset + p.numel()].view_as(p.grad) / self.world_size)
                     offset += p.numel()
+            self.scaler.unscale_(self.cv_optimizer)
             if self.cv_truncate_grads:
                 nn.utils.clip_grad_norm_(self.central_value_net.parameters(), self.cv_grad_norm)
         elif self.cv_truncate_grads:
@@ -908,7 +930,7 @@ class SAPGAgent:
     def update_lr(self, lr):
         if self.multi_gpu and self.world_size > 1:
             lr_tensor = torch.tensor([lr], device=self.ppo_device)
-            dist.broadcast(lr_tensor, 0)
+            self.dbg.broadcast_with_check(lr_tensor, src=0, name="lr_broadcast")
             lr = lr_tensor.item()
         for param_group in self.optimizer.param_groups:
             param_group['lr'] = lr
@@ -922,6 +944,7 @@ class SAPGAgent:
         if self.has_central_value:
             self.central_value_net.eval()
 
+        self.dbg.log_phase("play_steps_start")
         play_time_start = time.time()
         with torch.no_grad():
             orig_batch_dict, ps_extras = self.play_steps()
@@ -936,7 +959,7 @@ class SAPGAgent:
                     else:
                         repeat_idxs = [0] * num_repeat
                     repeat_idxs_t = torch.tensor(repeat_idxs, device=self.ppo_device, dtype=torch.long)
-                    dist.broadcast(repeat_idxs_t, 0)
+                    self.dbg.broadcast_with_check(repeat_idxs_t, src=0, name="repeat_idxs")
                     repeat_idxs = repeat_idxs_t.tolist()
                     batch_dict = self.augment_batch_for_mixed_expl(orig_batch_dict, ps_extras, repeat_idxs=repeat_idxs)
                 else:
@@ -947,6 +970,7 @@ class SAPGAgent:
                 batch_dict = shuffle_batch(batch_dict, self.seq_length)
 
         play_time_end = time.time()
+        self.dbg.log_phase("update_start")
         update_time_start = time.time()
 
         self.model.train()
@@ -992,7 +1016,7 @@ class SAPGAgent:
                 if self.schedule_type == 'legacy':
                     av_kls = kl
                     if self.multi_gpu and self.world_size > 1:
-                        dist.all_reduce(av_kls, op=dist.ReduceOp.SUM)
+                        self.dbg.all_reduce_with_check(av_kls, "kl_legacy")
                         av_kls /= self.world_size
                     if self.is_adaptive_lr:
                         self.last_lr, self.entropy_coef = self._scheduler_update(self.last_lr, self.entropy_coef, av_kls.item())
@@ -1000,7 +1024,7 @@ class SAPGAgent:
 
             av_kls = torch.mean(torch.stack(ep_kls))
             if self.multi_gpu and self.world_size > 1:
-                dist.all_reduce(av_kls, op=dist.ReduceOp.SUM)
+                self.dbg.all_reduce_with_check(av_kls, "kl_standard")
                 av_kls /= self.world_size
             if self.schedule_type == 'standard':
                 if self.is_adaptive_lr:
@@ -1030,7 +1054,7 @@ class SAPGAgent:
         if kl_dist > 2.0 * self.kl_threshold:
             lr = max(lr / 1.5, 1e-6)
         if kl_dist < 0.5 * self.kl_threshold:
-            lr = min(lr * 1.5, 1e-2)
+            lr = min(lr * 1.5, self.lr_max_cap)
         return lr, entropy_coef
 
     # ── Checkpointing ────────────────────────────────────────────────────
@@ -1094,6 +1118,22 @@ class SAPGAgent:
         if self.mixed_precision and 'scaler' in weights:
             self.scaler.load_state_dict(weights['scaler'])
 
+    # ── Multi-GPU helpers ───────────────────────────────────────────────
+
+    def _broadcast_params(self, module, module_name="module"):
+        """Broadcast all parameters and buffers from rank 0."""
+        tensors = [p.data for p in module.parameters()] + [b.data for b in module.buffers()]
+        if not tensors:
+            return
+        # Flatten into one contiguous buffer, broadcast, then copy back
+        flat = torch.cat([t.contiguous().view(-1) for t in tensors])
+        self.dbg.broadcast_with_check(flat, src=0, name=f"broadcast_params_{module_name}")
+        offset = 0
+        for t in tensors:
+            numel = t.numel()
+            t.copy_(flat[offset:offset + numel].view_as(t))
+            offset += numel
+
     # ── Main training loop ───────────────────────────────────────────────
 
     def train(self):
@@ -1106,20 +1146,25 @@ class SAPGAgent:
 
         self.curr_frames = self.batch_size_envs
         total_time = 0
+        try:
+            import wandb
+            wandb_run = wandb.run
+        except ImportError:
+            wandb_run = None
 
         while True:
             self.epoch_num += 1
             epoch_num = self.epoch_num
 
+            epoch_wallclock_start = time.time()
+
+            self.dbg.log_epoch_start(epoch_num)
+
             # Broadcast model params from rank 0 at start of each epoch
             if self.multi_gpu and self.world_size > 1:
-                model_params = [self.model.state_dict()]
-                dist.broadcast_object_list(model_params, 0)
-                self.model.load_state_dict(model_params[0])
+                self._broadcast_params(self.model, "actor")
                 if self.has_central_value:
-                    cv_params = [self.central_value_net.state_dict()]
-                    dist.broadcast_object_list(cv_params, 0)
-                    self.central_value_net.load_state_dict(cv_params[0])
+                    self._broadcast_params(self.central_value_net, "critic")
 
             step_time, play_time, update_time, sum_time, a_losses, c_losses, b_losses, entropies, kls, last_lr, lr_mul, extra_infos = self.train_epoch()
             self.total_time += sum_time
@@ -1132,6 +1177,9 @@ class SAPGAgent:
             curr_frames = self.curr_frames * self.world_size if self.multi_gpu else self.curr_frames
             self.frame += curr_frames
 
+            self.dbg.log_epoch_end(epoch_num)
+
+            epoch_wallclock = max(time.time() - epoch_wallclock_start, 1e-9)
             scaled_play_time = max(play_time, 1e-9)
             scaled_time = max(play_time + update_time, 1e-9)
             step_time_safe = max(step_time, 1e-9)
@@ -1139,12 +1187,19 @@ class SAPGAgent:
             # ── Logging (rank 0 only) ──
             is_rank0 = self.global_rank == 0
             if self.writer is not None and is_rank0:
+                self.writer.add_scalar('performance/wallclock_fps', curr_frames / epoch_wallclock, frame)
+                self.writer.add_scalar('performance/epoch_wallclock_time', epoch_wallclock, frame)
                 self.writer.add_scalar('performance/step_inference_rl_update_fps', curr_frames / scaled_time, frame)
                 self.writer.add_scalar('performance/step_inference_fps', curr_frames / scaled_play_time, frame)
                 self.writer.add_scalar('performance/step_fps', curr_frames / step_time_safe, frame)
                 self.writer.add_scalar('performance/rl_update_time', update_time, frame)
                 self.writer.add_scalar('performance/step_inference_time', play_time, frame)
                 self.writer.add_scalar('performance/step_time', step_time, frame)
+                elapsed_min = total_time / 60.0
+                self.writer.add_scalar('performance/frames_vs_minutes', self.frame, int(elapsed_min))
+                if wandb_run:
+                    wandb_run.log({'performance/elapsed_minutes': elapsed_min,
+                                   'performance/frames_vs_minutes': self.frame}, commit=False)
 
                 a_loss_mean = torch.mean(torch.stack(a_losses)).item() if a_losses else 0
                 c_loss_mean = torch.mean(torch.stack(c_losses)).item() if c_losses else 0
@@ -1165,8 +1220,10 @@ class SAPGAgent:
 
             # ── Statistics ──
             if self.print_stats:
+                fps_wallclock = curr_frames / epoch_wallclock
                 fps_step = curr_frames / step_time_safe
                 print(f"\nStatistics:")
+                print(f"  fps wallclock               : {fps_wallclock:,.0f}")
                 print(f"  fps step                    : {fps_step:,.0f}")
                 epoch_str = f"{epoch_num:,.0f}"
                 if self.max_epochs != -1:
@@ -1176,9 +1233,10 @@ class SAPGAgent:
 
             if is_rank0:
                 print(f"\nTiming:")
+                print(f"  Epoch wallclock         : {epoch_wallclock:.3f} s")
                 print(f"  Play time               : {play_time:.3f} s")
                 print(f"  Update time             : {update_time:.3f} s")
-                print(f"  Time to train epoch     : {sum_time:.3f} s\n")
+                print(f"  Overhead                : {epoch_wallclock - play_time - update_time:.3f} s\n")
 
                 # ── CUDA profiler breakdown ──
                 cuda_profile = extra_infos.get('cuda_profile', {})

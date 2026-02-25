@@ -171,7 +171,7 @@ env:
   useActionDelay: True
   actionDelayMax: 3
 
-  useObjectStateDelayNoise: True
+  useObjectStateDelayNoise: False
   objectStateDelayMax: 10
   objectStateXyzNoiseStd: 0.01
   objectStateRotationNoiseDegrees: 5.0

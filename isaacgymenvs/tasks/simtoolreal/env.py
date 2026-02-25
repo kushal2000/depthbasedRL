@@ -4869,6 +4869,14 @@ class SimToolReal(VecTask):
         if not self.cfg["env"]["capture_video"]:
             return
 
+        # Skip video capture on non-rank-0 GPUs in multi-GPU mode.
+        # IsaacGym's render_all_camera_sensors / get_camera_image segfaults
+        # on non-primary graphics devices (the graphics context is tied to
+        # the device that created the viewer / primary OpenGL context).
+        local_rank = int(os.environ.get("LOCAL_RANK", "0"))
+        if local_rank != 0:
+            return
+
         # If enableCameraSensors is False, we can't capture video
         assert self.cfg["env"]["enableCameraSensors"], (
             "capture_video is only supported if enableCameraSensors is True"
