@@ -1147,7 +1147,12 @@ class SAPGAgent:
         if not SKIP:
             for key in ['rnn_states', 'dones', 'obs', 'current_rewards', 'current_shaped_rewards', 'current_lengths']:
                 if key in weights:
-                    setattr(self, key, weights[key])
+                    val = weights[key]
+                    if isinstance(val, torch.Tensor):
+                        val = val.to(self.ppo_device)
+                    elif isinstance(val, list):
+                        val = [v.to(self.ppo_device) if isinstance(v, torch.Tensor) else v for v in val]
+                    setattr(self, key, val)
         else:
             print("Skipping loading of runtime state (shape mismatch)")
 
