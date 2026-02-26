@@ -69,7 +69,8 @@ class PPODataset:
 
 
 class ExperienceBuffer:
-    def __init__(self, env_info, num_actors, horizon_length, has_central_value, device, extra_obs_dim=None):
+    def __init__(self, env_info, num_actors, horizon_length, has_central_value, device,
+                 extra_obs_dim=None, depth_image_shape=None):
         self.device = device
         self.num_actors = num_actors
         self.horizon_length = horizon_length
@@ -106,6 +107,9 @@ class ExperienceBuffer:
         self.tensor_dict['actions'] = _make((actions_num,))
         self.tensor_dict['mus'] = _make((actions_num,))
         self.tensor_dict['sigmas'] = _make((actions_num,))
+
+        if depth_image_shape is not None:
+            self.tensor_dict['depth_images'] = _make(depth_image_shape)
 
     def update_data(self, name, index, val):
         self.tensor_dict[name][index, :] = val

@@ -192,6 +192,22 @@ env:
   objectFriction: 0.5
   tableFriction: 0.5
 
+  depthCamera:
+    enabled: False
+    width: 64
+    height: 64
+    horizontalFov: 70.0
+    nearPlane: 0.01
+    farPlane: 1.5
+    mountLink: "iiwa14_link_6"
+    localPos: [0.0, 0.04, 0.0]
+    localRot: [0.0, 0.0, 0.0, 1.0]  # quat xyzw
+    encoderType: "scratch_cnn"    # one of: resnet18, dinov2, scratch_cnn
+    featureDim: 512               # output dim of encoder (projection added if backbone dim differs)
+    freezeEncoder: False          # freeze backbone weights initially (projection still trainable); no-op for scratch_cnn
+    unfreezeAfterEpochs: -1       # unfreeze backbone after N epochs for fine-tuning (-1 = never)
+    encoderLearningRate: 1.0e-5   # LR for encoder backbone params when unfrozen
+
   asset:
     robot: "urdf/kuka_sharpa_description/iiwa14_left_sharpa_adjusted_restricted.urdf"
 

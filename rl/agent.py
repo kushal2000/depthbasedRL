@@ -169,6 +169,16 @@ class SAPGAgent:
         self.nn_dir = os.path.join(self.experiment_dir, 'nn')
         os.makedirs(self.nn_dir, exist_ok=True)
 
+        # ── Depth camera config ─────────────────────────────────────────
+        self.use_depth = c.get('use_depth_camera', False)
+        self.depth_encoder_type = c.get('depth_encoder_type', 'scratch_cnn')
+        self.depth_feature_dim = c.get('depth_feature_dim', 512)
+        self.freeze_depth_encoder = c.get('freeze_depth_encoder', True)
+        self.unfreeze_depth_after_epochs = c.get('unfreeze_depth_after_epochs', -1)
+        self.depth_encoder_lr = float(c.get('depth_encoder_lr', 1e-5))
+        self.depth_image_height = c.get('depth_image_height', 64)
+        self.depth_image_width = c.get('depth_image_width', 64)
+
         # ── Build networks ──────────────────────────────────────────────
 
         extra_obs_dim = self.intr_reward_coef_embd.shape[-1] if self.intr_reward_coef_embd is not None else None
@@ -188,6 +198,10 @@ class SAPGAgent:
             rnn_units=1024,
             rnn_layers=1,
             mlp_units=(1024, 1024, 512, 512),
+            use_depth=self.use_depth,
+            depth_encoder_type=self.depth_encoder_type,
+            depth_feature_dim=self.depth_feature_dim,
+            freeze_depth_encoder=self.freeze_depth_encoder,
         ).to(self.ppo_device)
 
         self.is_rnn = True  # Always LSTM for this config
@@ -215,7 +229,17 @@ class SAPGAgent:
 
         # ── Optimizers ──────────────────────────────────────────────────
 
-        self.optimizer = optim.Adam(self.model.parameters(), float(self.last_lr), eps=1e-08, weight_decay=self.weight_decay)
+        if self.use_depth and self.model.depth_encoder is not None:
+            backbone_param_ids = {id(p) for p in self.model.depth_encoder.backbone.parameters()}
+            other_params = [p for p in self.model.parameters() if id(p) not in backbone_param_ids]
+            backbone_params = list(self.model.depth_encoder.backbone.parameters())
+            backbone_lr = 0.0 if self.freeze_depth_encoder else self.depth_encoder_lr
+            self.optimizer = optim.Adam([
+                {'params': other_params, 'lr': float(self.last_lr)},
+                {'params': backbone_params, 'lr': backbone_lr},
+            ], eps=1e-08, weight_decay=self.weight_decay)
+        else:
+            self.optimizer = optim.Adam(self.model.parameters(), float(self.last_lr), eps=1e-08, weight_decay=self.weight_decay)
 
         if self.has_central_value:
             cv_config = c.get('central_value_config', {})
@@ -324,6 +348,7 @@ class SAPGAgent:
     def init_tensors(self):
         batch_size = self.num_agents * self.num_actors
         extra_obs_dim = self.intr_reward_coef_embd.shape[-1] if self.intr_reward_coef_embd is not None else None
+        depth_image_shape = (1, self.depth_image_height, self.depth_image_width) if self.use_depth else None
         self.experience_buffer = ExperienceBuffer(
             self.env_info,
             num_actors=self.num_actors,
@@ -331,6 +356,7 @@ class SAPGAgent:
             has_central_value=self.has_central_value,
             device=self.ppo_device,
             extra_obs_dim=extra_obs_dim,
+            depth_image_shape=depth_image_shape,
         )
 
         self._zero_intr_rewards = torch.zeros(
@@ -355,6 +381,8 @@ class SAPGAgent:
         ]
 
         self.tensor_list = ['actions', 'neglogpacs', 'values', 'mus', 'sigmas', 'obses', 'states', 'dones']
+        if self.use_depth:
+            self.tensor_list.append('depth_images')
 
         self.dataset = PPODataset(self.batch_size, self.minibatch_size, self.is_rnn, self.ppo_device, self.seq_length)
 
@@ -373,6 +401,8 @@ class SAPGAgent:
             'raw_obs': processed_obs,
             'rnn_states': rnn_states,
         }
+        if self.use_depth and 'depth' in obs:
+            input_dict['depth_images'] = obs['depth']
         with torch.no_grad():
             mu, logstd, value, states = self.model(input_dict)
             sigma = torch.exp(logstd)
@@ -466,6 +496,8 @@ class SAPGAgent:
                 self.experience_buffer.update_data(k, n, res_dict[k])
             if self.has_central_value:
                 self.experience_buffer.update_data('states', n, self.obs['states'])
+            if self.use_depth and 'depth' in self.obs:
+                self.experience_buffer.update_data('depth_images', n, self.obs['depth'])
 
             step_time_start = time.time()
             self.obs, rewards, intr_rewards, self.dones, infos = self.env_step(res_dict['actions'])
@@ -715,6 +747,8 @@ class SAPGAgent:
             'sigma': sigmas,
             'off_policy_mask': batch_dict.get('off_policy_mask', None),
         }
+        if self.use_depth and 'depth_images' in batch_dict:
+            dataset_dict['depth_images'] = batch_dict['depth_images']
         self.dataset.update_values_dict(dataset_dict)
 
         if self.has_central_value:
@@ -753,6 +787,8 @@ class SAPGAgent:
             'seq_length': self.seq_length,
             'dones': input_dict.get('dones'),
         }
+        if self.use_depth and 'depth_images' in input_dict:
+            batch_dict['depth_images'] = input_dict['depth_images']
 
         with torch.cuda.amp.autocast(enabled=self.mixed_precision):
             mu, logstd, value, states = self.model(batch_dict)
@@ -932,8 +968,8 @@ class SAPGAgent:
             lr_tensor = torch.tensor([lr], device=self.ppo_device)
             self.dbg.broadcast_with_check(lr_tensor, src=0, name="lr_broadcast")
             lr = lr_tensor.item()
-        for param_group in self.optimizer.param_groups:
-            param_group['lr'] = lr
+        # Only update the main param group (group 0); depth backbone LR (group 1) is separate
+        self.optimizer.param_groups[0]['lr'] = lr
 
     # ── Train epoch ──────────────────────────────────────────────────────
 
@@ -1159,6 +1195,16 @@ class SAPGAgent:
             epoch_wallclock_start = time.time()
 
             self.dbg.log_epoch_start(epoch_num)
+
+            # ── Depth encoder unfreeze scheduler ──
+            if (self.use_depth and self.freeze_depth_encoder
+                    and self.unfreeze_depth_after_epochs > 0
+                    and epoch_num >= self.unfreeze_depth_after_epochs):
+                for p in self.model.depth_encoder.backbone.parameters():
+                    p.requires_grad = True
+                self.optimizer.param_groups[1]['lr'] = self.depth_encoder_lr
+                self.freeze_depth_encoder = False
+                print(f"[Epoch {epoch_num}] Unfreezing depth encoder backbone, lr={self.depth_encoder_lr}")
 
             # Broadcast model params from rank 0 at start of each epoch
             if self.multi_gpu and self.world_size > 1:

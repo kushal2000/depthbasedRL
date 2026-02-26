@@ -90,6 +90,15 @@ params:
     expl_reward_type: rnd
     expl_coef_block_size: 4096
 
+    use_depth_camera: ${....task.env.depthCamera.enabled}
+    depth_encoder_type: ${....task.env.depthCamera.encoderType}
+    depth_feature_dim: ${....task.env.depthCamera.featureDim}
+    freeze_depth_encoder: ${....task.env.depthCamera.freezeEncoder}
+    unfreeze_depth_after_epochs: ${....task.env.depthCamera.unfreezeAfterEpochs}
+    depth_encoder_lr: ${....task.env.depthCamera.encoderLearningRate}
+    depth_image_height: ${....task.env.depthCamera.height}
+    depth_image_width: ${....task.env.depthCamera.width}
+
     player:
       #render: True
       deterministic: False  # be careful there's a typo in older versions of rl_games in this parameter name ("determenistic")

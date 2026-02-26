@@ -98,6 +98,19 @@ class SimToolReal(VecTask):
     ):
         self.cfg = cfg
 
+        # ── Depth camera config ──
+        depth_cam_cfg = cfg["env"].get("depthCamera", {})
+        self.use_depth_camera = depth_cam_cfg.get("enabled", False)
+        self.depth_width = depth_cam_cfg.get("width", 64)
+        self.depth_height = depth_cam_cfg.get("height", 64)
+        self.depth_hfov = depth_cam_cfg.get("horizontalFov", 70.0)
+        self.depth_near = depth_cam_cfg.get("nearPlane", 0.01)
+        self.depth_far = depth_cam_cfg.get("farPlane", 1.5)
+        self.depth_mount_link = depth_cam_cfg.get("mountLink", "iiwa14_link_6")
+        self.depth_local_pos = depth_cam_cfg.get("localPos", [0.0, 0.04, 0.0])
+        self.depth_local_rot = depth_cam_cfg.get("localRot", [0.0, 0.0, 0.0, 1.0])
+        self.depth_camera_handles = []
+
         # Goal related variables
         self.goal_object_indices = []
         self.goal_assets = []
@@ -461,6 +474,10 @@ class SimToolReal(VecTask):
         self.gym.refresh_actor_root_state_tensor(self.sim)
         self.gym.refresh_dof_state_tensor(self.sim)
         self.gym.refresh_rigid_body_state_tensor(self.sim)
+
+        # ── Depth camera GPU tensors ──
+        if self.use_depth_camera:
+            self._init_depth_gpu_tensors()
 
         # create some wrapper tensors for different slices
         self.dof_state = gymtorch.wrap_tensor(dof_state_tensor)
@@ -2020,6 +2037,31 @@ class SimToolReal(VecTask):
 
             if self.with_dof_force_sensors:
                 self.gym.enable_actor_dof_force_sensors(env_ptr, robot_actor)
+
+            # ── Wrist depth camera ──
+            if self.use_depth_camera:
+                cam_props = gymapi.CameraProperties()
+                cam_props.width = self.depth_width
+                cam_props.height = self.depth_height
+                cam_props.horizontal_fov = self.depth_hfov
+                cam_props.near_plane = self.depth_near
+                cam_props.far_plane = self.depth_far
+                cam_props.enable_tensors = True
+
+                cam_handle = self.gym.create_camera_sensor(env_ptr, cam_props)
+                body_handle = self.gym.find_actor_rigid_body_handle(
+                    env_ptr, robot_actor, self.depth_mount_link,
+                )
+
+                local_transform = gymapi.Transform()
+                local_transform.p = gymapi.Vec3(*self.depth_local_pos)
+                local_transform.r = gymapi.Quat(*self.depth_local_rot)
+
+                self.gym.attach_camera_to_body(
+                    cam_handle, env_ptr, body_handle,
+                    local_transform, gymapi.FOLLOW_TRANSFORM,
+                )
+                self.depth_camera_handles.append(cam_handle)
 
             if self.VISUALIZE_PD_TARGET_AS_BLUE_ROBOT:
                 blue_robot_actor = self.gym.create_actor(
@@ -4488,6 +4530,8 @@ class SimToolReal(VecTask):
         self._update_tyler_curriculum()
 
         self.populate_sim_buffers()
+        if self.use_depth_camera:
+            self._render_depth_cameras()
         rewards, is_success = self.compute_kuka_reward()
         self.populate_obs_and_states_buffers()
 
@@ -4827,6 +4871,112 @@ class SimToolReal(VecTask):
         self.extras["minutes_elapsed_since_last_update"] = (
             minutes_elapsed_since_last_update
         )
+
+    # ── Wrist depth camera helpers ────────────────────────────────────────
+
+    def _init_depth_gpu_tensors(self):
+        """Wrap per-env depth camera GPU tensors and allocate depth_buf."""
+        self.depth_tensors = []
+        for i in range(self.num_envs):
+            cam_tensor = self.gym.get_camera_image_gpu_tensor(
+                self.sim, self.envs[i],
+                self.depth_camera_handles[i], gymapi.IMAGE_DEPTH,
+            )
+            torch_tensor = gymtorch.wrap_tensor(cam_tensor)  # (H, W)
+            self.depth_tensors.append(torch_tensor)
+
+        # Determine if camera tensors live on a different device (multi-GPU
+        # with graphics_device_id=0 for all ranks).  If so, we use a staging
+        # buffer on the graphics device and do a single cross-device copy.
+        graphics_device = f'cuda:{self.graphics_device_id}' if self.graphics_device_id >= 0 else self.device
+        self._depth_cross_device = (graphics_device != self.device)
+
+        if self._depth_cross_device:
+            self._depth_staging = torch.zeros(
+                self.num_envs, 1, self.depth_height, self.depth_width,
+                device=graphics_device,
+            )
+
+        self.depth_buf = torch.zeros(
+            self.num_envs, 1, self.depth_height, self.depth_width,
+            device=self.device,
+        )
+        # Depth GIF capture state
+        self.depth_gif_frames: list = []
+        self.depth_gif_freq = self.cfg["env"].get("capture_video_freq", 6000)
+        self.depth_gif_len = self.cfg["env"].get("capture_video_len", 600)
+        self.depth_gif_recording = False
+        print(f"[DepthCamera] Initialized {self.num_envs} depth cameras "
+              f"({self.depth_width}x{self.depth_height}), "
+              f"depth_buf: {self.depth_buf.shape}, "
+              f"cross_device={self._depth_cross_device}")
+
+    def _render_depth_cameras(self):
+        """Render all depth cameras and fill self.depth_buf with normalised depth."""
+        self.gym.step_graphics(self.sim)
+        self.gym.render_all_camera_sensors(self.sim)
+        self.gym.start_access_image_tensors(self.sim)
+        if self._depth_cross_device:
+            # Camera tensors live on the graphics device (cuda:0).
+            # Gather into a contiguous staging buffer, then do one cross-device copy.
+            for i in range(self.num_envs):
+                self._depth_staging[i, 0] = -self.depth_tensors[i]
+            self.depth_buf.copy_(self._depth_staging)
+        else:
+            for i in range(self.num_envs):
+                self.depth_buf[i, 0] = -self.depth_tensors[i]  # IsaacGym returns negative depths
+        self.gym.end_access_image_tensors(self.sim)
+        self.depth_buf.clamp_(0.0, self.depth_far)
+        self.depth_buf /= self.depth_far  # normalise to [0, 1]
+
+        # ── Depth GIF capture ──
+        self._capture_depth_gif_if_needed()
+
+    def _capture_depth_gif_if_needed(self):
+        """Accumulate depth frames from env 0 and save a GIF periodically."""
+        local_rank = int(os.environ.get("LOCAL_RANK", "0"))
+        if local_rank != 0:
+            return
+
+        # Start recording at the same frequency as video capture
+        if not self.depth_gif_recording and self.control_steps % self.depth_gif_freq == 0:
+            self.depth_gif_recording = True
+            self.depth_gif_frames = []
+
+        if self.depth_gif_recording:
+            # Grab env 0's depth as a numpy uint8 image
+            frame = (self.depth_buf[self.index_to_view, 0].cpu().numpy() * 255).astype(np.uint8)
+            self.depth_gif_frames.append(frame)
+
+            if len(self.depth_gif_frames) >= self.depth_gif_len:
+                self._save_depth_gif()
+                self.depth_gif_recording = False
+                self.depth_gif_frames = []
+
+    def _save_depth_gif(self):
+        """Save accumulated depth frames as a GIF (and log to wandb if available)."""
+        if not self.depth_gif_frames:
+            return
+        try:
+            import imageio.v2 as imageio
+        except ImportError:
+            print("[DepthCamera] imageio not available, skipping GIF save")
+            return
+
+        gif_dir = os.path.join(os.getcwd(), "depth_gifs")
+        os.makedirs(gif_dir, exist_ok=True)
+        gif_path = os.path.join(gif_dir, f"depth_step{self.control_steps}.gif")
+
+        imageio.mimsave(gif_path, self.depth_gif_frames, duration=1.0/30, loop=0)
+        print(f"[DepthCamera] Saved depth GIF ({len(self.depth_gif_frames)} frames) → {gif_path}")
+
+        # Also log to wandb if active
+        try:
+            import wandb
+            if wandb.run is not None:
+                wandb.log({"depth_gif": wandb.Video(gif_path, fps=30, format="gif")}, step=self.control_steps)
+        except Exception:
+            pass
 
     def _initialize_camera_sensor(self, cam_pos, cam_target) -> None:
         self.camera_properties = gymapi.CameraProperties()

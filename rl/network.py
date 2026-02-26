@@ -8,6 +8,8 @@ import numpy as np
 import torch
 import torch.nn as nn
 
+from rl.depth_encoders import build_depth_encoder
+
 
 # ---------------------------------------------------------------------------
 # RunningMeanStd — Welford online normalization
@@ -117,10 +119,13 @@ class ActorNetwork(nn.Module):
     def __init__(self, obs_dim, action_dim, num_actors,
                  coef_ids, coef_id_idx, param_size=32,
                  rnn_units=1024, rnn_layers=1,
-                 mlp_units=(1024, 1024, 512, 512)):
+                 mlp_units=(1024, 1024, 512, 512),
+                 use_depth=False, depth_encoder_type='resnet18',
+                 depth_feature_dim=512, freeze_depth_encoder=True):
         super().__init__()
 
         self.coef_id_idx = coef_id_idx
+        self.use_depth = use_depth
         self.register_buffer("coef_ids", coef_ids)
 
         # Learned embedding that replaces the scalar coef_id in obs
@@ -129,8 +134,16 @@ class ActorNetwork(nn.Module):
             requires_grad=True,
         )
 
-        # Input to LSTM = obs[:coef_id_idx] + embedding (param_size) dims
-        lstm_input_dim = coef_id_idx + param_size
+        # Optional depth encoder
+        if use_depth:
+            self.depth_encoder = build_depth_encoder(
+                depth_encoder_type, depth_feature_dim, freeze_depth_encoder,
+            )
+        else:
+            self.depth_encoder = None
+
+        # Input to LSTM = obs[:coef_id_idx] + embedding (param_size) dims + optional depth features
+        lstm_input_dim = coef_id_idx + param_size + (depth_feature_dim if use_depth else 0)
 
         # Observation normalizer (normalizes only first coef_id_idx dims)
         self.running_mean_std = RunningMeanStd(coef_id_idx)
@@ -206,6 +219,11 @@ class ActorNetwork(nn.Module):
 
         # Normalize obs
         obs = self.norm_obs(obs)
+
+        # Concatenate depth features if available
+        if self.use_depth and input_dict.get('depth_images') is not None:
+            depth_features = self.depth_encoder(input_dict['depth_images'])
+            obs = torch.cat([obs, depth_features], dim=1)
 
         # RNN (before MLP)
         batch_size = obs.size(0)

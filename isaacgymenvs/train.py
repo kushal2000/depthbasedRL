@@ -186,7 +186,12 @@ def launch_rlg_hydra(cfg: DictConfig, vec_env=None):
                 # Assign each rank to its own GPU
                 cfg.sim_device = f'cuda:{local_rank}'
                 cfg.rl_device = f'cuda:{local_rank}'
-                cfg.graphics_device_id = local_rank
+                # IsaacGym GPU camera tensors (enable_tensors=True) only work on
+                # the primary graphics device (cuda:0).  When depth cameras are
+                # enabled we force all ranks to render on GPU 0 and do a single
+                # cross-device copy per step.
+                depth_enabled = cfg.task.env.get('depthCamera', {}).get('enabled', False)
+                cfg.graphics_device_id = 0 if depth_enabled else local_rank
                 # Scale minibatch sizes so each rank processes more, smaller
                 # minibatches.  After all-reduce the effective minibatch size
                 # matches single-GPU exactly.

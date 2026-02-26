@@ -70,6 +70,8 @@ class IsaacVecEnv:
         obs_dict['obs'] = torch.clamp(self.env.obs_buf, -self.env.clip_obs, self.env.clip_obs).to(self.env.rl_device)
         if self.env.num_states > 0:
             obs_dict['states'] = self.env.get_state()
+        if getattr(self.env, 'use_depth_camera', False):
+            obs_dict['depth'] = self.env.depth_buf.to(self.env.rl_device)
         t.stop('step/bookkeeping')
 
         return (
@@ -80,7 +82,11 @@ class IsaacVecEnv:
         )
 
     def reset(self):
-        return self.env.reset()
+        obs_dict = self.env.reset()
+        if getattr(self.env, 'use_depth_camera', False):
+            self.env._render_depth_cameras()
+            obs_dict['depth'] = self.env.depth_buf.to(self.env.rl_device)
+        return obs_dict
 
     def reset_done(self):
         return self.env.reset_done()

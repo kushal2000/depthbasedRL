@@ -1,0 +1,4 @@
+num_envs,depth,step_fps,wallclock_fps,play_time_s,update_time_s,epoch_time_s,total_min
+2048,False,60517,16592,0.673,0.840,1.995,N/A
+2048,True,2413,1893,14.382,2.015,17.362,N/A
+4096,False,104455,27528,0.790,1.145,2.434,N/A
