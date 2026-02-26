@@ -1,9 +1,11 @@
 """Self-contained vec-env wrapper for the rl/ agent — no rl_games dependency.
 
-Wraps the IsaacGym VecTask and provides env-level CUDA profiling of
-the step() call to identify simulation bottlenecks.
+Wraps the IsaacGym VecTask (or Isaac Lab DirectRLEnv) and provides
+env-level CUDA profiling of the step() call to identify simulation
+bottlenecks.
 """
 
+import gymnasium.spaces as spaces
 import torch
 
 from rl.timing import CudaTimer
@@ -123,4 +125,99 @@ class IsaacVecEnv:
 
         Call once per epoch from the agent's train loop.
         """
+        return self.timer.flush()
+
+
+class IsaacLabVecEnv:
+    """Thin wrapper around Isaac Lab DirectRLEnv for the custom RL pipeline.
+
+    Makes Isaac Lab envs drop-in compatible with SAPGAgent, which expects
+    the same interface as IsaacVecEnv (obs_dict with 'obs', 'states', 'depth').
+    """
+
+    def __init__(self, env):
+        self.env = env
+        # gymnasium.make() wraps in OrderEnforcing — get device from unwrapped
+        unwrapped = env.unwrapped if hasattr(env, 'unwrapped') else env
+        self.device = unwrapped.device
+        self.timer = CudaTimer(self.device, enabled=True)
+
+        # Match the interface expected by SAPGAgent
+        cfg = unwrapped.cfg
+        self.num_envs = unwrapped.num_envs
+        self.num_actions = cfg.action_space
+        self.num_obs = cfg.observation_space
+        self.num_states = cfg.state_space
+
+        self.observation_space = spaces.Box(-float('inf'), float('inf'), (self.num_obs,))
+        self.state_space = spaces.Box(-float('inf'), float('inf'), (self.num_states,))
+        self.action_space = spaces.Box(-1.0, 1.0, (self.num_actions,))
+        self.clip_actions = 1.0
+
+    # ── Core API (matches IsaacVecEnv / RLGPUEnv interface) ──────────
+
+    def step(self, actions):
+        t = self.timer
+
+        t.start('step/env_step')
+        obs_dict, reward, terminated, truncated, info = self.env.step(actions)
+        t.stop('step/env_step')
+
+        t.start('step/bookkeeping')
+        done = terminated | truncated
+        info['time_outs'] = truncated.to(self.device)
+
+        result = {
+            'obs': obs_dict['policy'].to(self.device),
+        }
+        if 'critic' in obs_dict:
+            result['states'] = obs_dict['critic'].to(self.device)
+        if 'depth' in obs_dict:
+            result['depth'] = obs_dict['depth'].to(self.device)
+        t.stop('step/bookkeeping')
+
+        return (
+            result,
+            reward.to(self.device),
+            done.to(self.device),
+            info,
+        )
+
+    def reset(self):
+        obs_dict, info = self.env.reset()
+        result = {
+            'obs': obs_dict['policy'].to(self.device),
+        }
+        if 'critic' in obs_dict:
+            result['states'] = obs_dict['critic'].to(self.device)
+        if 'depth' in obs_dict:
+            result['depth'] = obs_dict['depth'].to(self.device)
+        return result
+
+    def reset_done(self):
+        return self.reset()
+
+    def get_number_of_agents(self):
+        return 1
+
+    def get_env_info(self):
+        info = {
+            'action_space': self.action_space,
+            'observation_space': self.observation_space,
+        }
+        if self.num_states > 0:
+            info['state_space'] = self.state_space
+        return info
+
+    def set_train_info(self, env_frames, *args, **kwargs):
+        pass
+
+    def get_env_state(self):
+        return None
+
+    def set_env_state(self, env_state):
+        pass
+
+    def flush_profile(self) -> dict:
+        """Synchronize GPU and return accumulated env-step timings (ms)."""
         return self.timer.flush()

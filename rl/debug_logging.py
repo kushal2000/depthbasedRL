@@ -261,11 +261,13 @@ class DistributedDebugger:
         """All-reduce with health checking and timing."""
         self._dist_op_count += 1
 
-        # Pre-check
+        # Pre-check: zero out NaN/Inf so all ranks still participate in the
+        # all_reduce (keeping NCCL in sync).  The zeroed gradients effectively
+        # skip this rank's contribution for the bad minibatch.
         healthy = check_tensor_health(tensor, f"{name}_pre_allreduce", self.logger)
         if not healthy:
-            self.logger.error(f"ABORTING all_reduce for '{name}' — input has NaN/Inf!")
-            # Don't abort, but log emphatically — the SIGSEGV might follow
+            self.logger.error(f"NaN/Inf in '{name}' pre-allreduce — zeroing tensor to keep NCCL in sync")
+            tensor.zero_()
 
         self.logger.debug(
             f"[DIST] all_reduce '{name}': shape={tuple(tensor.shape)}, "

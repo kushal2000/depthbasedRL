@@ -87,8 +87,7 @@ class SAPGAgent:
         self.batch_size_envs = self.horizon_length * self.num_actors
         self.num_minibatches = self.batch_size // self.minibatch_size
         self.value_bootstrap = c.get('value_bootstrap', None)
-        self.mixed_precision = c.get('mixed_precision', False)
-        self.scaler = torch.cuda.amp.GradScaler(enabled=self.mixed_precision and self.ppo_device != 'cpu')
+        self.mixed_precision = False  # disabled — fp16 caused Inf gradients & NCCL crashes
         self.weight_decay = c.get('weight_decay', 0.0)
         self.last_lr = float(c['learning_rate'])
         self.max_epochs = c.get('max_epochs', -1)
@@ -328,7 +327,7 @@ class SAPGAgent:
     def env_step(self, actions):
         clamped = torch.clamp(actions, -1.0, 1.0)
         rescaled = rescale_actions(self.actions_low, self.actions_high, clamped)
-        obs, rewards, dones, infos = self.vec_env.step(rescaled.to(self.vec_env.env.device))
+        obs, rewards, dones, infos = self.vec_env.step(rescaled.to(self.vec_env.device))
         obs = self._obs_to_tensors(obs)
         if self.value_size == 1:
             rewards = rewards.unsqueeze(1)
@@ -790,62 +789,59 @@ class SAPGAgent:
         if self.use_depth and 'depth_images' in input_dict:
             batch_dict['depth_images'] = input_dict['depth_images']
 
-        with torch.cuda.amp.autocast(enabled=self.mixed_precision):
-            mu, logstd, value, states = self.model(batch_dict)
-            sigma = torch.exp(logstd)
-            entropy = torch.distributions.Normal(mu, sigma, validate_args=False).entropy().sum(dim=-1)
-            action_log_probs = ActorNetwork.neglogp(actions_batch, mu, sigma, logstd)
+        mu, logstd, value, states = self.model(batch_dict)
+        sigma = torch.exp(logstd)
+        entropy = torch.distributions.Normal(mu, sigma, validate_args=False).entropy().sum(dim=-1)
+        action_log_probs = ActorNetwork.neglogp(actions_batch, mu, sigma, logstd)
 
-            # PPO actor loss
-            ratio = torch.exp(old_action_log_probs_batch - action_log_probs)
-            surr1 = advantage * ratio
-            surr2 = advantage * torch.clamp(ratio, 1.0 - curr_e_clip, 1.0 + curr_e_clip)
-            a_loss = torch.max(-surr1, -surr2)
+        # PPO actor loss
+        ratio = torch.exp(old_action_log_probs_batch - action_log_probs)
+        surr1 = advantage * ratio
+        surr2 = advantage * torch.clamp(ratio, 1.0 - curr_e_clip, 1.0 + curr_e_clip)
+        a_loss = torch.max(-surr1, -surr2)
 
-            # Value loss (actor's value head)
-            if self.has_value_loss:
-                if self.clip_value:
-                    value_pred_clipped = value_preds_batch + (value - value_preds_batch).clamp(-curr_e_clip, curr_e_clip)
-                    value_losses = (value - return_batch) ** 2
-                    value_losses_clipped = (value_pred_clipped - return_batch) ** 2
-                    c_loss = torch.max(value_losses, value_losses_clipped)
-                else:
-                    c_loss = (return_batch - value) ** 2
+        # Value loss (actor's value head)
+        if self.has_value_loss:
+            if self.clip_value:
+                value_pred_clipped = value_preds_batch + (value - value_preds_batch).clamp(-curr_e_clip, curr_e_clip)
+                value_losses = (value - return_batch) ** 2
+                value_losses_clipped = (value_pred_clipped - return_batch) ** 2
+                c_loss = torch.max(value_losses, value_losses_clipped)
             else:
-                c_loss = torch.zeros((len(value), 1), device=self.ppo_device)
+                c_loss = (return_batch - value) ** 2
+        else:
+            c_loss = torch.zeros((len(value), 1), device=self.ppo_device)
 
-            # Bounds loss
-            if self.bounds_loss_coef is not None:
-                mu_loss_high = torch.clamp_min(mu - self.SOFT_BOUND, 0.0) ** 2
-                mu_loss_low = torch.clamp_max(mu + self.SOFT_BOUND, 0.0) ** 2
-                b_loss = (mu_loss_low + mu_loss_high).sum(axis=-1)
-            else:
-                b_loss = torch.zeros(len(mu), device=self.ppo_device)
+        # Bounds loss
+        if self.bounds_loss_coef is not None:
+            mu_loss_high = torch.clamp_min(mu - self.SOFT_BOUND, 0.0) ** 2
+            mu_loss_low = torch.clamp_max(mu + self.SOFT_BOUND, 0.0) ** 2
+            b_loss = (mu_loss_low + mu_loss_high).sum(axis=-1)
+        else:
+            b_loss = torch.zeros(len(mu), device=self.ppo_device)
 
-            # Entropy coefficient (per-actor for SAPG)
-            if self.is_mixed_expl and self.config.get('expl_reward_type') == 'entropy':
-                ec_candidates = self.intr_reward_coef[::self.intr_coef_block_size]
-                ec_identifiers = self.intr_reward_coef_embd[::self.intr_coef_block_size, 0].reshape(-1, 1)
-                ec_indices = torch.argmax((obs_batch[:, -self.intr_reward_coef_embd.shape[1]] == ec_identifiers).float(), dim=0)
-                entropy_coef = ec_candidates[ec_indices]
-            else:
-                entropy_coef = self.entropy_coef
+        # Entropy coefficient (per-actor for SAPG)
+        if self.is_mixed_expl and self.config.get('expl_reward_type') == 'entropy':
+            ec_candidates = self.intr_reward_coef[::self.intr_coef_block_size]
+            ec_identifiers = self.intr_reward_coef_embd[::self.intr_coef_block_size, 0].reshape(-1, 1)
+            ec_indices = torch.argmax((obs_batch[:, -self.intr_reward_coef_embd.shape[1]] == ec_identifiers).float(), dim=0)
+            entropy_coef = ec_candidates[ec_indices]
+        else:
+            entropy_coef = self.entropy_coef
 
-            a_loss = torch.mean(a_loss.unsqueeze(1))
-            c_loss = torch.mean(c_loss)
-            entropy_loss = torch.mean((entropy_coef * entropy).unsqueeze(1))
-            b_loss = torch.mean(b_loss.unsqueeze(1))
+        a_loss = torch.mean(a_loss.unsqueeze(1))
+        c_loss = torch.mean(c_loss)
+        entropy_loss = torch.mean((entropy_coef * entropy).unsqueeze(1))
+        b_loss = torch.mean(b_loss.unsqueeze(1))
 
-            loss = a_loss + 0.5 * c_loss * self.critic_coef - entropy_loss + b_loss * self.bounds_loss_coef
+        loss = a_loss + 0.5 * c_loss * self.critic_coef - entropy_loss + b_loss * self.bounds_loss_coef
 
         for param in self.model.parameters():
             param.grad = None
 
-        self.scaler.scale(loss).backward()
+        loss.backward()
 
         if self.multi_gpu and self.world_size > 1:
-            # All-reduce SCALED gradients first so any rank's inf propagates
-            # to all ranks before unscale checks for it.
             self.dbg.log_grad_stats(self.model, "actor_pre_allreduce")
             all_grads = torch.cat([p.grad.view(-1) for p in self.model.parameters() if p.grad is not None])
             self.dbg.all_reduce_with_check(all_grads, "actor_gradients")
@@ -854,15 +850,12 @@ class SAPGAgent:
                 if p.grad is not None:
                     p.grad.data.copy_(all_grads[offset:offset + p.numel()].view_as(p.grad) / self.world_size)
                     offset += p.numel()
-            self.scaler.unscale_(self.optimizer)
             if self.truncate_grads:
                 nn.utils.clip_grad_norm_(self.model.parameters(), self.grad_norm)
         elif self.truncate_grads:
-            self.scaler.unscale_(self.optimizer)
             nn.utils.clip_grad_norm_(self.model.parameters(), self.grad_norm)
 
-        self.scaler.step(self.optimizer)
-        self.scaler.update()
+        self.optimizer.step()
 
         with torch.no_grad():
             kl_dist = policy_kl(mu.detach(), sigma.detach(), old_mu_batch, old_sigma_batch, reduce=True)
@@ -923,23 +916,22 @@ class SAPGAgent:
         value_preds_batch = batch['old_values']
         returns_batch = batch['returns']
 
-        with torch.cuda.amp.autocast(enabled=self.mixed_precision):
-            res = self.central_value_net({'obs': obs_batch, 'is_train': True})
-            values = res['values']
+        res = self.central_value_net({'obs': obs_batch, 'is_train': True})
+        values = res['values']
 
-            if self.cv_clip_value:
-                value_pred_clipped = value_preds_batch + (values - value_preds_batch).clamp(-self.cv_e_clip, self.cv_e_clip)
-                value_losses = (values - returns_batch) ** 2
-                value_losses_clipped = (value_pred_clipped - returns_batch) ** 2
-                loss = torch.max(value_losses, value_losses_clipped)
-            else:
-                loss = (returns_batch - values) ** 2
+        if self.cv_clip_value:
+            value_pred_clipped = value_preds_batch + (values - value_preds_batch).clamp(-self.cv_e_clip, self.cv_e_clip)
+            value_losses = (values - returns_batch) ** 2
+            value_losses_clipped = (value_pred_clipped - returns_batch) ** 2
+            loss = torch.max(value_losses, value_losses_clipped)
+        else:
+            loss = (returns_batch - values) ** 2
 
-            loss = torch.mean(loss)
+        loss = torch.mean(loss)
 
         for param in self.central_value_net.parameters():
             param.grad = None
-        self.scaler.scale(loss).backward()
+        loss.backward()
 
         if self.multi_gpu and self.world_size > 1:
             self.dbg.log_grad_stats(self.central_value_net, "cv_pre_allreduce")
@@ -950,15 +942,12 @@ class SAPGAgent:
                 if p.grad is not None:
                     p.grad.data.copy_(all_grads[offset:offset + p.numel()].view_as(p.grad) / self.world_size)
                     offset += p.numel()
-            self.scaler.unscale_(self.cv_optimizer)
             if self.cv_truncate_grads:
                 nn.utils.clip_grad_norm_(self.central_value_net.parameters(), self.cv_grad_norm)
         elif self.cv_truncate_grads:
-            self.scaler.unscale_(self.cv_optimizer)
             nn.utils.clip_grad_norm_(self.central_value_net.parameters(), self.cv_grad_norm)
 
-        self.scaler.step(self.cv_optimizer)
-        self.scaler.update()
+        self.cv_optimizer.step()
         return loss.item()
 
     # ── LR update ────────────────────────────────────────────────────────
@@ -1125,8 +1114,6 @@ class SAPGAgent:
         if self.has_central_value:
             state['assymetric_vf_nets'] = self.central_value_net.state_dict()
             state['cv_optimizer'] = self.cv_optimizer.state_dict()
-        if self.mixed_precision:
-            state['scaler'] = self.scaler.state_dict()
         return state
 
     def set_full_state_weights(self, weights, set_epoch=True):
@@ -1151,8 +1138,7 @@ class SAPGAgent:
         else:
             print("Skipping loading of runtime state (shape mismatch)")
 
-        if self.mixed_precision and 'scaler' in weights:
-            self.scaler.load_state_dict(weights['scaler'])
+        # mixed_precision / GradScaler removed — ignore stale scaler state in old checkpoints
 
     # ── Multi-GPU helpers ───────────────────────────────────────────────
 

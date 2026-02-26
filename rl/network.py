@@ -126,13 +126,18 @@ class ActorNetwork(nn.Module):
 
         self.coef_id_idx = coef_id_idx
         self.use_depth = use_depth
-        self.register_buffer("coef_ids", coef_ids)
+        self.has_coef_ids = coef_ids is not None
 
-        # Learned embedding that replaces the scalar coef_id in obs
-        self.extra_params = nn.Parameter(
-            torch.randn(len(coef_ids), param_size, dtype=torch.float32),
-            requires_grad=True,
-        )
+        if self.has_coef_ids:
+            self.register_buffer("coef_ids", coef_ids)
+            # Learned embedding that replaces the scalar coef_id in obs
+            self.extra_params = nn.Parameter(
+                torch.randn(len(coef_ids), param_size, dtype=torch.float32),
+                requires_grad=True,
+            )
+        else:
+            self.register_buffer("coef_ids", torch.zeros(1))
+            self.extra_params = None
 
         # Optional depth encoder
         if use_depth:
@@ -142,11 +147,17 @@ class ActorNetwork(nn.Module):
         else:
             self.depth_encoder = None
 
-        # Input to LSTM = obs[:coef_id_idx] + embedding (param_size) dims + optional depth features
-        lstm_input_dim = coef_id_idx + param_size + (depth_feature_dim if use_depth else 0)
+        # Input to LSTM:
+        # - With coef_ids: obs[:coef_id_idx] + embedding (param_size) dims + optional depth
+        # - Without coef_ids: full obs_dim + optional depth
+        if self.has_coef_ids:
+            lstm_input_dim = coef_id_idx + param_size + (depth_feature_dim if use_depth else 0)
+        else:
+            lstm_input_dim = obs_dim + (depth_feature_dim if use_depth else 0)
 
-        # Observation normalizer (normalizes only first coef_id_idx dims)
-        self.running_mean_std = RunningMeanStd(coef_id_idx)
+        # Observation normalizer
+        norm_dim = coef_id_idx if self.has_coef_ids else obs_dim
+        self.running_mean_std = RunningMeanStd(norm_dim)
 
         # Value normalizer
         self.value_mean_std = RunningMeanStd(1)
@@ -168,9 +179,10 @@ class ActorNetwork(nn.Module):
 
         # Heads
         self.mu = nn.Linear(out_size, action_dim)
-        # coef-conditioned sigma: one sigma vector per coef_id
+        # coef-conditioned sigma: one sigma vector per coef_id (or just 1 if no SAPG)
+        n_sigma = len(coef_ids) if self.has_coef_ids else 1
         self.sigma = nn.Parameter(
-            torch.zeros(len(coef_ids), action_dim, dtype=torch.float32),
+            torch.zeros(n_sigma, action_dim, dtype=torch.float32),
             requires_grad=True,
         )
         self.value = nn.Linear(out_size, 1)
@@ -196,10 +208,13 @@ class ActorNetwork(nn.Module):
 
     def norm_obs(self, observation):
         with torch.no_grad():
-            return torch.cat([
-                self.running_mean_std(observation[:, :self.coef_id_idx]),
-                observation[:, self.coef_id_idx:],
-            ], dim=1)
+            if self.has_coef_ids:
+                return torch.cat([
+                    self.running_mean_std(observation[:, :self.coef_id_idx]),
+                    observation[:, self.coef_id_idx:],
+                ], dim=1)
+            else:
+                return self.running_mean_std(observation)
 
     def denorm_value(self, value):
         with torch.no_grad():
@@ -212,10 +227,11 @@ class ActorNetwork(nn.Module):
         dones = input_dict.get('dones', None)
         seq_length = input_dict.get('seq_length', 1)
 
-        # Replace coef_id with learned embedding
-        raw_obs = input_dict.get('raw_obs', obs)  # pre-normalized obs for coef_id lookup
-        idxs = (raw_obs[:, self.coef_id_idx].reshape(-1, 1) == self.coef_ids).float().argmax(dim=1)
-        obs = torch.cat([obs[:, :self.coef_id_idx], self.extra_params[idxs]], dim=1)
+        # Replace coef_id with learned embedding (SAPG exploration)
+        if self.has_coef_ids:
+            raw_obs = input_dict.get('raw_obs', obs)  # pre-normalized obs for coef_id lookup
+            idxs = (raw_obs[:, self.coef_id_idx].reshape(-1, 1) == self.coef_ids).float().argmax(dim=1)
+            obs = torch.cat([obs[:, :self.coef_id_idx], self.extra_params[idxs]], dim=1)
 
         # Normalize obs
         obs = self.norm_obs(obs)
@@ -254,9 +270,11 @@ class ActorNetwork(nn.Module):
         # Mu head (identity activation)
         mu = self.mu(out)
 
-        # Sigma head (coef-conditioned, identity activation)
-        # Need to re-lookup idxs from the original obs for sigma
-        sigma = self.sigma[idxs]
+        # Sigma head (coef-conditioned for SAPG, single vector otherwise)
+        if self.has_coef_ids:
+            sigma = self.sigma[idxs]
+        else:
+            sigma = self.sigma[0].expand(mu.shape[0], -1)
 
         return mu, sigma, value, states
 
