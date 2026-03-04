@@ -285,6 +285,13 @@ class SAPGAgent:
         # Env-level profiling — logs every N epochs
         self._profile_every = c.get('profile_every', 10)
 
+        # Optional epoch-end callbacks: list of fn(agent, epoch_num, frame)
+        self.on_epoch_end_callbacks = []
+
+        # Optional per-step callbacks: list of fn(agent, step_idx)
+        # Called inside play_steps() after each env_step.
+        self.on_step_callbacks = []
+
         # ── Debug logging for multi-GPU crash diagnosis ──
         debug_log_dir = os.path.join(self.experiment_dir, 'debug_logs')
         self.dbg = DistributedDebugger(
@@ -501,6 +508,12 @@ class SAPGAgent:
             step_time_start = time.time()
             self.obs, rewards, intr_rewards, self.dones, infos = self.env_step(res_dict['actions'])
             step_time += time.time() - step_time_start
+
+            for cb in self.on_step_callbacks:
+                try:
+                    cb(self, n)
+                except Exception as e:
+                    print(f"[WARN] Step callback failed: {e}")
 
             shaped_rewards = rewards * self.reward_scale
             intr_rewards = intr_rewards * self.reward_scale
@@ -1116,19 +1129,48 @@ class SAPGAgent:
             state['cv_optimizer'] = self.cv_optimizer.state_dict()
         return state
 
+    @staticmethod
+    def _remap_state_dict(src, target_keys):
+        """Remap checkpoint keys to match our model (handles a2c_network./ model. prefixes)."""
+        # If keys already match, return as-is
+        if set(src.keys()) & target_keys:
+            return src
+        remapped = {}
+        for k, v in src.items():
+            new_k = k
+            # Strip rl_games prefixes: model.a2c_network.X -> X, a2c_network.X -> X
+            for prefix in ('model.a2c_network.', 'a2c_network.', 'model.'):
+                if new_k.startswith(prefix):
+                    new_k = new_k[len(prefix):]
+                    break
+            remapped[new_k] = v
+        return remapped
+
     def set_full_state_weights(self, weights, set_epoch=True):
-        self.model.load_state_dict(weights['model'])
+        model_sd = self._remap_state_dict(weights['model'], set(self.model.state_dict().keys()))
+        self.model.load_state_dict(model_sd, strict=False)
         if set_epoch:
             self.epoch_num = weights['epoch']
             self.frame = weights['frame']
-        self.optimizer.load_state_dict(weights['optimizer'])
-        self.last_lr = weights['optimizer']['param_groups'][0]['lr']
+        if 'optimizer' in weights:
+            try:
+                self.optimizer.load_state_dict(weights['optimizer'])
+                self.last_lr = weights['optimizer']['param_groups'][0]['lr']
+            except (ValueError, KeyError):
+                print("Warning: optimizer state mismatch, skipping optimizer restore")
         self.last_mean_rewards = weights.get('last_mean_rewards', -1e9)
 
         if self.has_central_value and 'assymetric_vf_nets' in weights:
-            self.central_value_net.load_state_dict(weights['assymetric_vf_nets'])
+            cv_sd = self._remap_state_dict(weights['assymetric_vf_nets'], set(self.central_value_net.state_dict().keys()))
+            try:
+                self.central_value_net.load_state_dict(cv_sd, strict=False)
+            except RuntimeError as e:
+                print(f"Warning: central value net load failed (size mismatch), skipping: {e}")
         if 'cv_optimizer' in weights and self.cv_optimizer is not None:
-            self.cv_optimizer.load_state_dict(weights['cv_optimizer'])
+            try:
+                self.cv_optimizer.load_state_dict(weights['cv_optimizer'])
+            except (ValueError, KeyError, RuntimeError):
+                print("Warning: CV optimizer state mismatch, skipping")
 
         SKIP = "current_rewards" not in weights or weights["current_rewards"].shape[0] != self.num_actors
         if not SKIP:
@@ -1340,6 +1382,13 @@ class SAPGAgent:
                     self.save(os.path.join(self.nn_dir, self.experiment_name))
                     best_dir = os.path.join(self.experiment_dir, 'best')
                     os.makedirs(best_dir, exist_ok=True)
+
+            # Epoch-end callbacks (e.g. video recording)
+            for cb in self.on_epoch_end_callbacks:
+                try:
+                    cb(self, epoch_num, frame)
+                except Exception as e:
+                    print(f"[WARN] Epoch-end callback failed: {e}")
 
             if epoch_num >= self.max_epochs and self.max_epochs != -1:
                 if self.game_rewards.current_size == 0:

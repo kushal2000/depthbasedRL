@@ -5,7 +5,7 @@ from typing import Dict, Tuple
 import numpy as np
 import trimesh
 
-from isaacgymenvs.utils.utils import get_repo_root_dir
+from envs.isaacgym.utils import get_repo_root_dir
 
 
 @dataclass

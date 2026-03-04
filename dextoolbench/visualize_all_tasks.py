@@ -18,7 +18,7 @@ import tyro
 import viser
 from viser.extras import ViserUrdf
 
-from isaacgymenvs.utils.utils import get_repo_root_dir
+from envs.isaacgym.utils import get_repo_root_dir
 
 # Mesh scale
 MESH_SCALE = 1.0

@@ -1,6 +1,6 @@
 # NOTE: torch must be imported AFTER isaacgym imports
 # isort: off
-from isaacgymenvs.tasks.simtoolreal.env import SimToolReal
+from envs.isaacgym.env import SimToolReal
 import torch
 # isort: on
 
@@ -19,7 +19,7 @@ from sensor_msgs.msg import JointState
 from termcolor import colored
 
 from deployment.isaac.isaac_env import create_env
-from isaacgymenvs.utils.utils import get_repo_root_dir
+from envs.isaacgym.utils import get_repo_root_dir
 
 N_IIWA_JOINTS = 7
 N_SHARPA_JOINTS = 22

@@ -13,7 +13,7 @@ import torch
 from geometry_msgs.msg import Pose, PoseStamped
 from termcolor import colored
 
-from isaacgymenvs.utils.observation_action_utils_sharpa import (
+from envs.isaacgym.observation_action_utils_sharpa import (
     _compute_keypoint_positions,
 )
 

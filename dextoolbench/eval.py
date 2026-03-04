@@ -23,7 +23,7 @@ from viser.extras import ViserUrdf
 from deployment.isaac.isaac_env import create_env
 from deployment.rl_player import RlPlayer
 from dextoolbench.objects import NAME_TO_OBJECT
-from isaacgymenvs.utils.utils import get_repo_root_dir
+from envs.isaacgym.utils import get_repo_root_dir
 
 TABLE_Z = 0.38
 

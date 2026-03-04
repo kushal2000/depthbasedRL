@@ -1,6 +1,6 @@
 # NOTE: torch must be imported AFTER isaacgym imports
 # isort: off
-from isaacgymenvs.tasks.simtoolreal.env import SimToolReal
+from envs.isaacgym.env import SimToolReal
 import torch
 # isort: on
 
@@ -13,8 +13,8 @@ from omegaconf import DictConfig, OmegaConf
 from deployment.rl_player_utils import (
     read_cfg_omegaconf,
 )
-from isaacgymenvs.tasks import isaacgym_task_map
-from isaacgymenvs.utils.reformat import omegaconf_to_dict, print_dict
+from envs.isaacgym import isaacgym_task_map
+from envs.isaacgym.reformat import omegaconf_to_dict, print_dict
 
 
 def create_env(

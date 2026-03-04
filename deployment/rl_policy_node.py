@@ -20,13 +20,13 @@ from termcolor import colored
 from dextoolbench.objects import (
     NAME_TO_OBJECT,
 )
-from isaacgymenvs.utils.observation_action_utils_sharpa import (
+from envs.isaacgym.observation_action_utils_sharpa import (
     Q_LOWER_LIMITS_restricted_np as Q_LOWER_LIMITS_np,
 )
-from isaacgymenvs.utils.observation_action_utils_sharpa import (
+from envs.isaacgym.observation_action_utils_sharpa import (
     Q_UPPER_LIMITS_restricted_np as Q_UPPER_LIMITS_np,
 )
-from isaacgymenvs.utils.observation_action_utils_sharpa import (
+from envs.isaacgym.observation_action_utils_sharpa import (
     compute_joint_pos_targets,
     compute_observation,
     create_urdf_object,
@@ -569,7 +569,7 @@ class RLPolicyNode:
         # Load PK chain for fk and jacobian for ik
         import pytorch_kinematics as pk
 
-        from isaacgymenvs.utils.utils import get_repo_root_dir
+        from envs.isaacgym.utils import get_repo_root_dir
 
         KUKA_SHARPA_URDF_PATH = (
             get_repo_root_dir()
@@ -861,7 +861,7 @@ class RLPolicyNode:
         import viser
         from viser.extras import ViserUrdf
 
-        from isaacgymenvs.utils.utils import get_repo_root_dir
+        from envs.isaacgym.utils import get_repo_root_dir
 
         SERVER = viser.ViserServer()
 

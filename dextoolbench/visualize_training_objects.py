@@ -16,7 +16,7 @@ from typing import List, Optional, Tuple
 import trimesh
 import viser
 
-from isaacgymenvs.utils.utils import get_repo_root_dir
+from envs.isaacgym.utils import get_repo_root_dir
 
 # Base directory for training tools assets
 ASSETS_DIR = get_repo_root_dir() / "assets/urdf/dextoolbench_training"

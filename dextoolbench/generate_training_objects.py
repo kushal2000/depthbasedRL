@@ -17,11 +17,11 @@ from dextoolbench.create_training_object_utils import (
 )
 
 # Import the training size distributions
-from isaacgymenvs.tasks.simtoolreal.object_size_distributions import (
+from envs.isaacgym.object_size_distributions import (
     OBJECT_SIZE_DISTRIBUTIONS,
     ObjectSizeDistribution,
 )
-from isaacgymenvs.utils.utils import get_repo_root_dir
+from envs.isaacgym.utils import get_repo_root_dir
 
 # Base output directory for training tools
 # BASE_OUTPUT_DIR = Path("/share/portal/kk837/sapg/assets/urdf/dextoolbench_training")

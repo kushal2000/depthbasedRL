@@ -10,10 +10,10 @@ import tyro
 from geometry_msgs.msg import Pose, PoseStamped
 from termcolor import colored
 
-from isaacgymenvs.utils.observation_action_utils_sharpa import (
+from envs.isaacgym.observation_action_utils_sharpa import (
     _compute_keypoint_positions,
 )
-from isaacgymenvs.utils.utils import get_repo_root_dir
+from envs.isaacgym.utils import get_repo_root_dir
 
 
 def info(message: str):

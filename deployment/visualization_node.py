@@ -17,7 +17,7 @@ from termcolor import colored
 from viser.extras import ViserUrdf
 
 from dextoolbench.metadata import ALL_OBJECT_NAMES
-from isaacgymenvs.utils.utils import get_repo_root_dir
+from envs.isaacgym.utils import get_repo_root_dir
 
 T_W_R = np.eye(4)
 T_W_R[:3, 3] = np.array([0.0, 0.8, 0.0])

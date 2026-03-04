@@ -20,7 +20,7 @@ from scipy.spatial.transform import Rotation as R
 from viser.extras import ViserUrdf
 
 from dextoolbench.objects import NAME_TO_OBJECT
-from isaacgymenvs.utils.utils import get_repo_root_dir
+from envs.isaacgym.utils import get_repo_root_dir
 
 
 @dataclass

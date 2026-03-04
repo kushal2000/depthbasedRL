@@ -5,7 +5,10 @@ env-level CUDA profiling of the step() call to identify simulation
 bottlenecks.
 """
 
-import gymnasium.spaces as spaces
+try:
+    import gymnasium.spaces as spaces
+except ImportError:
+    import gym.spaces as spaces
 import torch
 
 from rl.timing import CudaTimer
@@ -20,8 +23,8 @@ class IsaacVecEnv:
 
     def __init__(self, env):
         self.env = env
-        device = getattr(env, 'device', 'cuda:0')
-        self.timer = CudaTimer(device, enabled=True)
+        self.device = getattr(env, 'device', 'cuda:0')
+        self.timer = CudaTimer(self.device, enabled=True)
 
     # ── Core API (matches RLGPUEnv interface) ─────────────────────────
 

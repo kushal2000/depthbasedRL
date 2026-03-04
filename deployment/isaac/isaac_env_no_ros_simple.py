@@ -1,6 +1,6 @@
 # NOTE: torch must be imported AFTER isaacgym imports
 # isort: off
-from isaacgymenvs.tasks.simtoolreal.env import SimToolReal
+from envs.isaacgym.env import SimToolReal
 import torch
 
 # isort: on
@@ -15,7 +15,7 @@ from termcolor import colored
 
 from deployment.isaac.isaac_env import create_env
 from deployment.rl_player import RlPlayer
-from isaacgymenvs.utils.utils import get_repo_root_dir
+from envs.isaacgym.utils import get_repo_root_dir
 
 N_OBS = 140
 N_ACT = 29

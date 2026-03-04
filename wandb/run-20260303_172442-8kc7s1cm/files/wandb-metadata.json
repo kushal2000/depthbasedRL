@@ -1,0 +1,113 @@
+{
+  "os":  "Linux-6.8.0-90-generic-x86_64-with-glibc2.39",
+  "python":  "CPython 3.11.14",
+  "startedAt":  "2026-03-04T01:24:42.831820Z",
+  "args":  [
+    "multi_gpu=true",
+    "num_envs=24576",
+    "seed=0",
+    "max_epochs=1000000",
+    "experiment=isaaclab_24k_6blk_2gpu",
+    "learning_rate=1e-4",
+    "minibatch_size=32768",
+    "horizon_length=16",
+    "mini_epochs=2",
+    "expl_type=mixed_expl_learn_param",
+    "expl_reward_type=entropy",
+    "expl_reward_coef_scale=0.005",
+    "expl_coef_block_size=1024",
+    "use_others_experience=lf",
+    "wandb_activate=True",
+    "wandb_project=sim_comparison",
+    "wandb_entity=satvik-sharma",
+    "wandb_name=isaaclab_24k_6blk_2gpu",
+    "expl_coef_block_size=4096",
+    "expl_reward_coef_scale=0.02",
+    "minibatch_size=32768",
+    "headless=true",
+    "--/renderer/activeGpu=0",
+    "--/renderer/multiGpu/enabled=false",
+    "--/crashreporter/enabled=false"
+  ],
+  "program":  "/juno/u/satvik/depthbasedRL/train_isaaclab.py",
+  "codePath":  "train_isaaclab.py",
+  "codePathLocal":  "train_isaaclab.py",
+  "git":  {
+    "remote":  "https://github.com/kushal2000/depthbasedRL",
+    "commit":  "46b919edfed6d29cb2ac953cd34a01bdc608e77d"
+  },
+  "email":  "satvik@stanford.edu",
+  "root":  "/juno/u/satvik/depthbasedRL",
+  "host":  "iliad9.stanford.edu",
+  "executable":  "/juno/u/satvik/miniconda3/envs/sapg_il/bin/python3.11",
+  "cpu_count":  64,
+  "cpu_count_logical":  128,
+  "gpu":  "NVIDIA L40S",
+  "gpu_count":  2,
+  "disk":  {
+    "/":  {
+      "total":  "470306373632",
+      "used":  "85527638016"
+    }
+  },
+  "memory":  {
+    "total":  "811276763136"
+  },
+  "gpu_nvidia":  [
+    {
+      "name":  "NVIDIA L40S",
+      "memoryTotal":  "48305799168",
+      "cudaCores":  18176,
+      "architecture":  "Ada",
+      "uuid":  "GPU-13039f47-38f0-aca5-6b59-231b40ad265c"
+    },
+    {
+      "name":  "NVIDIA L40S",
+      "memoryTotal":  "48305799168",
+      "cudaCores":  18176,
+      "architecture":  "Ada",
+      "uuid":  "GPU-726dadae-ef03-d185-ce14-b2b666a168d4"
+    }
+  ],
+  "cudaVersion":  "13.0",
+  "slurm":  {
+    "cluster_name":  "sc",
+    "conf":  "/usr/local/etc/slurm.conf",
+    "cpus_on_node":  "24",
+    "cpus_per_task":  "24",
+    "gpus_on_node":  "2",
+    "gtids":  "0",
+    "job_account":  "iliad",
+    "job_cpus_per_node":  "24",
+    "job_end_time":  "1773163094",
+    "job_gid":  "100",
+    "job_gpus":  "5,6",
+    "job_id":  "14711109",
+    "job_name":  "isaaclab_24k_6blk_2gpu",
+    "job_nodelist":  "iliad9",
+    "job_num_nodes":  "1",
+    "job_partition":  "iliad",
+    "job_qos":  "normal",
+    "job_start_time":  "1772587094",
+    "job_uid":  "24036",
+    "job_user":  "satvik",
+    "jobid":  "14711109",
+    "localid":  "0",
+    "mem_per_node":  "204800",
+    "nnodes":  "1",
+    "nodeid":  "0",
+    "nodelist":  "iliad9",
+    "oom_kill_step":  "0",
+    "prio_process":  "0",
+    "procid":  "0",
+    "script_context":  "prolog_task",
+    "submit_dir":  "/sailhome/satvik",
+    "submit_host":  "iliad8.stanford.edu",
+    "task_pid":  "2013068",
+    "tasks_per_node":  "1",
+    "topology_addr":  "iliad9",
+    "topology_addr_pattern":  "node",
+    "tres_per_task":  "cpu=24"
+  },
+  "writerId":  "advr5110ragh2uzaza2b6tvh6yh2vybl"
+}

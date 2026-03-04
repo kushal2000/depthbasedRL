@@ -14,7 +14,7 @@ from deployment.mujoco.mujoco_sim import (
 )
 from deployment.rl_player import RlPlayer
 from dextoolbench.objects import NAME_TO_OBJECT
-from isaacgymenvs.utils.observation_action_utils_sharpa import (
+from envs.isaacgym.observation_action_utils_sharpa import (
     compute_joint_pos_targets,
     compute_observation,
     create_urdf_object,

@@ -5,7 +5,7 @@ import yaml
 from gym import spaces
 from omegaconf import DictConfig, OmegaConf
 
-from isaacgymenvs.utils.reformat import omegaconf_to_dict, print_dict
+from envs.isaacgym.reformat import omegaconf_to_dict, print_dict
 
 
 @dataclass

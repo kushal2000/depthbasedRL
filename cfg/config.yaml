@@ -1,0 +1,52 @@
+# Isaac Lab training config — flat Hydra config
+experiment: isaaclab_simtoolreal
+seed: 0
+max_epochs: 1000000
+checkpoint: ""
+headless: true
+multi_gpu: false
+num_envs: 8192
+use_depth: false
+enable_cameras: false
+randomize: false
+
+# PPO
+learning_rate: 1e-4
+minibatch_size: 32768
+horizon_length: 16
+mini_epochs: 2
+
+gamma: 0.99
+tau: 0.95
+e_clip: 0.1
+grad_norm: 1.0
+entropy_coef: 0.0
+critic_coef: 4.0
+bounds_loss_coef: 0.0001
+
+# SAPG
+expl_type: mixed_expl_learn_param
+expl_reward_type: entropy
+expl_reward_coef_scale: 0.01
+expl_coef_block_size: 4096
+use_others_experience: lf
+
+# WandB
+wandb_activate: true
+wandb_project: sim_comparison
+wandb_entity: ""
+wandb_name: isaaclab_${num_envs}envs
+
+# Misc
+gpu: null
+viser_port: 8012
+object_max_depenetration_velocity: null
+dof_speed_scale: null
+video: false
+video_length: 200
+video_interval: 100
+
+hydra:
+  output_subdir: null
+  run:
+    dir: .

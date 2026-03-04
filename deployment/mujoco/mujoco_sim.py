@@ -8,7 +8,7 @@ import mujoco
 import mujoco.viewer
 import numpy as np
 
-from isaacgymenvs.utils.utils import get_repo_root_dir
+from envs.isaacgym.utils import get_repo_root_dir
 
 # ############################################################
 # Constants

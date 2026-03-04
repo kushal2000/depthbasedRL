@@ -1,6 +1,6 @@
 # NOTE: torch must be imported AFTER isaacgym imports
 # isort: off
-from isaacgymenvs.tasks.simtoolreal.env import SimToolReal
+from envs.isaacgym.env import SimToolReal
 import torch
 # isort: on
 
@@ -16,12 +16,12 @@ from termcolor import colored
 
 from deployment.isaac.isaac_env import create_env
 from deployment.rl_player import RlPlayer
-from isaacgymenvs.utils.observation_action_utils_sharpa import (
+from envs.isaacgym.observation_action_utils_sharpa import (
     compute_joint_pos_targets,
     compute_observation,
     create_urdf_object,
 )
-from isaacgymenvs.utils.utils import get_repo_root_dir
+from envs.isaacgym.utils import get_repo_root_dir
 
 N_OBS = 140
 N_ACT = 29
@@ -106,7 +106,7 @@ class IsaacEnvNoRos:
             print(f"diff.max() = {diff.max()}")
             print(f"diff.argsort() = {diff.argsort()}")
 
-            from isaacgymenvs.utils.observation_action_utils_sharpa import OBS_NAMES
+            from envs.isaacgym.observation_action_utils_sharpa import OBS_NAMES
 
             idxs = diff.argsort()
             for idx in idxs:
