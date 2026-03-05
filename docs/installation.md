@@ -24,9 +24,7 @@ source .venv/bin/activate
 # Install the project and all dependencies
 uv pip install -e .
 
-# Download and extract Isaac Gym Preview 4 to a directory outside of this repo
-wget https://developer.nvidia.com/isaac-gym-preview-4 -O IsaacGym_Preview_4_Package.tar.gz
-tar -xzf IsaacGym_Preview_4_Package.tar.gz
+# Install Isaac Gym (included in repo, gitignored)
 cd isaacgym/python
 uv pip install -e .
 cd -
