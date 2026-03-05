@@ -73,6 +73,7 @@ include = [
     "isaacgymenvs*",
     "dextoolbench*",
     "deployment*",
+    "fabrica*",
     "baselines*",
     "recorded_data*",
 ]
