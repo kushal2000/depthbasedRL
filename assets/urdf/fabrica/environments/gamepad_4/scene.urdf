@@ -1,0 +1,35 @@
+<?xml version="1.0"?>
+<robot name="table_gamepad_4_scene">
+  <link name="box">
+    <visual>
+      <material name="wood"><color rgba="0.82 0.56 0.35 1.0"/></material>
+      <origin xyz="0 0 0"/>
+      <geometry><box size="0.475 0.4 0.3"/></geometry>
+    </visual>
+    <collision>
+      <origin xyz="0 0 0"/>
+      <geometry><box size="0.475 0.4 0.3"/></geometry>
+    </collision>
+    <inertial>
+      <mass value="500"/>
+      <friction value="1.0"/>
+      <inertia ixx="1000.0" ixy="0.0" ixz="0.0" iyy="1000.0" iyz="0.0" izz="1000.0"/>
+    </inertial>
+  </link>
+  <link name="part_3">
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry><mesh filename="../../gamepad/3/3_canonical.obj" scale="1 1 1"/></geometry>
+      <material name="placed_3"><color rgba="0.6 0.6 0.6 1.0"/></material>
+    </visual>
+    <collision>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry><mesh filename="../../gamepad/3/3_canonical.obj" scale="1 1 1"/></geometry>
+    </collision>
+  </link>
+  <joint name="part_3_joint" type="fixed">
+    <parent link="box"/>
+    <child link="part_3"/>
+    <origin xyz="-0.079873 0.031602 0.16249999999999998" rpy="0.0 -0.0 0.0"/>
+  </joint>
+</robot>

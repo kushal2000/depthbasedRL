@@ -1,0 +1,115 @@
+<?xml version="1.0"?>
+<robot name="table_cooling_manifold_5_scene">
+  <link name="box">
+    <visual>
+      <material name="wood"><color rgba="0.82 0.56 0.35 1.0"/></material>
+      <origin xyz="0 0 0"/>
+      <geometry><box size="0.475 0.4 0.3"/></geometry>
+    </visual>
+    <collision>
+      <origin xyz="0 0 0"/>
+      <geometry><box size="0.475 0.4 0.3"/></geometry>
+    </collision>
+    <inertial>
+      <mass value="500"/>
+      <friction value="1.0"/>
+      <inertia ixx="1000.0" ixy="0.0" ixz="0.0" iyy="1000.0" iyz="0.0" izz="1000.0"/>
+    </inertial>
+  </link>
+  <link name="part_1">
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry><mesh filename="../../cooling_manifold/1/1_canonical.obj" scale="1 1 1"/></geometry>
+      <material name="placed_1"><color rgba="0.6 0.6 0.6 1.0"/></material>
+    </visual>
+    <collision>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry><mesh filename="../../cooling_manifold/1/1_canonical.obj" scale="1 1 1"/></geometry>
+    </collision>
+  </link>
+  <joint name="part_1_joint" type="fixed">
+    <parent link="box"/>
+    <child link="part_1"/>
+    <origin xyz="-0.080356 0.04 0.16823999999999995" rpy="0.0 -0.0 0.0"/>
+  </joint>
+  <link name="part_0">
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry><mesh filename="../../cooling_manifold/0/0_canonical.obj" scale="1 1 1"/></geometry>
+      <material name="placed_0"><color rgba="0.6 0.6 0.6 1.0"/></material>
+    </visual>
+    <collision>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry><mesh filename="../../cooling_manifold/0/0_canonical.obj" scale="1 1 1"/></geometry>
+    </collision>
+  </link>
+  <joint name="part_0_joint" type="fixed">
+    <parent link="box"/>
+    <child link="part_0"/>
+    <origin xyz="-0.110914 0.04 0.18424399999999996" rpy="0.0 -1.5707963267948966 0.0"/>
+  </joint>
+  <link name="part_4">
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry><mesh filename="../../cooling_manifold/4/4_canonical.obj" scale="1 1 1"/></geometry>
+      <material name="placed_4"><color rgba="0.6 0.6 0.6 1.0"/></material>
+    </visual>
+    <collision>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry><mesh filename="../../cooling_manifold/4/4_canonical.obj" scale="1 1 1"/></geometry>
+    </collision>
+  </link>
+  <joint name="part_4_joint" type="fixed">
+    <parent link="box"/>
+    <child link="part_4"/>
+    <origin xyz="-0.048967 0.04 0.18424399999999996" rpy="0.0 -1.5707963267948966 0.0"/>
+  </joint>
+  <link name="part_6">
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry><mesh filename="../../cooling_manifold/6/6_canonical.obj" scale="1 1 1"/></geometry>
+      <material name="placed_6"><color rgba="0.6 0.6 0.6 1.0"/></material>
+    </visual>
+    <collision>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry><mesh filename="../../cooling_manifold/6/6_canonical.obj" scale="1 1 1"/></geometry>
+    </collision>
+  </link>
+  <joint name="part_6_joint" type="fixed">
+    <parent link="box"/>
+    <child link="part_6"/>
+    <origin xyz="-0.129941 0.09 0.16749999999999998" rpy="3.141592653589793 -1.5707963267948966 3.141592653589793"/>
+  </joint>
+  <link name="part_2">
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry><mesh filename="../../cooling_manifold/2/2_canonical.obj" scale="1 1 1"/></geometry>
+      <material name="placed_2"><color rgba="0.6 0.6 0.6 1.0"/></material>
+    </visual>
+    <collision>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry><mesh filename="../../cooling_manifold/2/2_canonical.obj" scale="1 1 1"/></geometry>
+    </collision>
+  </link>
+  <joint name="part_2_joint" type="fixed">
+    <parent link="box"/>
+    <child link="part_2"/>
+    <origin xyz="-0.129941 -0.01 0.16749999999999998" rpy="0.0 -1.5707963267948966 0.0"/>
+  </joint>
+  <link name="part_3">
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry><mesh filename="../../cooling_manifold/3/3_canonical.obj" scale="1 1 1"/></geometry>
+      <material name="placed_3"><color rgba="0.6 0.6 0.6 1.0"/></material>
+    </visual>
+    <collision>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry><mesh filename="../../cooling_manifold/3/3_canonical.obj" scale="1 1 1"/></geometry>
+    </collision>
+  </link>
+  <joint name="part_3_joint" type="fixed">
+    <parent link="box"/>
+    <child link="part_3"/>
+    <origin xyz="-0.029941 0.09 0.16749999999999998" rpy="0.0 -1.5707963267948966 0.0"/>
+  </joint>
+</robot>

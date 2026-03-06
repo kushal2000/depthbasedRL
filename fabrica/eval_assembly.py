@@ -1,28 +1,40 @@
-"""Sequential assembly evaluation.
+"""Fabrica Assembly Interactive Evaluation.
 
-For an assembly with order [p0, p1, ..., pN-1], runs N sub-problems.
-Each sub-problem n uses:
-  - A table URDF with parts p0..pn-1 baked in as static geometry
-  - A pick_place trajectory for part pn
-  - The canonical mesh URDF for part pn
+Architecture:
+  Main process  -- viser GUI + scene rendering (no isaacgym)
+  Subprocess    -- IsaacGym env + policy (sends state back via pipe)
+
+Each "Load Environment" kills the old subprocess and spawns a fresh one,
+sidestepping the fact that IsaacGym cannot cleanly reset within a process.
 
 Usage:
-    python fabrica/eval_assembly.py --assembly beam \
+    python fabrica/eval_assembly.py \
         --config-path pretrained_policy/config.yaml \
         --checkpoint-path pretrained_policy/model.pth
 """
 
 import argparse
 import json
+import math
+import multiprocessing
 import sys
 import time
+import traceback
 from pathlib import Path
-
-# Workaround: PyTorch 2.4 hipify_python.py generates regexes that exceed
-# Python 3.8's default sre_parse recursion limit.
-sys.setrecursionlimit(max(sys.getrecursionlimit(), 10000))
+from typing import Dict, List, Optional, Tuple
 
 import numpy as np
+import trimesh
+import viser
+from viser.extras import ViserUrdf
+
+from fabrica.viser_utils import COLORS
+
+sys.setrecursionlimit(max(sys.getrecursionlimit(), 10000))
+
+# ===================================================================
+# Constants (lightweight -- no isaacgym imports)
+# ===================================================================
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 TABLE_Z = 0.38
@@ -30,6 +42,17 @@ Z_OFFSET = 0.03
 N_ACT = 29
 OBS_DIM = 140
 CONTROL_DT = 1.0 / 60.0
+
+ALL_ASSEMBLIES = [
+    "beam", "car", "cooling_manifold", "duct",
+    "gamepad", "plumbers_block", "stool_circular",
+]
+
+_ARM_DEFAULT = np.array([-1.571, 1.571, 0.0, 1.376, 0.0, 1.485, 1.308])
+_ARM_DEFAULT[1] -= np.deg2rad(10)
+_ARM_DEFAULT[3] += np.deg2rad(10)
+DEFAULT_DOF_POS = np.zeros(N_ACT)
+DEFAULT_DOF_POS[:7] = _ARM_DEFAULT
 
 BASE_OVERRIDES = {
     "task.env.resetPositionNoiseX": 0.0,
@@ -68,163 +91,825 @@ BASE_OVERRIDES = {
     "task.env.angVelImpulseProbRange": [0.0001, 0.0001],
 }
 
-
-def parse_args():
-    parser = argparse.ArgumentParser(description="Sequential assembly evaluation")
-    parser.add_argument("--assembly", type=str, required=True,
-                        choices=["beam", "car", "cooling_manifold", "duct",
-                                 "gamepad", "plumbers_block", "stool_circular"])
-    parser.add_argument("--config-path", type=str, default="pretrained_policy/config.yaml")
-    parser.add_argument("--checkpoint-path", type=str, default="pretrained_policy/model.pth")
-    parser.add_argument("--no-headless", action="store_true", help="Show Isaac Gym viewer GUI")
-    return parser.parse_args()
+ASSETS_DIR = REPO_ROOT / "assets" / "urdf" / "fabrica"
 
 
-def resolve_path(path_str):
-    path = Path(path_str)
-    if path.exists():
-        return path
-    path = REPO_ROOT / path_str
-    if path.exists():
-        return path
-    raise FileNotFoundError(path_str)
+# ===================================================================
+# Helpers
+# ===================================================================
+
+def _load_assembly_order(assembly: str) -> List[str]:
+    path = ASSETS_DIR / assembly / "assembly_order.json"
+    if not path.exists():
+        return []
+    return json.loads(path.read_text())["steps"]
 
 
-def load_trajectory(path):
+def _get_available_parts(assembly: str) -> List[str]:
+    """Return parts that have both a trajectory and environment URDF."""
+    order = _load_assembly_order(assembly)
+    available = []
+    for pid in order:
+        name = f"{assembly}_{pid}"
+        traj = REPO_ROOT / "fabrica" / "trajectories" / name / "pick_place.json"
+        urdf = ASSETS_DIR / "environments" / name / "pick_place.urdf"
+        if traj.exists() and urdf.exists():
+            available.append(pid)
+    return available
+
+
+def _load_trajectory(assembly: str, pid: str) -> Optional[dict]:
+    path = REPO_ROOT / "fabrica" / "trajectories" / f"{assembly}_{pid}" / "pick_place.json"
+    if not path.exists():
+        return None
     with open(path) as f:
-        traj = json.load(f)
-    traj["start_pose"][2] += Z_OFFSET
-    return traj
+        return json.load(f)
 
 
-def make_overrides(object_name, table_urdf, traj):
-    return {
-        **BASE_OVERRIDES,
-        "task.env.objectName": object_name,
-        "task.env.useFixedGoalStates": True,
-        "task.env.fixedGoalStates": traj["goals"],
-        "task.env.asset.table": str(table_urdf),
-        "task.env.tableResetZ": TABLE_Z,
-        "task.env.objectStartPose": traj["start_pose"],
-    }
+def quat_xyzw_to_wxyz(q):
+    return (q[3], q[0], q[1], q[2])
 
 
-def load_assembly_order(assets_dir, assembly):
-    """Load assembly order from JSON."""
-    order_path = assets_dir / assembly / "assembly_order.json"
-    if not order_path.exists():
-        raise FileNotFoundError(f"No assembly_order.json for {assembly}")
-    data = json.loads(order_path.read_text())
-    return data["steps"]
+def _quat_xyzw_to_rpy(q) -> Tuple[float, float, float]:
+    """Convert quaternion [x, y, z, w] to (roll, pitch, yaw)."""
+    x, y, z, w = float(q[0]), float(q[1]), float(q[2]), float(q[3])
+    sinr = 2 * (w * x + y * z)
+    cosr = 1 - 2 * (x * x + y * y)
+    roll = math.atan2(sinr, cosr)
+    sinp = 2 * (w * y - z * x)
+    pitch = math.copysign(math.pi / 2, sinp) if abs(sinp) >= 1 else math.asin(sinp)
+    siny = 2 * (w * z + x * y)
+    cosy = 1 - 2 * (y * y + z * z)
+    yaw = math.atan2(siny, cosy)
+    return roll, pitch, yaw
 
 
-def run_subproblem(assembly, part_id, config_path, checkpoint_path,
-                   headless, torch, device):
-    """Run a single sub-problem and return (success_pct, steps)."""
-    from deployment.isaac.isaac_env import create_env
-    from deployment.rl_player import RlPlayer
-    import fabrica.objects  # noqa: F401
+def _generate_table_urdf(assembly: str, active_pid: str, completed_pids: List[str]) -> str:
+    """Generate a table URDF with completed parts baked in as fixed collision links.
 
-    object_name = f"{assembly}_{part_id}"
-    table_urdf = f"urdf/fabrica/environments/{object_name}/pick_place.urdf"
-    traj_path = REPO_ROOT / "fabrica" / "trajectories" / object_name / "pick_place.json"
+    Returns the URDF path relative to the assets root (for IsaacGym).
+    """
+    env_dir = ASSETS_DIR / "environments" / f"{assembly}_{active_pid}"
+    env_dir.mkdir(parents=True, exist_ok=True)
+    out_path = env_dir / "scene.urdf"
 
-    if not traj_path.exists():
-        print(f"  ERROR: Trajectory not found: {traj_path}")
-        return 0.0, 0
+    lines = [
+        '<?xml version="1.0"?>',
+        f'<robot name="table_{assembly}_{active_pid}_scene">',
+        '  <link name="box">',
+        '    <visual>',
+        '      <material name="wood"><color rgba="0.82 0.56 0.35 1.0"/></material>',
+        '      <origin xyz="0 0 0"/>',
+        '      <geometry><box size="0.475 0.4 0.3"/></geometry>',
+        '    </visual>',
+        '    <collision>',
+        '      <origin xyz="0 0 0"/>',
+        '      <geometry><box size="0.475 0.4 0.3"/></geometry>',
+        '    </collision>',
+        '    <inertial>',
+        '      <mass value="500"/>',
+        '      <friction value="1.0"/>',
+        '      <inertia ixx="1000.0" ixy="0.0" ixz="0.0" iyy="1000.0" iyz="0.0" izz="1000.0"/>',
+        '    </inertial>',
+        '  </link>',
+    ]
 
-    traj = load_trajectory(traj_path)
-    env = create_env(
-        config_path=str(config_path),
-        headless=headless,
-        device=device,
-        overrides=make_overrides(object_name, table_urdf, traj),
+    for pid in completed_pids:
+        traj = _load_trajectory(assembly, pid)
+        if traj is None:
+            continue
+        goal_pose = traj["goals"][-1]  # [x,y,z, qx,qy,qz,qw]
+        mesh_rel = f"../../{assembly}/{pid}/{pid}_canonical.obj"
+        rx, ry, rz = goal_pose[0], goal_pose[1], goal_pose[2] - TABLE_Z
+        rpy = _quat_xyzw_to_rpy(goal_pose[3:7])
+
+        lines.extend([
+            f'  <link name="part_{pid}">',
+            '    <visual>',
+            '      <origin xyz="0 0 0" rpy="0 0 0"/>',
+            f'      <geometry><mesh filename="{mesh_rel}" scale="1 1 1"/></geometry>',
+            f'      <material name="placed_{pid}"><color rgba="0.6 0.6 0.6 1.0"/></material>',
+            '    </visual>',
+            '    <collision>',
+            '      <origin xyz="0 0 0" rpy="0 0 0"/>',
+            f'      <geometry><mesh filename="{mesh_rel}" scale="1 1 1"/></geometry>',
+            '    </collision>',
+            '  </link>',
+            f'  <joint name="part_{pid}_joint" type="fixed">',
+            '    <parent link="box"/>',
+            f'    <child link="part_{pid}"/>',
+            f'    <origin xyz="{rx} {ry} {rz}" rpy="{rpy[0]} {rpy[1]} {rpy[2]}"/>',
+            '  </joint>',
+        ])
+
+    lines.append('</robot>')
+    out_path.write_text('\n'.join(lines))
+    return f"urdf/fabrica/environments/{assembly}_{active_pid}/scene.urdf"
+
+
+# ===================================================================
+# SUBPROCESS -- IsaacGym simulation
+# ===================================================================
+
+def _sim_get_state(env, obs, joint_lower, joint_upper):
+    obs_np = obs[0].cpu().numpy()
+    joint_pos = 0.5 * (obs_np[:N_ACT] + 1.0) * (joint_upper - joint_lower) + joint_lower
+    return (
+        joint_pos,
+        env.object_state[0, :7].cpu().numpy(),
+        env.goal_pose[0].cpu().numpy(),
+        env.obj_keypoint_pos[0].cpu().numpy(),
+        env.goal_keypoint_pos[0].cpu().numpy(),
     )
 
-    checkpoint = torch.load(checkpoint_path, map_location=device)
-    env.set_env_state(checkpoint[0]["env_state"])
-    policy = RlPlayer(OBS_DIM, N_ACT, str(config_path), str(checkpoint_path),
-                       device, env.num_envs)
 
-    # Reset
-    obs_dict, _, _, _ = env.step(torch.zeros((env.num_envs, N_ACT), device=device))
-    obs = obs_dict["obs"]
+def _sim_reset(env, device):
+    import torch
+    obs, _, _, _ = env.step(torch.zeros((env.num_envs, N_ACT), device=device))
+    return obs["obs"]
+
+
+def _sim_episode(conn, env, policy, joint_lower, joint_upper, device):
+    import time, torch  # noqa: E401
+
     policy.reset()
+    obs = _sim_reset(env, device)
 
-    max_succ = int(env.max_consecutive_successes)
-    step = 0
-    done = False
+    step, done, paused = 0, False, False
 
     while not done:
+        while conn.poll(0):
+            cmd = conn.recv()
+            if cmd == "pause":
+                paused = True
+            elif cmd == "resume":
+                paused = False
+            elif cmd == "stop":
+                conn.send(("stopped",))
+                return obs
+
+        if paused:
+            time.sleep(0.05)
+            continue
+
+        t0 = time.time()
+        state = _sim_get_state(env, obs, joint_lower, joint_upper)
         action = policy.get_normalized_action(obs, deterministic_actions=True)
         obs_dict, _, done_tensor, _ = env.step(action)
         obs = obs_dict["obs"]
-        done = bool(done_tensor[0].item())
+        done = done_tensor[0].item()
         step += 1
 
-    successes = int(env.successes[0].item())
-    success_pct = 100.0 * successes / max_succ if max_succ > 0 else 0.0
+        conn.send((
+            "state", state,
+            int(env.successes[0].item()),
+            env.max_consecutive_successes,
+            step,
+        ))
 
-    # Cleanup
-    del policy
-    del env
+        elapsed = time.time() - t0
+        if (sleep := CONTROL_DT - elapsed) > 0:
+            time.sleep(sleep)
 
-    return success_pct, step
+    goal_pct = 100 * int(env.successes[0].item()) / env.max_consecutive_successes
+    conn.send(("done", goal_pct, step))
+    return obs
 
 
-def main():
-    from isaacgym import gymapi  # noqa: F401 isort:skip
-    import torch
+def sim_worker(conn, assembly, part_id, config_path, checkpoint_path, table_urdf_rel):
+    """Child process entry-point."""
+    try:
+        from isaacgym import gymapi  # noqa: F401 isort:skip
+        import json, torch  # noqa: E401
+        from deployment.isaac.isaac_env import create_env
+        from deployment.rl_player import RlPlayer
+        import fabrica.objects  # noqa: F401
 
-    args = parse_args()
-    config_path = resolve_path(args.config_path)
-    checkpoint_path = resolve_path(args.checkpoint_path)
-    device = "cuda" if torch.cuda.is_available() else "cpu"
+        device = "cuda" if torch.cuda.is_available() else "cpu"
+        object_name = f"{assembly}_{part_id}"
+        traj_path = REPO_ROOT / "fabrica" / "trajectories" / object_name / "pick_place.json"
 
-    assets_dir = REPO_ROOT / "assets" / "urdf" / "fabrica"
-    assembly_order = load_assembly_order(assets_dir, args.assembly)
+        with open(traj_path) as f:
+            traj = json.load(f)
+        traj["start_pose"][2] += Z_OFFSET
 
-    print(f"\n{'='*60}")
-    print(f"Assembly: {args.assembly}")
-    print(f"Order: {assembly_order}")
-    print(f"{'='*60}\n")
-
-    results = []
-    for step_idx, pid in enumerate(assembly_order):
-        name = f"{args.assembly}_{pid}"
-        print(f"[Step {step_idx+1}/{len(assembly_order)}] Placing part {pid} ({name})")
-
-        success_pct, steps = run_subproblem(
-            args.assembly, pid, config_path, checkpoint_path,
-            headless=not args.no_headless,
-            torch=torch, device=device,
+        env = create_env(
+            config_path=str(config_path), headless=True, device=device,
+            overrides={
+                **BASE_OVERRIDES,
+                "task.env.objectName": object_name,
+                "task.env.useFixedGoalStates": True,
+                "task.env.fixedGoalStates": traj["goals"],
+                "task.env.asset.table": table_urdf_rel,
+                "task.env.tableResetZ": TABLE_Z,
+                "task.env.objectStartPose": traj["start_pose"],
+            },
         )
 
-        status = "PASS" if success_pct >= 100.0 else "FAIL"
-        results.append({
-            "part_id": pid,
-            "success_pct": success_pct,
-            "steps": steps,
-            "status": status,
-        })
-        print(f"  -> {status}: {success_pct:.0f}% goals in {steps/60:.1f}s\n")
+        joint_lower = env.arm_hand_dof_lower_limits[:N_ACT].cpu().numpy()
+        joint_upper = env.arm_hand_dof_upper_limits[:N_ACT].cpu().numpy()
 
-    # Summary
-    print(f"\n{'='*60}")
-    print(f"Results for {args.assembly}")
-    print(f"{'='*60}")
-    n_pass = sum(1 for r in results if r["status"] == "PASS")
-    for r in results:
-        print(f"  Part {r['part_id']}: {r['status']} ({r['success_pct']:.0f}%, {r['steps']/60:.1f}s)")
-    print(f"\nOverall: {n_pass}/{len(results)} sub-problems passed")
+        env.set_env_state(torch.load(checkpoint_path, map_location=device)[0]["env_state"])
+        policy = RlPlayer(OBS_DIM, N_ACT, config_path, checkpoint_path, device, env.num_envs)
 
-    # Full assembly success = all sub-problems passed
-    if n_pass == len(results):
-        print("Assembly: COMPLETE")
-    else:
-        first_fail = next(r for r in results if r["status"] != "PASS")
-        print(f"Assembly: FAILED at part {first_fail['part_id']}")
+        obs = _sim_reset(env, device)
+        init_state = _sim_get_state(env, obs, joint_lower, joint_upper)
+        conn.send(("ready", init_state))
+
+        while True:
+            cmd = conn.recv()
+            if cmd == "run":
+                obs = _sim_episode(conn, env, policy, joint_lower, joint_upper, device)
+            elif cmd == "quit":
+                break
+
+    except Exception as exc:
+        conn.send(("error", f"{exc}\n{traceback.format_exc()}"))
+
+    conn.close()
+
+
+# ===================================================================
+# MAIN PROCESS -- viser GUI
+# ===================================================================
+
+class AssemblyDemo:
+
+    def __init__(self, config_path: str, checkpoint_path: str, port: int = 8082):
+        self.port = port
+        self.config_path = config_path
+        self.checkpoint_path = checkpoint_path
+        self.server = viser.ViserServer(host="0.0.0.0", port=port)
+
+        self._proc = None  # type: Optional[multiprocessing.Process]
+        self._conn = None
+        self._env_ready = False
+        self._episode_running = False
+        self._is_paused = False
+        self._pending_assembly = ""
+        self._pending_part = ""
+
+        self.ep_count = 0
+        self.ep_goals = []  # type: List[float]
+        self.ep_lengths = []  # type: List[int]
+
+        self.robot = None
+        self._dyn = []  # type: list
+        self._obj_frame = None
+        self._goal_frame = None
+        self._obj_keypoints = []  # type: list
+        self._goal_keypoints = []  # type: list
+
+        # Assembly context
+        self._assembly_order = []  # type: List[str]
+        self._trajectories = {}  # type: Dict[str, dict]  # pid -> trajectory
+
+        # Auto-sequence state
+        self._auto_seq_active = False
+        self._auto_seq_step_idx = 0
+        self._auto_seq_results = []  # type: List[Tuple[str, float, int]]
+
+        # Pre-load available parts per assembly
+        self._assembly_parts = {}  # type: Dict[str, List[str]]
+        for a in ALL_ASSEMBLIES:
+            parts = _get_available_parts(a)
+            if parts:
+                self._assembly_parts[a] = parts
+
+        self._build_gui()
+        self._setup_static_scene()
+
+    def _build_gui(self):
+        self.server.gui.add_markdown("# Fabrica Assembly\n### Interactive Evaluation")
+
+        _PH = "-- Select --"
+        with self.server.gui.add_folder("Assembly Selection", expand_by_default=True):
+            assemblies = [_PH] + list(self._assembly_parts.keys())
+            self._dd_assembly = self.server.gui.add_dropdown(
+                "Assembly", options=assemblies, initial_value=_PH,
+            )
+            self._dd_part = self.server.gui.add_dropdown(
+                "Part", options=[_PH], initial_value=_PH,
+            )
+            self._btn_load = self.server.gui.add_button("Load Environment")
+            self._btn_load.on_click(lambda _: self._load_env())
+            self._md_status = self.server.gui.add_markdown("**Status:** Ready")
+            self._dd_assembly.on_update(lambda _: self._on_assembly_change())
+
+        with self.server.gui.add_folder("Episode Controls", expand_by_default=True):
+            self._btn_run = self.server.gui.add_button("Run Episode")
+            self._btn_run.on_click(lambda _: self._cmd_run())
+            self._btn_pause = self.server.gui.add_button("Pause")
+            self._btn_pause.on_click(lambda _: self._cmd_pause())
+            self._btn_stop = self.server.gui.add_button("Stop Episode")
+            self._btn_stop.on_click(lambda _: self._cmd_stop())
+            self._btn_run_all = self.server.gui.add_button("Run All Steps")
+            self._btn_run_all.on_click(lambda _: self._cmd_run_all())
+
+        with self.server.gui.add_folder("Display", expand_by_default=True):
+            self._cb_keypoints = self.server.gui.add_checkbox(
+                "Show Keypoints", initial_value=True,
+            )
+            self._cb_keypoints.on_update(lambda _: self._toggle_keypoints())
+
+        with self.server.gui.add_folder("Status", expand_by_default=True):
+            self._md_task = self.server.gui.add_markdown("**Task:** --")
+            self._md_prog = self.server.gui.add_markdown("**Progress:** --")
+            self._md_stats = self.server.gui.add_markdown("**Stats:** No episodes yet")
+            self._md_obj = self.server.gui.add_markdown("**Object Pos:** --")
+
+    def _on_assembly_change(self):
+        assembly = self._dd_assembly.value
+        if assembly in self._assembly_parts:
+            parts = [f"Part {p}" for p in self._assembly_parts[assembly]]
+            self._dd_part.options = parts
+            self._dd_part.value = parts[0]
+            # Load assembly context
+            self._assembly_order = _load_assembly_order(assembly)
+            self._trajectories.clear()
+            for pid in self._assembly_order:
+                traj = _load_trajectory(assembly, pid)
+                if traj is not None:
+                    self._trajectories[pid] = traj
+        else:
+            self._dd_part.options = ["-- Select --"]
+            self._dd_part.value = "-- Select --"
+            self._assembly_order = []
+            self._trajectories.clear()
+
+    def _get_step_index(self, assembly: str, part_id: str) -> int:
+        """Get the index of part_id in the assembly order (available parts only)."""
+        available = self._assembly_parts.get(assembly, [])
+        if part_id in available:
+            return available.index(part_id)
+        return 0
+
+    def _get_completed_future_pids(self, assembly: str, part_id: str):
+        """Return (completed_pids, future_pids) based on assembly order."""
+        available = self._assembly_parts.get(assembly, [])
+        if part_id not in available:
+            return [], []
+        si = available.index(part_id)
+        completed = available[:si]
+        future = available[si + 1:]
+        return completed, future
+
+    def _setup_static_scene(self):
+        @self.server.on_client_connect
+        def _(client: viser.ClientHandle):
+            client.camera.position = (0.0, -1.0, 1.0)
+            client.camera.look_at = (0.0, 0.0, 0.5)
+
+        self.server.scene.add_grid("/ground", width=2, height=2, cell_size=0.1)
+        self.server.scene.add_frame(
+            "/robot", position=(0, 0.8, 0), wxyz=(1, 0, 0, 0), show_axes=False,
+        )
+        self.robot = ViserUrdf(
+            self.server,
+            REPO_ROOT / "assets" / "urdf" / "kuka_sharpa_description" / "iiwa14_left_sharpa_adjusted_restricted.urdf",
+            root_node_name="/robot",
+        )
+        self.robot.update_cfg(DEFAULT_DOF_POS)
+
+        self.server.scene.add_frame(
+            "/table", position=(0, 0, TABLE_Z), wxyz=(1, 0, 0, 0), show_axes=False,
+        )
+        self.server.scene.add_box(
+            "/table/wood", color=(180, 130, 70),
+            dimensions=(0.475, 0.4, 0.3), position=(0, 0, 0),
+            side="double", opacity=0.9,
+        )
+
+    def _clear_dynamic(self):
+        for h in self._dyn:
+            try:
+                h.remove()
+            except Exception:
+                pass
+        self._dyn.clear()
+        self._obj_frame = self._goal_frame = None
+        self._obj_keypoints.clear()
+        self._goal_keypoints.clear()
+
+    def _setup_object_goal(self, assembly, part_id):
+        """Set up the active part, goal ghost, static context parts in viser."""
+        self._clear_dynamic()
+        from fabrica.objects import FABRICA_NAME_TO_OBJECT
+
+        object_name = f"{assembly}_{part_id}"
+        obj_urdf = FABRICA_NAME_TO_OBJECT[object_name].urdf_path
+        available = self._assembly_parts.get(assembly, [])
+        part_id_to_idx = {pid: i for i, pid in enumerate(available)}
+
+        completed_pids, future_pids = self._get_completed_future_pids(assembly, part_id)
+
+        # Completed parts -- at goal pose, full color
+        for cpid in completed_pids:
+            traj = self._trajectories.get(cpid)
+            if traj is None:
+                continue
+            mesh_path = ASSETS_DIR / assembly / cpid / f"{cpid}_canonical.obj"
+            if not mesh_path.exists():
+                continue
+            mesh = trimesh.load(str(mesh_path), force="mesh")
+            gp = traj["goals"][-1]
+            idx = part_id_to_idx.get(cpid, 0)
+            color = COLORS[idx % len(COLORS)]
+            frame_name = f"/completed_{cpid}"
+            frame = self.server.scene.add_frame(
+                frame_name,
+                position=(gp[0], gp[1], gp[2]),
+                wxyz=quat_xyzw_to_wxyz(gp[3:7]),
+                show_axes=False,
+            )
+            self._dyn.append(frame)
+            verts = np.array(mesh.vertices, dtype=np.float32)
+            h = self.server.scene.add_mesh_simple(
+                f"{frame_name}/mesh",
+                vertices=verts,
+                faces=np.array(mesh.faces, dtype=np.uint32),
+                color=color,
+            )
+            self._dyn.append(h)
+
+        # Future parts -- at start pose, dim transparent
+        for fpid in future_pids:
+            traj = self._trajectories.get(fpid)
+            if traj is None:
+                continue
+            mesh_path = ASSETS_DIR / assembly / fpid / f"{fpid}_canonical.obj"
+            if not mesh_path.exists():
+                continue
+            mesh = trimesh.load(str(mesh_path), force="mesh")
+            sp = traj["start_pose"]
+            idx = part_id_to_idx.get(fpid, 0)
+            color = COLORS[idx % len(COLORS)]
+            frame_name = f"/future_{fpid}"
+            frame = self.server.scene.add_frame(
+                frame_name,
+                position=(sp[0], sp[1], sp[2]),
+                wxyz=quat_xyzw_to_wxyz(sp[3:7]),
+                show_axes=False,
+            )
+            self._dyn.append(frame)
+            verts = np.array(mesh.vertices, dtype=np.float32)
+            h = self.server.scene.add_mesh_simple(
+                f"{frame_name}/mesh",
+                vertices=verts,
+                faces=np.array(mesh.faces, dtype=np.uint32),
+                color=color,
+                opacity=0.3,
+            )
+            self._dyn.append(h)
+
+        # Active part
+        self._obj_frame = self.server.scene.add_frame(
+            "/object", show_axes=True, axes_length=0.1, axes_radius=0.001,
+        )
+        self._dyn.append(self._obj_frame)
+        ViserUrdf(self.server, obj_urdf, root_node_name="/object")
+
+        # Goal ghost
+        self._goal_frame = self.server.scene.add_frame(
+            "/goal", show_axes=True, axes_length=0.1, axes_radius=0.001,
+        )
+        self._dyn.append(self._goal_frame)
+        ViserUrdf(self.server, obj_urdf, root_node_name="/goal",
+                  mesh_color_override=(0, 255, 0, 0.5))
+
+    def _setup_keypoints(self, num_keypoints):
+        for kp in self._obj_keypoints + self._goal_keypoints:
+            try:
+                kp.remove()
+            except Exception:
+                pass
+        self._obj_keypoints.clear()
+        self._goal_keypoints.clear()
+
+        for i in range(num_keypoints):
+            self._obj_keypoints.append(
+                self.server.scene.add_icosphere(f"/obj_kp/{i}", radius=0.005, color=(255, 0, 0))
+            )
+            self._goal_keypoints.append(
+                self.server.scene.add_icosphere(f"/goal_kp/{i}", radius=0.005, color=(0, 255, 0), opacity=0.5)
+            )
+        # Apply current visibility
+        self._apply_keypoint_visibility()
+
+    def _toggle_keypoints(self):
+        self._apply_keypoint_visibility()
+
+    def _apply_keypoint_visibility(self):
+        visible = self._cb_keypoints.value
+        for kp in self._obj_keypoints + self._goal_keypoints:
+            kp.visible = visible
+
+    # -- Subprocess management ------------------------------------------
+
+    def _kill_subprocess(self):
+        if self._conn is not None:
+            try:
+                self._conn.send("quit")
+            except (BrokenPipeError, OSError):
+                pass
+            self._conn.close()
+            self._conn = None
+        if self._proc is not None:
+            self._proc.join(timeout=5)
+            if self._proc.is_alive():
+                self._proc.kill()
+                self._proc.join()
+            self._proc = None
+        self._env_ready = False
+        self._episode_running = False
+        self._is_paused = False
+
+    def _load_env(self, assembly=None, part_id=None):
+        if assembly is None:
+            assembly = self._dd_assembly.value
+        if part_id is None:
+            part_display = self._dd_part.value
+            if not part_display.startswith("Part "):
+                self._md_status.content = "**Status:** Please select an assembly and part."
+                return
+            part_id = part_display.split("Part ")[1]
+
+        if assembly not in self._assembly_parts:
+            self._md_status.content = "**Status:** Please select an assembly and part."
+            return
+
+        self._kill_subprocess()
+
+        self._pending_assembly = assembly
+        self._pending_part = part_id
+
+        label = f"{assembly} / Part {part_id}"
+        self._md_status.content = f"**Status:** Loading *{label}* ..."
+        self._md_task.content = f"**Task:** {label}"
+
+        if not self._auto_seq_active:
+            self.ep_count = 0
+            self.ep_goals.clear()
+            self.ep_lengths.clear()
+            self._md_stats.content = "**Stats:** No episodes yet"
+
+        self.robot.update_cfg(DEFAULT_DOF_POS)
+
+        # Ensure assembly context is loaded
+        if not self._assembly_order or self._assembly_order != _load_assembly_order(assembly):
+            self._assembly_order = _load_assembly_order(assembly)
+            self._trajectories.clear()
+            for pid in self._assembly_order:
+                traj = _load_trajectory(assembly, pid)
+                if traj is not None:
+                    self._trajectories[pid] = traj
+
+        # Generate table URDF with completed parts
+        completed_pids, _ = self._get_completed_future_pids(assembly, part_id)
+        table_urdf_rel = _generate_table_urdf(assembly, part_id, completed_pids)
+
+        ctx = multiprocessing.get_context("spawn")
+        parent_conn, child_conn = ctx.Pipe()
+        self._conn = parent_conn
+        self._proc = ctx.Process(
+            target=sim_worker,
+            args=(child_conn, assembly, part_id,
+                  self.config_path, self.checkpoint_path, table_urdf_rel),
+            daemon=True,
+        )
+        self._proc.start()
+        child_conn.close()
+        print(f"[launcher] Spawned subprocess pid={self._proc.pid} for {assembly}_{part_id}")
+
+    # -- Commands -------------------------------------------------------
+
+    def _send(self, msg):
+        if self._conn is not None:
+            try:
+                self._conn.send(msg)
+            except (BrokenPipeError, OSError):
+                pass
+
+    def _cmd_run(self):
+        if not self._env_ready:
+            self._md_status.content = "**Status:** Load an environment first."
+            return
+        if self._episode_running:
+            return
+        self._episode_running = True
+        self._is_paused = False
+        self._btn_pause.name = "Pause"
+        self._md_status.content = "**Status:** Running episode..."
+        self._send("run")
+
+    def _cmd_pause(self):
+        if not self._episode_running:
+            return
+        self._is_paused = not self._is_paused
+        self._send("pause" if self._is_paused else "resume")
+        self._btn_pause.name = "Resume" if self._is_paused else "Pause"
+
+    def _cmd_stop(self):
+        if self._episode_running:
+            self._send("stop")
+        # Also cancel auto-sequence
+        if self._auto_seq_active:
+            self._auto_seq_active = False
+            self._md_status.content = "**Status:** Auto-sequence cancelled."
+
+    def _cmd_run_all(self):
+        assembly = self._dd_assembly.value
+        if assembly not in self._assembly_parts:
+            self._md_status.content = "**Status:** Please select an assembly first."
+            return
+        if self._episode_running:
+            return
+
+        available = self._assembly_parts[assembly]
+        if not available:
+            self._md_status.content = "**Status:** No available parts for this assembly."
+            return
+
+        self._auto_seq_active = True
+        self._auto_seq_step_idx = 0
+        self._auto_seq_results = []
+        self.ep_count = 0
+        self.ep_goals.clear()
+        self.ep_lengths.clear()
+
+        pid = available[0]
+        self._md_status.content = f"**Status:** Auto-sequence: step 1/{len(available)}"
+        self._load_env(assembly, pid)
+
+    # -- Scene update ---------------------------------------------------
+
+    def _update_viz(self, state_tuple):
+        joint_pos, obj_pose, goal_pose = state_tuple[0], state_tuple[1], state_tuple[2]
+        self.robot.update_cfg(joint_pos)
+
+        if self._obj_frame is not None:
+            self._obj_frame.position = tuple(obj_pose[:3])
+            self._obj_frame.wxyz = quat_xyzw_to_wxyz(obj_pose[3:7])
+        if self._goal_frame is not None:
+            self._goal_frame.position = tuple(goal_pose[:3])
+            self._goal_frame.wxyz = quat_xyzw_to_wxyz(goal_pose[3:7])
+
+        if len(state_tuple) > 3:
+            obj_kps, goal_kps = state_tuple[3], state_tuple[4]
+            for handle, pos in zip(self._obj_keypoints, obj_kps):
+                handle.position = tuple(pos)
+            for handle, pos in zip(self._goal_keypoints, goal_kps):
+                handle.position = tuple(pos)
+
+    # -- Message handling -----------------------------------------------
+
+    def _handle(self, msg):
+        tag = msg[0]
+
+        if tag == "ready":
+            init_state = msg[1]
+            self._setup_object_goal(self._pending_assembly, self._pending_part)
+            if len(init_state) > 3:
+                self._setup_keypoints(init_state[3].shape[0])
+            self._update_viz(init_state)
+            self._env_ready = True
+
+            if self._auto_seq_active:
+                # Auto-start the episode
+                available = self._assembly_parts.get(self._pending_assembly, [])
+                step_num = self._auto_seq_step_idx + 1
+                self._md_status.content = (
+                    f"**Status:** Auto-sequence: running step {step_num}/{len(available)} "
+                    f"(Part {self._pending_part})"
+                )
+                self._cmd_run()
+            else:
+                self._md_status.content = "**Status:** Ready -- click **Run Episode**"
+            print("[launcher] Environment ready")
+
+        elif tag == "state":
+            state, successes, max_succ, step = msg[1], msg[2], msg[3], msg[4]
+            self._update_viz(state)
+            pct = 100 * successes / max_succ if max_succ > 0 else 0
+            self._md_prog.content = (
+                f"**Time:** {step / 60.0:.1f}s &nbsp;|&nbsp; "
+                f"**Goal:** {successes}/{max_succ} ({pct:.0f}%)"
+            )
+            obj_pos = state[1][:3]
+            self._md_obj.content = (
+                f"**Object Pos:** {obj_pos[0]:.3f}, {obj_pos[1]:.3f}, {obj_pos[2]:.3f}"
+            )
+
+        elif tag == "done":
+            goal_pct, steps = msg[1], msg[2]
+            self._episode_running = False
+            self.ep_goals.append(goal_pct)
+            self.ep_lengths.append(steps)
+            self.ep_count += 1
+            avg_g = np.mean(self.ep_goals)
+            avg_t = np.mean(self.ep_lengths) / 60.0
+            self._md_stats.content = (
+                f"**Episodes:** {self.ep_count} &nbsp;|&nbsp; "
+                f"**Avg Goal:** {avg_g:.1f}% &nbsp;|&nbsp; "
+                f"**Avg Time:** {avg_t:.1f}s"
+            )
+            print(f"[launcher] Episode done: {goal_pct:.0f}% goals in {steps / 60.0:.1f}s")
+
+            if self._auto_seq_active:
+                self._auto_seq_results.append(
+                    (self._pending_part, goal_pct, steps)
+                )
+                assembly = self._pending_assembly
+                available = self._assembly_parts.get(assembly, [])
+                self._auto_seq_step_idx += 1
+
+                if self._auto_seq_step_idx < len(available):
+                    next_pid = available[self._auto_seq_step_idx]
+                    step_num = self._auto_seq_step_idx + 1
+                    self._md_status.content = (
+                        f"**Status:** Auto-sequence: loading step "
+                        f"{step_num}/{len(available)} (Part {next_pid})..."
+                    )
+                    self._load_env(assembly, next_pid)
+                else:
+                    # All steps done -- show summary
+                    self._auto_seq_active = False
+                    summary_lines = ["**Auto-sequence complete:**\n"]
+                    for pid, gpct, st in self._auto_seq_results:
+                        summary_lines.append(
+                            f"- Part {pid}: {gpct:.0f}% goals, {st / 60.0:.1f}s"
+                        )
+                    overall_avg = np.mean([r[1] for r in self._auto_seq_results])
+                    summary_lines.append(f"\n**Overall avg:** {overall_avg:.1f}%")
+                    self._md_status.content = '\n'.join(summary_lines)
+                    print("[launcher] Auto-sequence complete")
+                    for pid, gpct, st in self._auto_seq_results:
+                        print(f"  Part {pid}: {gpct:.0f}% goals, {st / 60.0:.1f}s")
+            else:
+                self._md_status.content = (
+                    f"**Status:** Done -- {steps / 60.0:.1f}s, {goal_pct:.0f}% goals"
+                )
+
+        elif tag == "stopped":
+            self._episode_running = False
+            self._md_status.content = "**Status:** Episode stopped."
+
+        elif tag == "error":
+            self._env_ready = False
+            self._episode_running = False
+            self._auto_seq_active = False
+            self._md_status.content = f"**Status:** Error -- {msg[1][:200]}"
+            print(f"[launcher] Subprocess error:\n{msg[1]}")
+
+    def _poll(self):
+        if self._conn is None:
+            return
+        try:
+            while self._conn.poll(0):
+                self._handle(self._conn.recv())
+        except (EOFError, ConnectionResetError, OSError):
+            self._conn = None
+            if self._proc is not None and not self._proc.is_alive():
+                self._md_status.content = "**Status:** Subprocess exited unexpectedly."
+                self._proc = None
+                self._env_ready = False
+                self._episode_running = False
+
+    def run(self):
+        print()
+        print("  +-------------------------------------------------+")
+        print("  |     Fabrica Assembly Interactive Evaluation      |")
+        print(f"  |     http://localhost:{self.port:<26}|")
+        print("  +-------------------------------------------------+")
+        print()
+
+        try:
+            while True:
+                self._poll()
+                time.sleep(1.0 / 120.0)
+        except KeyboardInterrupt:
+            print("\n[launcher] Shutting down...")
+            self._kill_subprocess()
 
 
 if __name__ == "__main__":
-    main()
+    parser = argparse.ArgumentParser(description="Fabrica Assembly Interactive Evaluation")
+    parser.add_argument("--port", type=int, default=8080)
+    parser.add_argument("--config-path", type=str, default="pretrained_policy/config.yaml")
+    parser.add_argument("--checkpoint-path", type=str, default="pretrained_policy/model.pth")
+    args = parser.parse_args()
+
+    def _resolve(p):
+        path = Path(p)
+        if path.exists():
+            return str(path)
+        path = REPO_ROOT / p
+        if path.exists():
+            return str(path)
+        raise FileNotFoundError(p)
+
+    AssemblyDemo(
+        config_path=_resolve(args.config_path),
+        checkpoint_path=_resolve(args.checkpoint_path),
+        port=args.port,
+    ).run()
