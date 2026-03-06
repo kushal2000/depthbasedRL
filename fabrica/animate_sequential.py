@@ -170,16 +170,27 @@ def main():
 
     # Animation state
     part_frames = {}  # part_id -> frame handle
+    part_labels = {}  # part_id -> label handle
     # Full waypoint paths: pid -> list of (pos, quat_wxyz) including start_pose + all goals
     waypoints = {}  # type: dict
     assembly_order = []
     current_step = 0
     is_animating = False
 
+    def _apply_visibility():
+        show_axes = cb_axes.value
+        show_labels = cb_labels.value
+        for frame in part_frames.values():
+            frame.visible = True
+            frame.show_axes = show_axes
+        for label in part_labels.values():
+            label.visible = show_labels
+
     def show_assembly(name):
-        nonlocal part_frames, waypoints, assembly_order, current_step
+        nonlocal part_frames, part_labels, waypoints, assembly_order, current_step
         mesh_scene.clear()
         part_frames = {}
+        part_labels = {}
 
         parts, start_rots = all_assembly_data[name]
         assembly_order = [pid for pid, _, _, _ in parts]
@@ -236,8 +247,10 @@ def main():
                 position=(0, 0, mesh.bounding_box.extents[2] / 2.0 + 0.02),
             )
             mesh_scene.add(label)
+            part_labels[pid] = label
 
         apply_positions(current_step, 0.0)
+        _apply_visibility()
         update_status()
 
     def _interpolate_waypoints(wps, t):
@@ -338,6 +351,8 @@ def main():
     duration_slider = server.gui.add_slider(
         "Step Duration (s)", min=0.2, max=3.0, step=0.1, initial_value=1.0
     )
+    cb_axes = server.gui.add_checkbox("Show Axes", initial_value=True)
+    cb_labels = server.gui.add_checkbox("Show Part IDs", initial_value=True)
     status_text = server.gui.add_markdown("**Status:** Ready")
     play_btn = server.gui.add_button("Play All")
     fwd_btn = server.gui.add_button("Step Forward")
@@ -349,6 +364,8 @@ def main():
     fwd_btn.on_click(lambda _: animate_step_forward())
     back_btn.on_click(lambda _: animate_step_back())
     reset_btn.on_click(lambda _: reset())
+    cb_axes.on_update(lambda _: _apply_visibility())
+    cb_labels.on_update(lambda _: _apply_visibility())
 
     show_assembly(dropdown.value)
 
