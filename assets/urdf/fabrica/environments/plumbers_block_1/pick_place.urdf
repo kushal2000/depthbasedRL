@@ -1,0 +1,73 @@
+<?xml version="1.0"?>
+<robot name="table_plumbers_block_1">
+  <link name="box">
+    <visual>
+      <material name="wood">
+        <color rgba="0.82 0.56 0.35 1.0"/>
+      </material>
+      <origin xyz="0 0 0"/>
+      <geometry>
+        <box size="0.475 0.4 0.3"/>
+      </geometry>
+    </visual>
+    <collision>
+      <origin xyz="0 0 0"/>
+      <geometry>
+        <box size="0.475 0.4 0.3"/>
+      </geometry>
+    </collision>
+    <!-- Completed part 2 -->
+    <visual>
+      <material name="part_2">
+        <color rgba="0.4 0.4 0.6 1.0"/>
+      </material>
+      <origin xyz="-0.080000 0.038987 0.156097" rpy="0 0 0"/>
+      <geometry>
+        <mesh filename="../../plumbers_block/2/2.obj" scale="1 1 1"/>
+      </geometry>
+    </visual>
+    <collision>
+      <origin xyz="-0.080000 0.038987 0.156097" rpy="0 0 0"/>
+      <geometry>
+        <mesh filename="../../plumbers_block/2/2.obj" scale="1 1 1"/>
+      </geometry>
+    </collision>
+    <!-- Completed part 0 -->
+    <visual>
+      <material name="part_0">
+        <color rgba="0.4 0.4 0.6 1.0"/>
+      </material>
+      <origin xyz="-0.080000 0.038987 0.156097" rpy="0 0 0"/>
+      <geometry>
+        <mesh filename="../../plumbers_block/0/0.obj" scale="1 1 1"/>
+      </geometry>
+    </visual>
+    <collision>
+      <origin xyz="-0.080000 0.038987 0.156097" rpy="0 0 0"/>
+      <geometry>
+        <mesh filename="../../plumbers_block/0/0.obj" scale="1 1 1"/>
+      </geometry>
+    </collision>
+    <!-- Completed part 3 -->
+    <visual>
+      <material name="part_3">
+        <color rgba="0.4 0.4 0.6 1.0"/>
+      </material>
+      <origin xyz="-0.080000 0.038987 0.156097" rpy="0 0 0"/>
+      <geometry>
+        <mesh filename="../../plumbers_block/3/3.obj" scale="1 1 1"/>
+      </geometry>
+    </visual>
+    <collision>
+      <origin xyz="-0.080000 0.038987 0.156097" rpy="0 0 0"/>
+      <geometry>
+        <mesh filename="../../plumbers_block/3/3.obj" scale="1 1 1"/>
+      </geometry>
+    </collision>
+    <inertial>
+      <mass value="500"/>
+      <friction value="1.0"/>
+      <inertia ixx="1000.0" ixy="0.0" ixz="0.0" iyy="1000.0" iyz="0.0" izz="1000.0"/>
+    </inertial>
+  </link>
+</robot>
