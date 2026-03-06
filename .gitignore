@@ -222,3 +222,6 @@ isaacgym/
 
 # FoundationPose (separate repo)
 FoundationPose/
+
+# Claude Code
+.claude/
