@@ -38,6 +38,7 @@ python fabrica/eval_assembly.py \
 | `--use-sdf` | Use SDF collision meshes instead of V-HACD |
 | `--final-goal-tolerance` | Tighter tolerance for the last subgoal (default: uses `successTolerance`) |
 | `--override KEY VALUE` | Override any config value (repeatable) |
+| `--no-headless` | Show the IsaacGym viewer window |
 
 ## debug_insertion.py
 

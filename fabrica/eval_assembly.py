@@ -281,7 +281,8 @@ def _sim_episode(conn, env, policy, joint_lower, joint_upper, device):
 
 
 def sim_worker(conn, assembly, part_id, config_path, checkpoint_path, table_urdf_rel,
-               final_goal_tolerance=None, use_sdf=False, extra_overrides=None):
+               final_goal_tolerance=None, use_sdf=False, extra_overrides=None,
+               headless=True):
     """Child process entry-point."""
     try:
         from isaacgym import gymapi  # noqa: F401 isort:skip
@@ -300,7 +301,7 @@ def sim_worker(conn, assembly, part_id, config_path, checkpoint_path, table_urdf
         traj["start_pose"][2] += Z_OFFSET
 
         env = create_env(
-            config_path=str(config_path), headless=True, device=device,
+            config_path=str(config_path), headless=headless, device=device,
             overrides={
                 **BASE_OVERRIDES,
                 "task.env.objectName": object_name,
@@ -347,13 +348,14 @@ class AssemblyDemo:
 
     def __init__(self, config_path: str, checkpoint_path: str, port: int = 8082,
                  final_goal_tolerance: float = None, use_sdf: bool = False,
-                 extra_overrides: dict = None):
+                 extra_overrides: dict = None, headless: bool = True):
         self.port = port
         self.config_path = config_path
         self.checkpoint_path = checkpoint_path
         self.final_goal_tolerance = final_goal_tolerance
         self.use_sdf = use_sdf
         self.extra_overrides = extra_overrides or {}
+        self.headless = headless
         self.server = viser.ViserServer(host="0.0.0.0", port=port)
 
         self._proc = None  # type: Optional[multiprocessing.Process]
@@ -696,7 +698,8 @@ class AssemblyDemo:
             target=sim_worker,
             args=(child_conn, assembly, part_id,
                   self.config_path, self.checkpoint_path, table_urdf_rel,
-                  self.final_goal_tolerance, self.use_sdf, self.extra_overrides),
+                  self.final_goal_tolerance, self.use_sdf, self.extra_overrides,
+                  self.headless),
             daemon=True,
         )
         self._proc.start()
@@ -926,6 +929,8 @@ if __name__ == "__main__":
                         help="Tighter tolerance for the last subgoal in fixedGoalStates")
     parser.add_argument("--use-sdf", action="store_true",
                         help="Use SDF collision meshes instead of V-HACD")
+    parser.add_argument("--no-headless", action="store_true",
+                        help="Show IsaacGym viewer window")
     parser.add_argument("--override", nargs=2, action="append", default=[],
                         metavar=("KEY", "VALUE"),
                         help="Extra config overrides, e.g. --override task.sim.physx.num_position_iterations 32")
@@ -962,4 +967,5 @@ if __name__ == "__main__":
         final_goal_tolerance=args.final_goal_tolerance,
         use_sdf=args.use_sdf,
         extra_overrides=extra_overrides,
+        headless=not args.no_headless,
     ).run()
