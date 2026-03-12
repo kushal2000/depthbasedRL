@@ -8,14 +8,18 @@
 #SBATCH --partition=portal
 #SBATCH --exclude=portal-compute-01
 #SBATCH --gres=gpu:1
-
-# Expects these env vars via sbatch --export:
-#   REPO_ROOT, ASSEMBLY, PART_ID, CHECKPOINT (optional)
+#SBATCH -o /dev/null
+#SBATCH -e /dev/null
 
 set -euo pipefail
 
-OBJECT_NAME="${ASSEMBLY}_${PART_ID}"
+REPO_ROOT="/share/portal/kk837/depthbasedRL"
+OBJECT_NAME="beam_2"
 TRAJ_JSON="$REPO_ROOT/fabrica/trajectories/${OBJECT_NAME}/pick_place.json"
+CHECKPOINT="$REPO_ROOT/pretrained_policy/model.pth"
+
+cd "$REPO_ROOT"
+source .venv/bin/activate
 
 read -r GOALS START_POSE <<< "$(python3 -c "
 import json
@@ -24,29 +28,15 @@ with open('$TRAJ_JSON') as f:
 print(str(t['goals']).replace(' ',''), str(t['start_pose']).replace(' ',''))
 ")"
 
-if [[ -n "${CHECKPOINT:-}" ]]; then
-    MODE="finetune"
-else
-    MODE="scratch"
-fi
-
 DATETIME=$(date +"%Y-%m-%d_%H-%M-%S")
-EXPERIMENT_NAME="${OBJECT_NAME}_${MODE}_${DATETIME}"
+EXPERIMENT_NAME="beam_2_tight_tolerance_0.01_fixed_start_${DATETIME}"
 scontrol update JobId="$SLURM_JOB_ID" JobName="$EXPERIMENT_NAME"
-WANDB_GROUP="fabrica_${ASSEMBLY}"
-WANDB_PROJECT="fabrica_training"
+WANDB_GROUP="beam_tight_tolerance"
+WANDB_PROJECT="FABRICA_TRAINING"
 HYDRA_RUN_DIR="./train_dir/${WANDB_PROJECT}/${WANDB_GROUP}/${EXPERIMENT_NAME}"
 mkdir -p "$HYDRA_RUN_DIR"
 exec > "${HYDRA_RUN_DIR}/slurm.log" 2> "${HYDRA_RUN_DIR}/slurm.err"
 TABLE_URDF="urdf/fabrica/environments/${OBJECT_NAME}/pick_place.urdf"
-
-CHECKPOINT_ARG=""
-if [[ -n "${CHECKPOINT:-}" ]]; then
-    CHECKPOINT_ARG="checkpoint=$CHECKPOINT"
-fi
-
-cd "$REPO_ROOT"
-source .venv/bin/activate
 
 python -u -m isaacgymenvs.train \
     task=SimToolRealLSTMAsymmetric \
@@ -76,6 +66,7 @@ python -u -m isaacgymenvs.train \
     task.env.useFixedInitObjectPose=True \
     task.env.asset.table="$TABLE_URDF" \
     task.env.tableResetZ=0.38 \
+    task.env.finalGoalSuccessTolerance=0.01 \
     wandb_project="$WANDB_PROJECT" \
     wandb_entity=kk837 \
     wandb_activate=True \
@@ -86,4 +77,4 @@ python -u -m isaacgymenvs.train \
     experiment="00_$EXPERIMENT_NAME" \
     hydra.run.dir="$HYDRA_RUN_DIR" \
     train.params.config.max_frames=100_000_000_000_000 \
-    $CHECKPOINT_ARG
+    checkpoint="$CHECKPOINT"

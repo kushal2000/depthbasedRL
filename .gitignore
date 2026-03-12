@@ -225,3 +225,7 @@ FoundationPose/
 
 # Claude Code
 .claude/
+
+# error and log files
+*.err
+*.log

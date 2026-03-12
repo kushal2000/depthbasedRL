@@ -28,6 +28,10 @@ Each assembly has numbered part subdirs (e.g., `beam/0/0.obj`) and an `assembly_
 - Viser `add_line_segments` does NOT reliably render — use mesh geometry for visual markers
 - Default viser port: 8082
 
+## Workflow
+- Always kill the old viser server before starting a new one (e.g., `kill $(lsof -t -i:<port>)`)
+- Only run one eval server at a time, always on port 8080
+
 ## Conventions
 - Assembly task specs (order, rotations) go in JSON config files, not hardcoded in Python
 - OBJ meshes are in assembled reference frame — no rotation needed at final position

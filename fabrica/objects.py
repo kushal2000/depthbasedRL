@@ -40,6 +40,32 @@ CANONICAL_URDF_TEMPLATE = """\
 </robot>
 """
 
+SDF_URDF_TEMPLATE = """\
+<?xml version="1.0"?>
+<robot name="{name}">
+  <link name="{name}">
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry>
+        <mesh filename="{mesh_file}" scale="1 1 1"/>
+      </geometry>
+    </visual>
+    <collision>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry>
+        <mesh filename="{mesh_file}" scale="1 1 1"/>
+      </geometry>
+      <sdf resolution="{sdf_resolution}"/>
+    </collision>
+    <inertial>
+      <density value="1250.0"/>
+    </inertial>
+  </link>
+</robot>
+"""
+
+DEFAULT_SDF_RESOLUTION = 512
+
 
 def _load_assembly_objects(assembly_name):
     """Load Object entries using canonical extents from canonical_transforms.json.
@@ -74,6 +100,24 @@ def _load_assembly_objects(assembly_name):
             urdf_path=urdf_path,
             scale=rescale_by_factor(tuple(ext), factor=25),
             need_vhacd=True,
+        )
+
+        # SDF variant: same mesh but with SDF collision instead of V-HACD
+        sdf_name = f"{name}_sdf"
+        sdf_urdf_path = part_dir / f"{sdf_name}.urdf"
+        if canonical_obj.exists():
+            sdf_expected = SDF_URDF_TEMPLATE.format(
+                name=sdf_name,
+                mesh_file=f"{pid}_canonical.obj",
+                sdf_resolution=DEFAULT_SDF_RESOLUTION,
+            )
+            if not sdf_urdf_path.exists() or sdf_urdf_path.read_text() != sdf_expected:
+                sdf_urdf_path.write_text(sdf_expected)
+
+        objects[sdf_name] = Object(
+            urdf_path=sdf_urdf_path,
+            scale=rescale_by_factor(tuple(ext), factor=25),
+            need_vhacd=False,
         )
 
     return objects

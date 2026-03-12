@@ -1,0 +1,21 @@
+<?xml version="1.0"?>
+<robot name="duct_5_sdf">
+  <link name="duct_5_sdf">
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry>
+        <mesh filename="5_canonical.obj" scale="1 1 1"/>
+      </geometry>
+    </visual>
+    <collision>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry>
+        <mesh filename="5_canonical.obj" scale="1 1 1"/>
+      </geometry>
+      <sdf resolution="512"/>
+    </collision>
+    <inertial>
+      <density value="1250.0"/>
+    </inertial>
+  </link>
+</robot>

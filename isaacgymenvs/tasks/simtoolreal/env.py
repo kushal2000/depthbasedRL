@@ -1240,6 +1240,9 @@ class SimToolReal(VecTask):
             object_asset_options = gymapi.AssetOptions()
             object_asset_options.vhacd_enabled = need_vhacd
 
+            if self.cfg["env"].get("useSDF", False):
+                object_asset_options.thickness = 0.0
+
             # WARNING: This should not be done if trying to set different densities for different parts of the object, unless handled appropriately in the URDF
             object_asset_options.collapse_fixed_joints = True
 
@@ -1568,6 +1571,9 @@ class SimToolReal(VecTask):
         del env_state["rewards_episode"]
 
         for key in self.get_env_state().keys():
+            if key == "object_init_state" and self.cfg["env"].get("objectStartPose") is not None:
+                print(f"Skipping checkpoint restore of object_init_state (objectStartPose is set)")
+                continue
             value = env_state.get(key, None)
             if value is None:
                 continue
@@ -1789,7 +1795,7 @@ class SimToolReal(VecTask):
         asset_options.flip_visual_attachments = False
         asset_options.collapse_fixed_joints = True
         asset_options.disable_gravity = True
-        asset_options.thickness = 0.001
+        asset_options.thickness = 0.0 if self.cfg["env"].get("useSDF", False) else 0.001
         asset_options.angular_damping = 0.01
         asset_options.linear_damping = 0.01
 
@@ -1852,6 +1858,8 @@ class SimToolReal(VecTask):
         table_asset_options = gymapi.AssetOptions()
         table_asset_options.disable_gravity = True
         table_asset_options.fix_base_link = True
+        if self.cfg["env"].get("useSDF", False):
+            table_asset_options.thickness = 0.0
         table_asset = self.gym.load_asset(
             self.sim, asset_root, self.asset_files_dict["table"], table_asset_options
         )
@@ -2571,7 +2579,14 @@ class SimToolReal(VecTask):
         if self.cfg["env"]["fixedSizeKeypointReward"]:
             keypoint_rew = keypoint_rew_fixed_size
 
-        keypoint_success_tolerance = self.success_tolerance * self.keypoint_scale
+        final_tol = self.cfg["env"].get("finalGoalSuccessTolerance", None)
+        if final_tol is not None and self.cfg["env"]["useFixedGoalStates"]:
+            is_final_goal = self.successes == (self.max_consecutive_successes - 1)
+            base_tol = self.success_tolerance * self.keypoint_scale
+            tight_tol = final_tol * self.keypoint_scale
+            keypoint_success_tolerance = torch.where(is_final_goal, tight_tol, base_tol)
+        else:
+            keypoint_success_tolerance = self.success_tolerance * self.keypoint_scale
 
         # noinspection PyTypeChecker
         near_goal: Tensor = self.keypoints_max_dist <= keypoint_success_tolerance
@@ -5162,9 +5177,12 @@ class SimToolReal(VecTask):
         )
 
         # Different friction for normal links (low friction) and fingertips (high friction)
+        use_sdf = self.cfg["env"].get("useSDF", False)
         for i in range(len(rigid_shape_props)):
             if friction is not None:
                 rigid_shape_props[i].friction = friction
+            if use_sdf:
+                rigid_shape_props[i].thickness = 0.0
 
         # Rigid bodies (links) are not the same as rigid shapes (collision geometries)
         # Each rigid body can have >=1 rigid shapes
@@ -5240,8 +5258,11 @@ class SimToolReal(VecTask):
             len(rigid_shape_props),
             self.gym.get_asset_rigid_shape_count(table_asset),
         )
+        use_sdf = self.cfg["env"].get("useSDF", False)
         for i in range(len(rigid_shape_props)):
             rigid_shape_props[i].friction = friction
+            if use_sdf:
+                rigid_shape_props[i].thickness = 0.0
         self.gym.set_asset_rigid_shape_properties(table_asset, rigid_shape_props)
 
     def set_object_asset_rigid_shape_properties(
@@ -5252,8 +5273,11 @@ class SimToolReal(VecTask):
             len(rigid_shape_props),
             self.gym.get_asset_rigid_shape_count(object_asset),
         )
+        use_sdf = self.cfg["env"].get("useSDF", False)
         for i in range(len(rigid_shape_props)):
             rigid_shape_props[i].friction = friction
+            if use_sdf:
+                rigid_shape_props[i].thickness = 0.0
         self.gym.set_asset_rigid_shape_properties(object_asset, rigid_shape_props)
 
     def set_object_masses_and_inertias(

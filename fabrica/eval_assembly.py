@@ -144,14 +144,16 @@ def _quat_xyzw_to_rpy(q) -> Tuple[float, float, float]:
     return roll, pitch, yaw
 
 
-def _generate_table_urdf(assembly: str, active_pid: str, completed_pids: List[str]) -> str:
+def _generate_table_urdf(assembly: str, active_pid: str, completed_pids: List[str],
+                         use_sdf: bool = False, sdf_resolution: int = 512) -> str:
     """Generate a table URDF with completed parts baked in as fixed collision links.
 
     Returns the URDF path relative to the assets root (for IsaacGym).
     """
     env_dir = ASSETS_DIR / "environments" / f"{assembly}_{active_pid}"
     env_dir.mkdir(parents=True, exist_ok=True)
-    out_path = env_dir / "scene.urdf"
+    suffix = "_sdf" if use_sdf else ""
+    out_path = env_dir / f"scene{suffix}.urdf"
 
     lines = [
         '<?xml version="1.0"?>',
@@ -193,6 +195,7 @@ def _generate_table_urdf(assembly: str, active_pid: str, completed_pids: List[st
             '    <collision>',
             '      <origin xyz="0 0 0" rpy="0 0 0"/>',
             f'      <geometry><mesh filename="{mesh_rel}" scale="1 1 1"/></geometry>',
+            *([ f'      <sdf resolution="{sdf_resolution}"/>'] if use_sdf else []),
             '    </collision>',
             '  </link>',
             f'  <joint name="part_{pid}_joint" type="fixed">',
@@ -204,7 +207,7 @@ def _generate_table_urdf(assembly: str, active_pid: str, completed_pids: List[st
 
     lines.append('</robot>')
     out_path.write_text('\n'.join(lines))
-    return f"urdf/fabrica/environments/{assembly}_{active_pid}/scene.urdf"
+    return f"urdf/fabrica/environments/{assembly}_{active_pid}/scene{suffix}.urdf"
 
 
 # ===================================================================
@@ -265,6 +268,7 @@ def _sim_episode(conn, env, policy, joint_lower, joint_upper, device):
             int(env.successes[0].item()),
             env.max_consecutive_successes,
             step,
+            float(env.keypoints_max_dist[0].item()),
         ))
 
         elapsed = time.time() - t0
@@ -276,7 +280,8 @@ def _sim_episode(conn, env, policy, joint_lower, joint_upper, device):
     return obs
 
 
-def sim_worker(conn, assembly, part_id, config_path, checkpoint_path, table_urdf_rel):
+def sim_worker(conn, assembly, part_id, config_path, checkpoint_path, table_urdf_rel,
+               final_goal_tolerance=None, use_sdf=False, extra_overrides=None):
     """Child process entry-point."""
     try:
         from isaacgym import gymapi  # noqa: F401 isort:skip
@@ -286,8 +291,9 @@ def sim_worker(conn, assembly, part_id, config_path, checkpoint_path, table_urdf
         import fabrica.objects  # noqa: F401
 
         device = "cuda" if torch.cuda.is_available() else "cpu"
-        object_name = f"{assembly}_{part_id}"
-        traj_path = REPO_ROOT / "fabrica" / "trajectories" / object_name / "pick_place.json"
+        base_name = f"{assembly}_{part_id}"
+        object_name = base_name + ("_sdf" if use_sdf else "")
+        traj_path = REPO_ROOT / "fabrica" / "trajectories" / base_name / "pick_place.json"
 
         with open(traj_path) as f:
             traj = json.load(f)
@@ -303,6 +309,10 @@ def sim_worker(conn, assembly, part_id, config_path, checkpoint_path, table_urdf
                 "task.env.asset.table": table_urdf_rel,
                 "task.env.tableResetZ": TABLE_Z,
                 "task.env.objectStartPose": traj["start_pose"],
+                **({"task.env.finalGoalSuccessTolerance": final_goal_tolerance}
+                   if final_goal_tolerance is not None else {}),
+                **({"task.env.useSDF": True} if use_sdf else {}),
+                **(extra_overrides or {}),
             },
         )
 
@@ -335,10 +345,15 @@ def sim_worker(conn, assembly, part_id, config_path, checkpoint_path, table_urdf
 
 class AssemblyDemo:
 
-    def __init__(self, config_path: str, checkpoint_path: str, port: int = 8082):
+    def __init__(self, config_path: str, checkpoint_path: str, port: int = 8082,
+                 final_goal_tolerance: float = None, use_sdf: bool = False,
+                 extra_overrides: dict = None):
         self.port = port
         self.config_path = config_path
         self.checkpoint_path = checkpoint_path
+        self.final_goal_tolerance = final_goal_tolerance
+        self.use_sdf = use_sdf
+        self.extra_overrides = extra_overrides or {}
         self.server = viser.ViserServer(host="0.0.0.0", port=port)
 
         self._proc = None  # type: Optional[multiprocessing.Process]
@@ -417,6 +432,7 @@ class AssemblyDemo:
             self._md_prog = self.server.gui.add_markdown("**Progress:** --")
             self._md_stats = self.server.gui.add_markdown("**Stats:** No episodes yet")
             self._md_obj = self.server.gui.add_markdown("**Object Pos:** --")
+            self._md_dist = self.server.gui.add_markdown("**Dist to Goal:** --")
 
     def _on_assembly_change(self):
         assembly = self._dd_assembly.value
@@ -567,7 +583,11 @@ class AssemblyDemo:
             "/object", show_axes=True, axes_length=0.1, axes_radius=0.001,
         )
         self._dyn.append(self._obj_frame)
-        ViserUrdf(self.server, obj_urdf, root_node_name="/object")
+        idx = part_id_to_idx.get(part_id, 0)
+        color = COLORS[idx % len(COLORS)]
+        color_override = tuple(int(c * 255) for c in color)
+        ViserUrdf(self.server, obj_urdf, root_node_name="/object",
+                  mesh_color_override=color_override)
 
         # Goal ghost
         self._goal_frame = self.server.scene.add_frame(
@@ -666,7 +686,8 @@ class AssemblyDemo:
 
         # Generate table URDF with completed parts
         completed_pids, _ = self._get_completed_future_pids(assembly, part_id)
-        table_urdf_rel = _generate_table_urdf(assembly, part_id, completed_pids)
+        table_urdf_rel = _generate_table_urdf(assembly, part_id, completed_pids,
+                                              use_sdf=self.use_sdf)
 
         ctx = multiprocessing.get_context("spawn")
         parent_conn, child_conn = ctx.Pipe()
@@ -674,7 +695,8 @@ class AssemblyDemo:
         self._proc = ctx.Process(
             target=sim_worker,
             args=(child_conn, assembly, part_id,
-                  self.config_path, self.checkpoint_path, table_urdf_rel),
+                  self.config_path, self.checkpoint_path, table_urdf_rel,
+                  self.final_goal_tolerance, self.use_sdf, self.extra_overrides),
             daemon=True,
         )
         self._proc.start()
@@ -789,6 +811,7 @@ class AssemblyDemo:
 
         elif tag == "state":
             state, successes, max_succ, step = msg[1], msg[2], msg[3], msg[4]
+            dist_to_goal = msg[5] if len(msg) > 5 else None
             self._update_viz(state)
             pct = 100 * successes / max_succ if max_succ > 0 else 0
             self._md_prog.content = (
@@ -799,6 +822,8 @@ class AssemblyDemo:
             self._md_obj.content = (
                 f"**Object Pos:** {obj_pos[0]:.3f}, {obj_pos[1]:.3f}, {obj_pos[2]:.3f}"
             )
+            if dist_to_goal is not None:
+                self._md_dist.content = f"**Dist to Goal:** {dist_to_goal:.4f}"
 
         elif tag == "done":
             goal_pct, steps = msg[1], msg[2]
@@ -897,6 +922,13 @@ if __name__ == "__main__":
     parser.add_argument("--port", type=int, default=8080)
     parser.add_argument("--config-path", type=str, default="pretrained_policy/config.yaml")
     parser.add_argument("--checkpoint-path", type=str, default="pretrained_policy/model.pth")
+    parser.add_argument("--final-goal-tolerance", type=float, default=None,
+                        help="Tighter tolerance for the last subgoal in fixedGoalStates")
+    parser.add_argument("--use-sdf", action="store_true",
+                        help="Use SDF collision meshes instead of V-HACD")
+    parser.add_argument("--override", nargs=2, action="append", default=[],
+                        metavar=("KEY", "VALUE"),
+                        help="Extra config overrides, e.g. --override task.sim.physx.num_position_iterations 32")
     args = parser.parse_args()
 
     def _resolve(p):
@@ -908,8 +940,26 @@ if __name__ == "__main__":
             return str(path)
         raise FileNotFoundError(p)
 
+    # Parse --override key value pairs, auto-cast numeric types
+    extra_overrides = {}
+    for key, val in args.override:
+        for cast in (int, float):
+            try:
+                val = cast(val)
+                break
+            except ValueError:
+                continue
+        if val == "True":
+            val = True
+        elif val == "False":
+            val = False
+        extra_overrides[key] = val
+
     AssemblyDemo(
         config_path=_resolve(args.config_path),
         checkpoint_path=_resolve(args.checkpoint_path),
         port=args.port,
+        final_goal_tolerance=args.final_goal_tolerance,
+        use_sdf=args.use_sdf,
+        extra_overrides=extra_overrides,
     ).run()
