@@ -246,7 +246,7 @@ def interpolate_waypoints(waypoints: List[List[float]], steps_per: int) -> List[
 # ===================================================================
 
 def teleport_worker(conn, assembly, part_id, config_path, checkpoint_path, table_urdf_rel,
-                     object_name_override=None):
+                     object_name_override=None, headless=True):
     """Child process: create env, receive pose commands, teleport object, report back."""
     try:
         from isaacgym import gymapi  # noqa: F401 isort:skip
@@ -266,7 +266,7 @@ def teleport_worker(conn, assembly, part_id, config_path, checkpoint_path, table
         traj["start_pose"][2] += Z_OFFSET
 
         env = create_env(
-            config_path=str(config_path), headless=True, device=device,
+            config_path=str(config_path), headless=headless, device=device,
             overrides={
                 **BASE_OVERRIDES,
                 "task.env.objectName": object_name,
@@ -285,39 +285,45 @@ def teleport_worker(conn, assembly, part_id, config_path, checkpoint_path, table
         init_obj_pose = env.object_state[0, :7].cpu().numpy()
         conn.send(("ready", init_obj_pose))
 
-        # Main loop: receive pose commands
+        # Main loop: receive pose commands, keep viewer alive
         while True:
-            msg = conn.recv()
-            if msg[0] == "teleport":
-                desired_pose = np.array(msg[1], dtype=np.float32)  # [x,y,z, qx,qy,qz,qw]
-                n_substeps = msg[2] if len(msg) > 2 else 1
+            # Non-blocking check so we can pump the viewer
+            if conn.poll(0.016):  # ~60 Hz
+                msg = conn.recv()
+                if msg[0] == "teleport":
+                    desired_pose = np.array(msg[1], dtype=np.float32)  # [x,y,z, qx,qy,qz,qw]
+                    n_substeps = msg[2] if len(msg) > 2 else 1
 
-                # Set object pose in root_state_tensor
-                pose_tensor = torch.tensor(desired_pose, dtype=torch.float32, device=device)
-                env.root_state_tensor[env.object_indices[0], 0:7] = pose_tensor
-                # Zero velocities
-                env.root_state_tensor[env.object_indices[0], 7:13] = 0.0
-                # Apply
-                env.deferred_set_actor_root_state_tensor_indexed(
-                    [env.object_indices[0:1]]
-                )
-                env.set_actor_root_state_tensor_indexed()
+                    # Set object pose in root_state_tensor
+                    pose_tensor = torch.tensor(desired_pose, dtype=torch.float32, device=device)
+                    env.root_state_tensor[env.object_indices[0], 0:7] = pose_tensor
+                    # Zero velocities
+                    env.root_state_tensor[env.object_indices[0], 7:13] = 0.0
+                    # Apply
+                    env.deferred_set_actor_root_state_tensor_indexed(
+                        [env.object_indices[0:1]]
+                    )
+                    env.set_actor_root_state_tensor_indexed()
 
-                # Step physics
-                for _ in range(n_substeps):
-                    env.gym.simulate(env.sim)
-                if device == "cpu":
-                    env.gym.fetch_results(env.sim, True)
+                    # Step physics
+                    for _ in range(n_substeps):
+                        env.gym.simulate(env.sim)
+                    if device == "cpu":
+                        env.gym.fetch_results(env.sim, True)
 
-                # Read back actual pose
-                env.gym.refresh_actor_root_state_tensor(env.sim)
-                actual_pose = env.root_state_tensor[env.object_indices[0], 0:7].cpu().numpy()
+                    # Read back actual pose
+                    env.gym.refresh_actor_root_state_tensor(env.sim)
+                    actual_pose = env.root_state_tensor[env.object_indices[0], 0:7].cpu().numpy()
 
-                delta = np.linalg.norm(desired_pose[:3] - actual_pose[:3])
-                conn.send(("result", desired_pose.tolist(), actual_pose.tolist(), float(delta)))
+                    delta = np.linalg.norm(desired_pose[:3] - actual_pose[:3])
+                    conn.send(("result", desired_pose.tolist(), actual_pose.tolist(), float(delta)))
 
-            elif msg[0] == "quit":
-                break
+                elif msg[0] == "quit":
+                    break
+
+            # Always render to keep the viewer responsive
+            if not headless:
+                env.render()
 
     except Exception as exc:
         conn.send(("error", f"{exc}\n{traceback.format_exc()}"))
@@ -338,7 +344,8 @@ class InsertionDebugger:
                  end_waypoint: int = None,
                  port: int = 8080,
                  object_name_override: str = None,
-                 table_urdf_override: str = None):
+                 table_urdf_override: str = None,
+                 headless: bool = True):
         self.config_path = config_path
         self.checkpoint_path = checkpoint_path
         self.assembly = assembly
@@ -348,6 +355,7 @@ class InsertionDebugger:
         self.port = port
         self.object_name_override = object_name_override
         self.table_urdf_override = table_urdf_override
+        self.headless = headless
 
         # Load trajectory
         traj = _load_trajectory(assembly, part_id)
@@ -536,7 +544,7 @@ class InsertionDebugger:
             target=teleport_worker,
             args=(child_conn, self.assembly, self.part_id,
                   self.config_path, self.checkpoint_path, table_urdf_rel,
-                  self.object_name_override),
+                  self.object_name_override, self.headless),
             daemon=True,
         )
         self._proc.start()
@@ -748,6 +756,8 @@ if __name__ == "__main__":
     parser.add_argument("--table-urdf", type=str, default=None,
                         help="Override table URDF path relative to assets root "
                              "(e.g. urdf/fabrica/environments/beam_2/pick_place_sdf.urdf)")
+    parser.add_argument("--no-headless", action="store_true",
+                        help="Show IsaacGym viewer window")
     args = parser.parse_args()
 
     def _resolve(p):
@@ -770,4 +780,5 @@ if __name__ == "__main__":
         port=args.port,
         object_name_override=args.object_name,
         table_urdf_override=args.table_urdf,
+        headless=not args.no_headless,
     ).run()
