@@ -73,7 +73,7 @@ BASE_OVERRIDES = {
     "task.env.resetWhenDropped": False,
     "task.env.armMovingAverage": 0.1,
     "task.env.evalSuccessTolerance": 0.01,
-    "task.env.successSteps": 1,
+    "task.env.forceConsecutiveNearGoalSteps": True,
     "task.env.fixedSizeKeypointReward": True,
     "task.env.useFixedInitObjectPose": True,
     "task.env.startArmHigher": True,
@@ -144,69 +144,10 @@ def _quat_xyzw_to_rpy(q) -> Tuple[float, float, float]:
     return roll, pitch, yaw
 
 
-def _generate_table_urdf(assembly: str, active_pid: str, completed_pids: List[str],
-                         use_sdf: bool = False, sdf_resolution: int = 512) -> str:
-    """Generate a table URDF with completed parts baked in as fixed collision links.
-
-    Returns the URDF path relative to the assets root (for IsaacGym).
-    """
-    env_dir = ASSETS_DIR / "environments" / f"{assembly}_{active_pid}"
-    env_dir.mkdir(parents=True, exist_ok=True)
-    suffix = "_sdf" if use_sdf else ""
-    out_path = env_dir / f"scene{suffix}.urdf"
-
-    lines = [
-        '<?xml version="1.0"?>',
-        f'<robot name="table_{assembly}_{active_pid}_scene">',
-        '  <link name="box">',
-        '    <visual>',
-        '      <material name="wood"><color rgba="0.82 0.56 0.35 1.0"/></material>',
-        '      <origin xyz="0 0 0"/>',
-        '      <geometry><box size="0.475 0.4 0.3"/></geometry>',
-        '    </visual>',
-        '    <collision>',
-        '      <origin xyz="0 0 0"/>',
-        '      <geometry><box size="0.475 0.4 0.3"/></geometry>',
-        '    </collision>',
-        '    <inertial>',
-        '      <mass value="500"/>',
-        '      <friction value="1.0"/>',
-        '      <inertia ixx="1000.0" ixy="0.0" ixz="0.0" iyy="1000.0" iyz="0.0" izz="1000.0"/>',
-        '    </inertial>',
-        '  </link>',
-    ]
-
-    for pid in completed_pids:
-        traj = _load_trajectory(assembly, pid)
-        if traj is None:
-            continue
-        goal_pose = traj["goals"][-1]  # [x,y,z, qx,qy,qz,qw]
-        mesh_rel = f"../../{assembly}/{pid}/{pid}_canonical.obj"
-        rx, ry, rz = goal_pose[0], goal_pose[1], goal_pose[2] - TABLE_Z
-        rpy = _quat_xyzw_to_rpy(goal_pose[3:7])
-
-        lines.extend([
-            f'  <link name="part_{pid}">',
-            '    <visual>',
-            '      <origin xyz="0 0 0" rpy="0 0 0"/>',
-            f'      <geometry><mesh filename="{mesh_rel}" scale="1 1 1"/></geometry>',
-            f'      <material name="placed_{pid}"><color rgba="0.6 0.6 0.6 1.0"/></material>',
-            '    </visual>',
-            '    <collision>',
-            '      <origin xyz="0 0 0" rpy="0 0 0"/>',
-            f'      <geometry><mesh filename="{mesh_rel}" scale="1 1 1"/></geometry>',
-            *([ f'      <sdf resolution="{sdf_resolution}"/>'] if use_sdf else []),
-            '    </collision>',
-            '  </link>',
-            f'  <joint name="part_{pid}_joint" type="fixed">',
-            '    <parent link="box"/>',
-            f'    <child link="part_{pid}"/>',
-            f'    <origin xyz="{rx} {ry} {rz}" rpy="{rpy[0]} {rpy[1]} {rpy[2]}"/>',
-            '  </joint>',
-        ])
-
-    lines.append('</robot>')
-    out_path.write_text('\n'.join(lines))
+def _table_urdf_rel(assembly: str, active_pid: str, collision_method: str) -> str:
+    """Return the relative URDF path for the precomputed table scene."""
+    suffix_map = {"vhacd": "", "sdf": "_sdf", "coacd": "_coacd"}
+    suffix = suffix_map[collision_method]
     return f"urdf/fabrica/environments/{assembly}_{active_pid}/scene{suffix}.urdf"
 
 
@@ -232,11 +173,58 @@ def _sim_reset(env, device):
     return obs["obs"]
 
 
-def _sim_episode(conn, env, policy, joint_lower, joint_upper, device):
+def _setup_collision_camera(env):
+    """Create a second camera sensor that renders collision geometry."""
+    from isaacgym import gymapi
+    cam_props = gymapi.CameraProperties()
+    cam_props.width = 1280
+    cam_props.height = 720
+    cam_props.use_collision_geometry = True
+    env._collision_cam = env.gym.create_camera_sensor(env.envs[0], cam_props)
+    env._collision_cam_props = cam_props
+    # Match position of the existing camera
+    cam_target = gymapi.Vec3(0.0, 0.0, 0.53)
+    cam_pos = cam_target + gymapi.Vec3(0.0, -1.0, 0.5)
+    env.gym.set_camera_location(env._collision_cam, env.envs[0], cam_pos, cam_target)
+
+
+def _capture_frame(env):
+    """Capture a single RGBA frame from the collision camera."""
+    from isaacgym import gymapi
+    # step_graphics + render_all_camera_sensors already called by env.render()
+    # when enable_viewer_sync=True (set at episode start)
+    env.gym.render_all_camera_sensors(env.sim)
+    cam = getattr(env, '_collision_cam', env.camera_handle)
+    cam_props = getattr(env, '_collision_cam_props', env.camera_properties)
+    color_image = env.gym.get_camera_image(
+        env.sim, env.envs[0], cam, gymapi.IMAGE_COLOR,
+    )
+    if color_image.size == 0:
+        return None
+    return color_image.reshape(cam_props.height, cam_props.width, 4)
+
+
+def _save_video(frames, video_dir, assembly, part_id, ep_num, collision_method="vhacd"):
+    """Save captured frames as an mp4."""
+    import imageio
+    video_dir = Path(video_dir)
+    video_dir.mkdir(parents=True, exist_ok=True)
+    path = video_dir / f"{assembly}_{part_id}_{collision_method}_ep{ep_num:03d}.mp4"
+    imageio.mimsave(str(path), frames, fps=int(1.0 / CONTROL_DT))
+    print(f"[sim_worker] Saved video: {path}")
+
+
+def _sim_episode(conn, env, policy, joint_lower, joint_upper, device,
+                 record_video=False, video_dir=None, assembly=None, part_id=None, ep_num=0,
+                 collision_method="vhacd"):
     import time, torch  # noqa: E401
 
     policy.reset()
     obs = _sim_reset(env, device)
+    frames = []
+
+    if record_video:
+        env.enable_viewer_sync = True
 
     step, done, paused = 0, False, False
 
@@ -263,6 +251,11 @@ def _sim_episode(conn, env, policy, joint_lower, joint_upper, device):
         done = done_tensor[0].item()
         step += 1
 
+        if record_video:
+            frame = _capture_frame(env)
+            if frame is not None:
+                frames.append(frame)
+
         conn.send((
             "state", state,
             int(env.successes[0].item()),
@@ -275,14 +268,17 @@ def _sim_episode(conn, env, policy, joint_lower, joint_upper, device):
         if (sleep := CONTROL_DT - elapsed) > 0:
             time.sleep(sleep)
 
+    if record_video and frames:
+        _save_video(frames, video_dir, assembly, part_id, ep_num, collision_method)
+
     goal_pct = 100 * int(env.successes[0].item()) / env.max_consecutive_successes
     conn.send(("done", goal_pct, step))
     return obs
 
 
 def sim_worker(conn, assembly, part_id, config_path, checkpoint_path, table_urdf_rel,
-               final_goal_tolerance=None, use_sdf=False, extra_overrides=None,
-               headless=True):
+               final_goal_tolerance=None, collision_method="vhacd", extra_overrides=None,
+               headless=True, record_video=False, video_dir=None):
     """Child process entry-point."""
     try:
         from isaacgym import gymapi  # noqa: F401 isort:skip
@@ -293,12 +289,16 @@ def sim_worker(conn, assembly, part_id, config_path, checkpoint_path, table_urdf
 
         device = "cuda" if torch.cuda.is_available() else "cpu"
         base_name = f"{assembly}_{part_id}"
-        object_name = base_name + ("_sdf" if use_sdf else "")
+        obj_suffix = {"vhacd": "", "sdf": "_sdf", "coacd": "_coacd"}[collision_method]
+        object_name = base_name + obj_suffix
         traj_path = REPO_ROOT / "fabrica" / "trajectories" / base_name / "pick_place.json"
 
         with open(traj_path) as f:
             traj = json.load(f)
-        traj["start_pose"][2] += Z_OFFSET
+
+        print(f"[sim_worker] start_pose: {traj['start_pose']}")
+        print(f"[sim_worker] table_urdf: {table_urdf_rel}")
+        print(f"[sim_worker] object_name: {object_name}")
 
         env = create_env(
             config_path=str(config_path), headless=headless, device=device,
@@ -312,7 +312,7 @@ def sim_worker(conn, assembly, part_id, config_path, checkpoint_path, table_urdf
                 "task.env.objectStartPose": traj["start_pose"],
                 **({"task.env.finalGoalSuccessTolerance": final_goal_tolerance}
                    if final_goal_tolerance is not None else {}),
-                **({"task.env.useSDF": True} if use_sdf else {}),
+                **({"task.env.useSDF": True} if collision_method == "sdf" else {}),
                 **(extra_overrides or {}),
             },
         )
@@ -323,14 +323,22 @@ def sim_worker(conn, assembly, part_id, config_path, checkpoint_path, table_urdf
         env.set_env_state(torch.load(checkpoint_path, map_location=device)[0]["env_state"])
         policy = RlPlayer(OBS_DIM, N_ACT, config_path, checkpoint_path, device, env.num_envs)
 
+        if record_video:
+            _setup_collision_camera(env)
+
         obs = _sim_reset(env, device)
         init_state = _sim_get_state(env, obs, joint_lower, joint_upper)
         conn.send(("ready", init_state))
 
+        ep_num = 0
         while True:
             cmd = conn.recv()
             if cmd == "run":
-                obs = _sim_episode(conn, env, policy, joint_lower, joint_upper, device)
+                obs = _sim_episode(conn, env, policy, joint_lower, joint_upper, device,
+                                   record_video=record_video, video_dir=video_dir,
+                                   assembly=assembly, part_id=part_id, ep_num=ep_num,
+                                   collision_method=collision_method)
+                ep_num += 1
             elif cmd == "quit":
                 break
 
@@ -347,13 +355,16 @@ def sim_worker(conn, assembly, part_id, config_path, checkpoint_path, table_urdf
 class AssemblyDemo:
 
     def __init__(self, config_path: str, checkpoint_path: str, port: int = 8082,
-                 final_goal_tolerance: float = None, use_sdf: bool = False,
-                 extra_overrides: dict = None, headless: bool = True):
+                 final_goal_tolerance: float = None, collision_method: str = "vhacd",
+                 extra_overrides: dict = None, headless: bool = True,
+                 record_video: bool = False, video_dir: str = None):
         self.port = port
         self.config_path = config_path
         self.checkpoint_path = checkpoint_path
         self.final_goal_tolerance = final_goal_tolerance
-        self.use_sdf = use_sdf
+        self.collision_method = collision_method
+        self.record_video = record_video
+        self.video_dir = video_dir or str(REPO_ROOT / "eval_videos")
         self.extra_overrides = extra_overrides or {}
         self.headless = headless
         self.server = viser.ViserServer(host="0.0.0.0", port=port)
@@ -686,10 +697,8 @@ class AssemblyDemo:
                 if traj is not None:
                     self._trajectories[pid] = traj
 
-        # Generate table URDF with completed parts
-        completed_pids, _ = self._get_completed_future_pids(assembly, part_id)
-        table_urdf_rel = _generate_table_urdf(assembly, part_id, completed_pids,
-                                              use_sdf=self.use_sdf)
+        # Use precomputed table URDF
+        table_urdf_rel = _table_urdf_rel(assembly, part_id, self.collision_method)
 
         ctx = multiprocessing.get_context("spawn")
         parent_conn, child_conn = ctx.Pipe()
@@ -698,8 +707,8 @@ class AssemblyDemo:
             target=sim_worker,
             args=(child_conn, assembly, part_id,
                   self.config_path, self.checkpoint_path, table_urdf_rel,
-                  self.final_goal_tolerance, self.use_sdf, self.extra_overrides,
-                  self.headless),
+                  self.final_goal_tolerance, self.collision_method, self.extra_overrides,
+                  self.headless, self.record_video, self.video_dir),
             daemon=True,
         )
         self._proc.start()
@@ -927,10 +936,15 @@ if __name__ == "__main__":
     parser.add_argument("--checkpoint-path", type=str, default="pretrained_policy/model.pth")
     parser.add_argument("--final-goal-tolerance", type=float, default=None,
                         help="Tighter tolerance for the last subgoal in fixedGoalStates")
-    parser.add_argument("--use-sdf", action="store_true",
-                        help="Use SDF collision meshes instead of V-HACD")
+    parser.add_argument("--collision", choices=["vhacd", "coacd", "sdf"],
+                        default="vhacd",
+                        help="Collision method: vhacd (default), coacd, or sdf")
     parser.add_argument("--no-headless", action="store_true",
                         help="Show IsaacGym viewer window")
+    parser.add_argument("--record-video", action="store_true",
+                        help="Record video of each episode from IsaacGym camera")
+    parser.add_argument("--video-dir", type=str, default=None,
+                        help="Directory for recorded videos (default: eval_videos/)")
     parser.add_argument("--override", nargs=2, action="append", default=[],
                         metavar=("KEY", "VALUE"),
                         help="Extra config overrides, e.g. --override task.sim.physx.num_position_iterations 32")
@@ -965,7 +979,9 @@ if __name__ == "__main__":
         checkpoint_path=_resolve(args.checkpoint_path),
         port=args.port,
         final_goal_tolerance=args.final_goal_tolerance,
-        use_sdf=args.use_sdf,
+        collision_method=args.collision,
         extra_overrides=extra_overrides,
         headless=not args.no_headless,
+        record_video=args.record_video,
+        video_dir=args.video_dir,
     ).run()

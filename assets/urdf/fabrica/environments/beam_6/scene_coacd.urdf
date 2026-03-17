@@ -1,5 +1,5 @@
 <?xml version="1.0"?>
-<robot name="table_beam_6_scene_sdf">
+<robot name="table_beam_6_scene_coacd">
   <link name="box">
     <visual>
       <material name="wood"><color rgba="0.82 0.56 0.35 1.0"/></material>

@@ -229,3 +229,6 @@ FoundationPose/
 # error and log files
 *.err
 *.log
+
+debug_output/
+eval_videos
