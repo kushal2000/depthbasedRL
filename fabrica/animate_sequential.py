@@ -83,7 +83,7 @@ def _get_available_parts(assembly):
     for pid in order:
         name = f"{assembly}_{pid}"
         traj = REPO_ROOT / "fabrica" / "trajectories" / name / "pick_place.json"
-        urdf = ASSETS_DIR / "environments" / name / "pick_place.urdf"
+        urdf = ASSETS_DIR / "environments" / name / "scene.urdf"
         if traj.exists() and urdf.exists():
             available.append(pid)
     return available

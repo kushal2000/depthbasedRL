@@ -114,7 +114,7 @@ def _get_available_parts(assembly: str) -> List[str]:
     for pid in order:
         name = f"{assembly}_{pid}"
         traj = REPO_ROOT / "fabrica" / "trajectories" / name / "pick_place.json"
-        urdf = ASSETS_DIR / "environments" / name / "pick_place.urdf"
+        urdf = ASSETS_DIR / "environments" / name / "scene.urdf"
         if traj.exists() and urdf.exists():
             available.append(pid)
     return available
@@ -755,7 +755,7 @@ if __name__ == "__main__":
                         help="Override object name (e.g. beam_2_sdf)")
     parser.add_argument("--table-urdf", type=str, default=None,
                         help="Override table URDF path relative to assets root "
-                             "(e.g. urdf/fabrica/environments/beam_2/pick_place_sdf.urdf)")
+                             "(e.g. urdf/fabrica/environments/beam_2/scene_sdf.urdf)")
     parser.add_argument("--no-headless", action="store_true",
                         help="Show IsaacGym viewer window")
     args = parser.parse_args()

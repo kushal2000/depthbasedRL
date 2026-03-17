@@ -38,7 +38,7 @@ WANDB_PROJECT="fabrica_training"
 HYDRA_RUN_DIR="./train_dir/${WANDB_PROJECT}/${WANDB_GROUP}/${EXPERIMENT_NAME}"
 mkdir -p "$HYDRA_RUN_DIR"
 exec > "${HYDRA_RUN_DIR}/slurm.log" 2> "${HYDRA_RUN_DIR}/slurm.err"
-TABLE_URDF="urdf/fabrica/environments/${OBJECT_NAME}/pick_place.urdf"
+TABLE_URDF="urdf/fabrica/environments/${OBJECT_NAME}/scene.urdf"
 
 CHECKPOINT_ARG=""
 if [[ -n "${CHECKPOINT:-}" ]]; then

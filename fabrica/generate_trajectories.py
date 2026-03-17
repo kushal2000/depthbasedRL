@@ -4,7 +4,7 @@
 For each assembly step n (placing part pn), generates:
   - fabrica/trajectories/{assembly}_{part_id}/pick_place.json
     Multi-waypoint trajectory sampled from crane-style evaluate_trajectory().
-  - assets/urdf/fabrica/environments/{assembly}_{part_id}/pick_place.urdf
+  - assets/urdf/fabrica/environments/{assembly}_{part_id}/scene.urdf
     Table URDF with parts p0..pn-1 baked in as static geometry.
 
 Usage:
@@ -265,7 +265,7 @@ def generate_for_assembly(
 
         # --- Environment URDF ---
         env_part_dir = env_dir / name
-        env_file = env_part_dir / "pick_place.urdf"
+        env_file = env_part_dir / "scene.urdf"
         if env_file.exists() and not force:
             print(f"  Skipping env URDF {name} (exists)")
         else:
