@@ -98,6 +98,11 @@ env:
   saveStates: False
   saveStatesFile: "rootTensorsDofStates.bin"
 
+  # Viser training viewer (interactive 3D visualization during training)
+  viserViz: True                    # enable viser visualization server
+  viserVizPort: 8082                # viser server port
+  viserVizDumpDir: "viser_viz_data" # directory for offline episode dumps (relative to hydra run dir)
+
   loadInitialStates: False
   loadStatesFile: "rootTensorsDofStates.bin"
 
@@ -122,6 +127,7 @@ env:
   # Thus, it records a video every 600-1500s (10-25 minutes) of real time
   capture_video_freq: 6_000
   capture_video_len: 600
+  capture_video_collision_geometry: True  # Also record a collision-geometry video alongside the visual one
 
   turn_off_extra_obs: False
   turn_off_extra_obs_slowly: False

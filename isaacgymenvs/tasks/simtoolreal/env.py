@@ -386,6 +386,29 @@ class SimToolReal(VecTask):
         self._initialize_camera_sensor(cam_pos=cam_pos, cam_target=cam_target)
         self._modify_render_settings_if_headless()
 
+        # Init viser training viewer
+        self.viser_viz_enabled = self.cfg["env"].get("viserViz", False)
+        if self.viser_viz_enabled:
+            from isaacgymenvs.tasks.simtoolreal.viser_viz import TrainingViserViewer
+
+            asset_root = os.path.join(
+                os.path.dirname(os.path.abspath(__file__)), "../../../assets"
+            )
+            robot_urdf_path = Path(asset_root) / self.robot_asset_file
+            object_urdf_path = Path(self.object_asset_files[0])
+            scene_urdf_path = Path(asset_root) / self.asset_files_dict["table"]
+
+            self.viser_viewer = TrainingViserViewer(
+                port=self.cfg["env"].get("viserVizPort", 8082),
+                dump_dir=self.cfg["env"].get("viserVizDumpDir", "viser_viz_data"),
+                object_name=self.cfg["env"]["objectName"],
+                robot_urdf_path=robot_urdf_path,
+                object_urdf_path=object_urdf_path,
+                scene_urdf_path=scene_urdf_path,
+                num_envs=self.num_envs,
+                num_dofs=self.num_hand_arm_dofs,
+            )
+
         # volume to sample target position from
         target_volume_origin = np.array([0, 0.05, 0.8], dtype=np.float32)
         target_volume_extent = np.array(
@@ -3438,17 +3461,7 @@ class SimToolReal(VecTask):
             if self.randomize_object_rotation:
                 new_object_rot = self.get_random_quat(env_ids)
                 if USE_FIXED_INIT_OBJECT_POSE:
-                    new_object_rot[:] = 0.0
-                    new_object_rot[:, -1] = 1.0  # xyzw
-
-                    # HACK: Rotate the object by 180 degrees around the z-axis to go from right handed to left handed robot
-                    from scipy.spatial.transform import Rotation as R
-
-                    new_object_rot[:] = (
-                        torch.from_numpy(R.from_euler("z", 180, degrees=True).as_quat())
-                        .float()
-                        .to(self.device)[None]
-                    )
+                    new_object_rot[:] = self.object_init_state[env_ids, 3:7]
 
                 # indices 3,4,5,6 correspond to the rotation quaternion
                 self.root_state_tensor[obj_indices, 3:7] = new_object_rot
@@ -3560,6 +3573,9 @@ class SimToolReal(VecTask):
 
             if self.save_states:
                 self.dump_env_states(env_ids)
+
+            if self.viser_viz_enabled:
+                self._viser_viz_on_reset(env_ids)
 
             self.extras["scalars"] = dict()
             self.extras["scalars"]["success_tolerance"] = self.success_tolerance
@@ -4580,6 +4596,7 @@ class SimToolReal(VecTask):
             self.accumulate_env_states()
 
         self._capture_video_if_needed()
+        self._viser_viz_step_if_needed()
 
         if self.viewer and self.debug_viz:
             # draw axes on target object
@@ -4872,6 +4889,22 @@ class SimToolReal(VecTask):
             self.camera_handle, self.envs[self.index_to_view], cam_pos, cam_target
         )
 
+        # Collision geometry camera (same resolution/position, renders convex hulls)
+        self.capture_collision = self.cfg["env"].get("capture_video_collision_geometry", True)
+        if self.capture_collision:
+            collision_props = gymapi.CameraProperties()
+            collision_props.width = self.camera_properties.width
+            collision_props.height = self.camera_properties.height
+            collision_props.use_collision_geometry = True
+            self.collision_camera_handle = self.gym.create_camera_sensor(
+                self.envs[self.index_to_view], collision_props
+            )
+            self.collision_camera_properties = collision_props
+            self.collision_video_frames: Optional[List[np.ndarray]] = None
+            self.gym.set_camera_location(
+                self.collision_camera_handle, self.envs[self.index_to_view], cam_pos, cam_target
+            )
+
     def _modify_render_settings_if_headless(self) -> None:
         # If not headless, leave things as they are
         if self.viewer is not None:
@@ -4902,6 +4935,8 @@ class SimToolReal(VecTask):
             )
             print("-" * 80)
             self.video_frames = []
+            if self.capture_collision:
+                self.collision_video_frames = []
             return
 
         should_start_video_capture_now = (
@@ -4935,6 +4970,8 @@ class SimToolReal(VecTask):
         # Store image
         self.enable_viewer_sync = True
         self.gym.render_all_camera_sensors(self.sim)
+
+        # Capture visual camera
         color_image = self.gym.get_camera_image(
             self.sim,
             self.envs[self.index_to_view],
@@ -4953,39 +4990,152 @@ class SimToolReal(VecTask):
         color_image = color_image.reshape(
             self.camera_properties.height, self.camera_properties.width, NUM_RGBA
         )
+        color_image = self._add_env_idx_overlay(color_image)
         self.video_frames.append(color_image)
 
+        # Capture collision camera
+        if self.capture_collision and self.collision_video_frames is not None:
+            collision_image = self.gym.get_camera_image(
+                self.sim,
+                self.envs[self.index_to_view],
+                self.collision_camera_handle,
+                gymapi.IMAGE_COLOR,
+            )
+            if collision_image.size > 0:
+                collision_image = collision_image.reshape(
+                    self.collision_camera_properties.height,
+                    self.collision_camera_properties.width,
+                    NUM_RGBA,
+                )
+                collision_image = self._add_env_idx_overlay(collision_image)
+                self.collision_video_frames.append(collision_image)
+
         if len(self.video_frames) == self.cfg["env"]["capture_video_len"]:
-            video_filename = f"{DATETIME_STR}_video_{self.control_steps}.mp4"
-            videos_dir = Path("videos")
-            videos_dir.mkdir(parents=True, exist_ok=True)
-            video_path = videos_dir / video_filename
-            print("-" * 80)
-            print(f"Saving video to {video_path} ...")
-
-            if not self.enable_viewer_sync_before:
-                self.video_frames.pop(0)  # Remove first frame because it was not synced
-
             import imageio
             import wandb
 
-            imageio.mimsave(
-                video_path, self.video_frames, fps=int(1.0 / self.control_dt)
-            )
+            videos_dir = Path("videos")
+            videos_dir.mkdir(parents=True, exist_ok=True)
+            fps = int(1.0 / self.control_dt)
+
+            if not self.enable_viewer_sync_before:
+                self.video_frames.pop(0)
+
+            # Save visual video
+            video_filename = f"{DATETIME_STR}_video_{self.control_steps}.mp4"
+            video_path = videos_dir / video_filename
+            print("-" * 80)
+            print(f"Saving video to {video_path} ...")
+            imageio.mimsave(video_path, self.video_frames, fps=fps)
+
+            wandb_log = {}
             if wandb.run is not None:
-                wandb_video = wandb.Video(
-                    str(video_path), fps=int(1.0 / self.control_dt)
-                )
-                wandb.log({"video": wandb_video})
-                # self.wandb_dict["video"] = wandb.Video(
-                #     str(video_path), fps=int(1.0 / self.control_dt)
-                # )
+                wandb_log["video"] = wandb.Video(str(video_path), fps=fps)
+
+            # Save collision video
+            if self.capture_collision and self.collision_video_frames is not None:
+                if not self.enable_viewer_sync_before and len(self.collision_video_frames) > 0:
+                    self.collision_video_frames.pop(0)
+                collision_filename = f"{DATETIME_STR}_video_collision_{self.control_steps}.mp4"
+                collision_path = videos_dir / collision_filename
+                print(f"Saving collision video to {collision_path} ...")
+                if len(self.collision_video_frames) > 0:
+                    imageio.mimsave(collision_path, self.collision_video_frames, fps=fps)
+                    if wandb.run is not None:
+                        wandb_log["video_collision"] = wandb.Video(str(collision_path), fps=fps)
+                self.collision_video_frames = None
+
+            if wandb.run is not None and wandb_log:
+                wandb.log(wandb_log)
+
             print("DONE")
             print("-" * 80)
 
             # Reset variables
             self.video_frames = None
             self.enable_viewer_sync = self.enable_viewer_sync_before
+
+    def _viser_viz_step_if_needed(self):
+        """Push state to viser viewer (online mode) and accumulate for offline recording."""
+        if not self.viser_viz_enabled:
+            return
+
+        # Sync recording env index from viser GUI → self.index_to_view
+        rec_idx = self.viser_viewer.recording_env_idx
+        if rec_idx != self.index_to_view:
+            self.index_to_view = rec_idx
+
+        # Online mode: push live state for the selected viewing env
+        if self.viser_viewer.is_online_mode:
+            view_idx = min(int(self.viser_viewer.online_env_idx), self.num_envs - 1)
+            dof_pos = self.dof_state.reshape(self.num_envs, -1, 2)[view_idx, :, 0].cpu().numpy()
+            obj_pose = self.root_state_tensor[self.object_indices[view_idx], :7].cpu().numpy()
+            goal_pose = self.root_state_tensor[self.goal_object_indices[view_idx], :7].cpu().numpy()
+            table_pose = self.root_state_tensor[self.table_indices[view_idx], :7].cpu().numpy()
+            info = {
+                "control_steps": self.control_steps,
+                "successes": int(self.successes[view_idx].item()),
+                "max_successes": self.max_consecutive_successes,
+                "progress_buf": int(self.progress_buf[view_idx].item()),
+                "closest_dist": float(self.closest_keypoint_max_dist[view_idx].item()),
+                "success_tolerance": float(self.success_tolerance),
+            }
+            self.viser_viewer.update_online(dof_pos, obj_pose, goal_pose, table_pose, info=info)
+
+        # Offline recording: sync exactly with video capture frames
+        # Start when video capture starts (first frame just appended)
+        if (self.video_frames is not None
+                and len(self.video_frames) == 1
+                and not self.viser_viewer.is_offline_recording):
+            self.viser_viewer.start_recording()
+
+        # Accumulate on every frame while video is recording
+        if self.viser_viewer.is_offline_recording and self.video_frames is not None:
+            env_idx = self.index_to_view
+            num_actors_per_env = self.root_state_tensor.shape[0] // self.num_envs
+            root_state = self.root_state_tensor.reshape(
+                self.num_envs, num_actors_per_env, 13
+            )[env_idx]
+            dof_state = self.dof_state.reshape(
+                self.num_envs, -1, 2
+            )[env_idx]
+            self.viser_viewer.accumulate_step(root_state, dof_state)
+
+            # Save when video capture finishes (same frame count)
+            if len(self.video_frames) == self.cfg["env"]["capture_video_len"]:
+                num_actors_per_env = self.root_state_tensor.shape[0] // self.num_envs
+                idx = self.index_to_view
+                metadata = {
+                    "object_name": self.cfg["env"]["objectName"],
+                    "control_steps": self.control_steps,
+                    "success": bool(self.prev_episode_successes[idx].item() > 0),
+                    "object_local_idx": self.object_indices[idx].item() % num_actors_per_env,
+                    "goal_local_idx": self.goal_object_indices[idx].item() % num_actors_per_env,
+                    "table_local_idx": self.table_indices[idx].item() % num_actors_per_env,
+                    "num_dofs": self.num_hand_arm_dofs,
+                }
+                if self.cfg["env"].get("useFixedGoalStates", False):
+                    metadata["fixed_goal_states"] = self.cfg["env"].get("fixedGoalStates")
+                self.viser_viewer.on_episode_end(idx, metadata)
+
+    def _viser_viz_on_reset(self, env_ids):
+        """No-op: offline recording is now synced with video capture, not episode resets."""
+        pass
+
+    def _add_env_idx_overlay(self, frame: np.ndarray) -> np.ndarray:
+        """Burn ENV_IDX text onto top-left corner of an RGBA frame."""
+        import cv2
+
+        # Work on RGB copy (cv2 doesn't handle RGBA putText well)
+        rgb = frame[:, :, :3].copy()
+        text = f"ENV {self.index_to_view}"
+        cv2.putText(
+            rgb, text, (5, 15), cv2.FONT_HERSHEY_SIMPLEX,
+            0.4, (255, 255, 255), 1, cv2.LINE_AA,
+        )
+        frame = frame.copy()
+        frame[:, :, :3] = rgb
+        return frame
 
     def _draw_transform(
         self, transform: gymapi.Transform, line_length: float = 0.2, env_idx: int = 0
