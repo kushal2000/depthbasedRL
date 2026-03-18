@@ -108,6 +108,25 @@ PYTHONPATH=. python isaacsim_conversion/rollout.py \
     --assembly beam --part_id 2 --collision_method coacd
 ```
 
+## Video recording
+
+Video recording uses the Isaac Lab `Camera` sensor. Key setup requirements:
+
+```bash
+# Must pass --enable_cameras for headless rendering pipeline
+PYTHONPATH=. python isaacsim_conversion/rollout.py --headless --enable_cameras --max_steps 600
+```
+
+**Camera setup notes:**
+- The `Camera` sensor must be created AFTER `IsaacSimEnv.__init__()` but needs a `sim.reset()` to initialize its internal buffers (`_timestamp` attribute).
+- Object poses set before `sim.reset()` will be wiped — always place objects AFTER camera initialization.
+- The `CameraCfg.OffsetCfg` `convention` parameter controls which axis is forward:
+  - `"opengl"`: -Z forward, +Y up (standard camera convention)
+  - `"ros"`: +Z forward, -Y up
+  - `"world"`: +X forward, +Z up
+- First run with `--enable_cameras` takes extra time (~5-15 min) for RTX shader compilation. Subsequent runs use cached shaders.
+- Multiple Isaac Sim processes on the same GPU will compete and hang — kill all old processes before starting a new run.
+
 ## Key gotchas
 
 - **Quaternion convention**: Isaac Sim uses wxyz, our observation code expects xyzw. Convert at the sim boundary.
