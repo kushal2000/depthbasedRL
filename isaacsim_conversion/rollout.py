@@ -131,9 +131,35 @@ def main():
     frames = []
 
     # Record trajectory data for debugging/visualization
-    has_camera = False
     trajectory_log = []
-    _log(f"Recording trajectory data to {video_dir}/trajectory.npz")
+
+    # Set up camera for video recording (requires --enable_cameras flag)
+    has_camera = False
+    try:
+        from isaaclab.sensors import Camera, CameraCfg
+        camera_cfg = CameraCfg(
+            prim_path="/World/RecordCamera",
+            update_period=0,
+            height=480,
+            width=640,
+            data_types=["rgb"],
+            spawn=sim_utils.PinholeCameraCfg(
+                focal_length=24.0,
+                focus_distance=400.0,
+                horizontal_aperture=20.955,
+                clipping_range=(0.1, 100.0),
+            ),
+            offset=CameraCfg.OffsetCfg(
+                pos=(0.8, 1.5, 1.2),
+                rot=(0.7071, 0.0, 0.3536, -0.6124),
+                convention="world",
+            ),
+        )
+        camera = Camera(cfg=camera_cfg)
+        has_camera = True
+        _log(f"Camera created for video recording to {video_dir}")
+    except Exception as e:
+        _log(f"Camera setup failed (run with --enable_cameras): {e}")
 
     # --- Initialize state ---
     env.step(render=True)  # settle + render for camera
@@ -182,13 +208,10 @@ def main():
 
         # 6. Capture frame (every 2nd step = 30fps video from 60Hz sim)
         if has_camera and step_i % 2 == 0:
-            try:
-                rep.orchestrator.step(rt_subframes=1)
-                data = rgb_annot.get_data()
-                if data is not None and data.size > 0:
-                    frames.append(np.array(data[:, :, :3], dtype=np.uint8))
-            except Exception:
-                pass
+            camera.update(dt)
+            rgb = camera.data.output["rgb"]
+            if rgb is not None and rgb.shape[0] > 0:
+                frames.append(rgb[0].cpu().numpy()[:, :, :3])
 
         # 7. Goal switching
         object_kps = _compute_keypoint_positions(object_pose, object_scales)
