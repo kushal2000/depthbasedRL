@@ -74,6 +74,9 @@ if [ "$COLLISION_METHOD" = "sdf" ]; then
     USE_SDF=True
 fi
 
+# ── Derived: viser port (unique per SLURM job) ────────────────
+VISER_PORT=$((8082 + (SLURM_JOB_ID % 900)))
+
 # ── Derived: goals & start pose from trajectory JSON ─────────
 TRAJ_JSON="$REPO_ROOT/fabrica/trajectories/${ASSEMBLY}_${PART_ID}/pick_place.json"
 read -r GOALS START_POSE <<< "$(python3 -c "
@@ -140,6 +143,7 @@ python -u -m isaacgymenvs.train \
     task.env.useObjectStateDelayNoise=$USE_OBJECT_STATE_DELAY_NOISE \
     task.env.objectStateXyzNoiseStd=$OBJECT_STATE_XYZ_NOISE_STD \
     task.env.objectStateRotationNoiseDegrees=$OBJECT_STATE_ROTATION_NOISE_DEG \
+    task.env.viserVizPort=$VISER_PORT \
     task.env.finalGoalToleranceCurriculumEnabled=$FINAL_GOAL_TOLERANCE_CURRICULUM \
     task.env.finalGoalToleranceInitial=$FINAL_GOAL_TOLERANCE_INITIAL \
     task.env.finalGoalToleranceTarget=$FINAL_GOAL_TOLERANCE_TARGET \
