@@ -156,12 +156,16 @@ def main():
                     clipping_range=(0.1, 100.0),
                 ),
                 offset=CameraCfg.OffsetCfg(
-                    pos=(0.8, 1.5, 1.2),
-                    rot=(0.7071, 0.0, 0.3536, -0.6124),
+                    # Match Isaac Gym: cam_pos=(0, -1, 1.03), cam_target=(0, 0, 0.53)
+                    # Front-on view looking back at robot and workspace
+                    pos=(0.0, -1.0, 1.03),
+                    rot=(0.9239, 0.3827, 0.0, 0.0),  # wxyz, looking in +Y direction, tilted down
                     convention="world",
                 ),
             )
             camera = Camera(cfg=camera_cfg)
+            # Camera needs sim reset to initialize internal buffers (_timestamp etc.)
+            env.sim.reset()
             has_camera = True
             _log(f"Camera created for video recording to {video_dir}")
         except Exception as e:
