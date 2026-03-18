@@ -211,6 +211,11 @@ class IsaacSimEnv:
 
     def _spawn_scene(self, sim_utils):
         """Spawn robot, table, and object into the USD stage."""
+        # Add ground plane and lighting for better rendering
+        sim_utils.GroundPlaneCfg().func("/World/GroundPlane", sim_utils.GroundPlaneCfg())
+        sim_utils.DomeLightCfg(intensity=2000.0, color=(0.9, 0.9, 0.9)).func(
+            "/World/DomeLight", sim_utils.DomeLightCfg(intensity=2000.0, color=(0.9, 0.9, 0.9))
+        )
         # Spawn robot at (0, 0.8, 0) with gravity disabled and self-collision off
         robot_prim_path = "/World/Robot"
         cfg = sim_utils.UsdFileCfg(

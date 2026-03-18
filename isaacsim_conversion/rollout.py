@@ -155,10 +155,10 @@ def main():
                 ),
                 offset=CameraCfg.OffsetCfg(
                     # Match Isaac Gym: cam_pos=(0, -1, 1.03), cam_target=(0, 0, 0.53)
-                    # Front-on view looking back at robot and workspace
+                    # opengl convention: -Z=forward, +Y=up
                     pos=(0.0, -1.0, 1.03),
-                    rot=(0.9239, 0.3827, 0.0, 0.0),  # wxyz, looking in +Y direction, tilted down
-                    convention="world",
+                    rot=(0.8507, 0.5257, 0.0, 0.0),  # wxyz
+                    convention="opengl",
                 ),
             )
             camera = Camera(cfg=camera_cfg)
@@ -174,9 +174,17 @@ def main():
     # Place object at start pose (must be after camera reset)
     env.set_object_pose(start_pos, start_quat_xyzw)
 
-    # --- Initialize state ---
-    env.step(render=True)  # settle + render for camera
+    # --- Set robot to default pose (match Isaac Gym) ---
+    # Arm default: SharPa mount variant (60 deg offset on joint 7)
+    default_arm_pos = np.array([-1.571, 1.571, 0.0, 1.376, 0.0, 1.485, 1.308])
+    default_dof_pos = np.zeros(29, dtype=np.float32)
+    default_dof_pos[:7] = default_arm_pos
+    env.set_joint_position_targets(default_dof_pos)
+    # Let robot settle to default pose
+    for _ in range(60):
+        env.step(render=True)
     q_init, _ = env.get_robot_state()
+    _log(f"Robot default pose set. Arm joints: {q_init[:7]}")
     prev_targets = q_init[None].copy()  # (1, 29)
 
     current_goal_idx = 0
