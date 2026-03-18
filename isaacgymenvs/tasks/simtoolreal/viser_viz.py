@@ -269,11 +269,16 @@ class TrainingViserViewer:
 
             # Joint origin gives position/rotation relative to parent (box)
             pos = joint.origin[:3, 3].tolist()
+            rot_matrix = joint.origin[:3, :3]
+            from scipy.spatial.transform import Rotation
+            quat_xyzw = Rotation.from_matrix(rot_matrix).as_quat()
+            quat_wxyz = (quat_xyzw[3], quat_xyzw[0], quat_xyzw[1], quat_xyzw[2])
 
             self.server.scene.add_mesh_trimesh(
                 f"/table/{child_link}",
                 mesh=mesh,
                 position=tuple(pos),
+                wxyz=quat_wxyz,
             )
 
     # ── GUI callbacks ─────────────────────────────────────────

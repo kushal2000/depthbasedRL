@@ -29,7 +29,8 @@ Each assembly has numbered part subdirs (e.g., `beam/0/0.obj`) and an `assembly_
 - Default viser port: 8082
 
 ## Workflow
-- Always kill the old viser server before starting a new one (e.g., `kill $(lsof -t -i:<port>)`)
+- **Never kill ports blindly** — other processes (training jobs, user sessions) may be using them. Always use a free port instead of killing existing ones.
+- Use `lsof -i:<port>` to check if a port is occupied before binding to it
 - Only run one eval server at a time, always on port 8080
 
 ## Conventions

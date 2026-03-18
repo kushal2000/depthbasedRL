@@ -36,15 +36,9 @@ def _load_trajectory(assembly: str, pid: str):
 
 
 def _quat_xyzw_to_rpy(q) -> Tuple[float, float, float]:
-    x, y, z, w = float(q[0]), float(q[1]), float(q[2]), float(q[3])
-    sinr = 2 * (w * x + y * z)
-    cosr = 1 - 2 * (x * x + y * y)
-    roll = math.atan2(sinr, cosr)
-    sinp = 2 * (w * y - z * x)
-    pitch = math.copysign(math.pi / 2, sinp) if abs(sinp) >= 1 else math.asin(sinp)
-    siny = 2 * (w * z + x * y)
-    cosy = 1 - 2 * (y * y + z * z)
-    yaw = math.atan2(siny, cosy)
+    from scipy.spatial.transform import Rotation
+    r = Rotation.from_quat([float(q[0]), float(q[1]), float(q[2]), float(q[3])])
+    roll, pitch, yaw = r.as_euler('xyz')
     return roll, pitch, yaw
 
 

@@ -30,7 +30,7 @@
   <joint name="part_6_hull_0_joint" type="fixed">
     <parent link="box"/>
     <child link="part_6_hull_0"/>
-    <origin xyz="-0.08 0.04 0.15674100000000002" rpy="0.0 -0.0 0.0"/>
+    <origin xyz="-0.08 0.04 0.15674100000000002" rpy="0.0 0.0 0.0"/>
   </joint>
   <link name="part_6_hull_1">
     <visual>
@@ -46,7 +46,7 @@
   <joint name="part_6_hull_1_joint" type="fixed">
     <parent link="box"/>
     <child link="part_6_hull_1"/>
-    <origin xyz="-0.08 0.04 0.15674100000000002" rpy="0.0 -0.0 0.0"/>
+    <origin xyz="-0.08 0.04 0.15674100000000002" rpy="0.0 0.0 0.0"/>
   </joint>
   <link name="part_6_hull_2">
     <visual>
@@ -62,7 +62,7 @@
   <joint name="part_6_hull_2_joint" type="fixed">
     <parent link="box"/>
     <child link="part_6_hull_2"/>
-    <origin xyz="-0.08 0.04 0.15674100000000002" rpy="0.0 -0.0 0.0"/>
+    <origin xyz="-0.08 0.04 0.15674100000000002" rpy="0.0 0.0 0.0"/>
   </joint>
   <link name="part_6_hull_3">
     <visual>
@@ -78,7 +78,7 @@
   <joint name="part_6_hull_3_joint" type="fixed">
     <parent link="box"/>
     <child link="part_6_hull_3"/>
-    <origin xyz="-0.08 0.04 0.15674100000000002" rpy="0.0 -0.0 0.0"/>
+    <origin xyz="-0.08 0.04 0.15674100000000002" rpy="0.0 0.0 0.0"/>
   </joint>
   <link name="part_6_hull_4">
     <visual>
@@ -94,7 +94,7 @@
   <joint name="part_6_hull_4_joint" type="fixed">
     <parent link="box"/>
     <child link="part_6_hull_4"/>
-    <origin xyz="-0.08 0.04 0.15674100000000002" rpy="0.0 -0.0 0.0"/>
+    <origin xyz="-0.08 0.04 0.15674100000000002" rpy="0.0 0.0 0.0"/>
   </joint>
   <link name="part_6_hull_5">
     <visual>
@@ -110,7 +110,7 @@
   <joint name="part_6_hull_5_joint" type="fixed">
     <parent link="box"/>
     <child link="part_6_hull_5"/>
-    <origin xyz="-0.08 0.04 0.15674100000000002" rpy="0.0 -0.0 0.0"/>
+    <origin xyz="-0.08 0.04 0.15674100000000002" rpy="0.0 0.0 0.0"/>
   </joint>
   <link name="part_6_hull_6">
     <visual>
@@ -126,7 +126,7 @@
   <joint name="part_6_hull_6_joint" type="fixed">
     <parent link="box"/>
     <child link="part_6_hull_6"/>
-    <origin xyz="-0.08 0.04 0.15674100000000002" rpy="0.0 -0.0 0.0"/>
+    <origin xyz="-0.08 0.04 0.15674100000000002" rpy="0.0 0.0 0.0"/>
   </joint>
   <link name="part_6_hull_7">
     <visual>
@@ -142,7 +142,7 @@
   <joint name="part_6_hull_7_joint" type="fixed">
     <parent link="box"/>
     <child link="part_6_hull_7"/>
-    <origin xyz="-0.08 0.04 0.15674100000000002" rpy="0.0 -0.0 0.0"/>
+    <origin xyz="-0.08 0.04 0.15674100000000002" rpy="0.0 0.0 0.0"/>
   </joint>
   <link name="part_6_hull_8">
     <visual>
@@ -158,7 +158,7 @@
   <joint name="part_6_hull_8_joint" type="fixed">
     <parent link="box"/>
     <child link="part_6_hull_8"/>
-    <origin xyz="-0.08 0.04 0.15674100000000002" rpy="0.0 -0.0 0.0"/>
+    <origin xyz="-0.08 0.04 0.15674100000000002" rpy="0.0 0.0 0.0"/>
   </joint>
   <link name="part_6_hull_9">
     <visual>
@@ -174,7 +174,7 @@
   <joint name="part_6_hull_9_joint" type="fixed">
     <parent link="box"/>
     <child link="part_6_hull_9"/>
-    <origin xyz="-0.08 0.04 0.15674100000000002" rpy="0.0 -0.0 0.0"/>
+    <origin xyz="-0.08 0.04 0.15674100000000002" rpy="0.0 0.0 0.0"/>
   </joint>
   <link name="part_6_hull_10">
     <visual>
@@ -190,7 +190,7 @@
   <joint name="part_6_hull_10_joint" type="fixed">
     <parent link="box"/>
     <child link="part_6_hull_10"/>
-    <origin xyz="-0.08 0.04 0.15674100000000002" rpy="0.0 -0.0 0.0"/>
+    <origin xyz="-0.08 0.04 0.15674100000000002" rpy="0.0 0.0 0.0"/>
   </joint>
   <link name="part_6_hull_11">
     <visual>
@@ -206,7 +206,7 @@
   <joint name="part_6_hull_11_joint" type="fixed">
     <parent link="box"/>
     <child link="part_6_hull_11"/>
-    <origin xyz="-0.08 0.04 0.15674100000000002" rpy="0.0 -0.0 0.0"/>
+    <origin xyz="-0.08 0.04 0.15674100000000002" rpy="0.0 0.0 0.0"/>
   </joint>
   <link name="part_6_hull_12">
     <visual>
@@ -222,7 +222,7 @@
   <joint name="part_6_hull_12_joint" type="fixed">
     <parent link="box"/>
     <child link="part_6_hull_12"/>
-    <origin xyz="-0.08 0.04 0.15674100000000002" rpy="0.0 -0.0 0.0"/>
+    <origin xyz="-0.08 0.04 0.15674100000000002" rpy="0.0 0.0 0.0"/>
   </joint>
   <link name="part_6_hull_13">
     <visual>
@@ -238,7 +238,7 @@
   <joint name="part_6_hull_13_joint" type="fixed">
     <parent link="box"/>
     <child link="part_6_hull_13"/>
-    <origin xyz="-0.08 0.04 0.15674100000000002" rpy="0.0 -0.0 0.0"/>
+    <origin xyz="-0.08 0.04 0.15674100000000002" rpy="0.0 0.0 0.0"/>
   </joint>
   <link name="part_6_hull_14">
     <visual>
@@ -254,7 +254,7 @@
   <joint name="part_6_hull_14_joint" type="fixed">
     <parent link="box"/>
     <child link="part_6_hull_14"/>
-    <origin xyz="-0.08 0.04 0.15674100000000002" rpy="0.0 -0.0 0.0"/>
+    <origin xyz="-0.08 0.04 0.15674100000000002" rpy="0.0 0.0 0.0"/>
   </joint>
   <link name="part_2_hull_0">
     <visual>
@@ -270,7 +270,7 @@
   <joint name="part_2_hull_0_joint" type="fixed">
     <parent link="box"/>
     <child link="part_2_hull_0"/>
-    <origin xyz="-0.124463 0.04 0.18810000000000004" rpy="3.141592653589793 -1.5707963267948966 3.141592653589793"/>
+    <origin xyz="-0.124463 0.04 0.18810000000000004" rpy="0.0 -1.5707963057214722 0.0"/>
   </joint>
   <link name="part_2_hull_1">
     <visual>
@@ -286,7 +286,7 @@
   <joint name="part_2_hull_1_joint" type="fixed">
     <parent link="box"/>
     <child link="part_2_hull_1"/>
-    <origin xyz="-0.124463 0.04 0.18810000000000004" rpy="3.141592653589793 -1.5707963267948966 3.141592653589793"/>
+    <origin xyz="-0.124463 0.04 0.18810000000000004" rpy="0.0 -1.5707963057214722 0.0"/>
   </joint>
   <link name="part_2_hull_2">
     <visual>
@@ -302,7 +302,7 @@
   <joint name="part_2_hull_2_joint" type="fixed">
     <parent link="box"/>
     <child link="part_2_hull_2"/>
-    <origin xyz="-0.124463 0.04 0.18810000000000004" rpy="3.141592653589793 -1.5707963267948966 3.141592653589793"/>
+    <origin xyz="-0.124463 0.04 0.18810000000000004" rpy="0.0 -1.5707963057214722 0.0"/>
   </joint>
   <link name="part_2_hull_3">
     <visual>
@@ -318,7 +318,7 @@
   <joint name="part_2_hull_3_joint" type="fixed">
     <parent link="box"/>
     <child link="part_2_hull_3"/>
-    <origin xyz="-0.124463 0.04 0.18810000000000004" rpy="3.141592653589793 -1.5707963267948966 3.141592653589793"/>
+    <origin xyz="-0.124463 0.04 0.18810000000000004" rpy="0.0 -1.5707963057214722 0.0"/>
   </joint>
   <link name="part_2_hull_4">
     <visual>
@@ -334,7 +334,7 @@
   <joint name="part_2_hull_4_joint" type="fixed">
     <parent link="box"/>
     <child link="part_2_hull_4"/>
-    <origin xyz="-0.124463 0.04 0.18810000000000004" rpy="3.141592653589793 -1.5707963267948966 3.141592653589793"/>
+    <origin xyz="-0.124463 0.04 0.18810000000000004" rpy="0.0 -1.5707963057214722 0.0"/>
   </joint>
   <link name="part_2_hull_5">
     <visual>
@@ -350,7 +350,7 @@
   <joint name="part_2_hull_5_joint" type="fixed">
     <parent link="box"/>
     <child link="part_2_hull_5"/>
-    <origin xyz="-0.124463 0.04 0.18810000000000004" rpy="3.141592653589793 -1.5707963267948966 3.141592653589793"/>
+    <origin xyz="-0.124463 0.04 0.18810000000000004" rpy="0.0 -1.5707963057214722 0.0"/>
   </joint>
   <link name="part_2_hull_6">
     <visual>
@@ -366,7 +366,7 @@
   <joint name="part_2_hull_6_joint" type="fixed">
     <parent link="box"/>
     <child link="part_2_hull_6"/>
-    <origin xyz="-0.124463 0.04 0.18810000000000004" rpy="3.141592653589793 -1.5707963267948966 3.141592653589793"/>
+    <origin xyz="-0.124463 0.04 0.18810000000000004" rpy="0.0 -1.5707963057214722 0.0"/>
   </joint>
   <link name="part_2_hull_7">
     <visual>
@@ -382,7 +382,7 @@
   <joint name="part_2_hull_7_joint" type="fixed">
     <parent link="box"/>
     <child link="part_2_hull_7"/>
-    <origin xyz="-0.124463 0.04 0.18810000000000004" rpy="3.141592653589793 -1.5707963267948966 3.141592653589793"/>
+    <origin xyz="-0.124463 0.04 0.18810000000000004" rpy="0.0 -1.5707963057214722 0.0"/>
   </joint>
   <link name="part_2_hull_8">
     <visual>
@@ -398,7 +398,7 @@
   <joint name="part_2_hull_8_joint" type="fixed">
     <parent link="box"/>
     <child link="part_2_hull_8"/>
-    <origin xyz="-0.124463 0.04 0.18810000000000004" rpy="3.141592653589793 -1.5707963267948966 3.141592653589793"/>
+    <origin xyz="-0.124463 0.04 0.18810000000000004" rpy="0.0 -1.5707963057214722 0.0"/>
   </joint>
   <link name="part_2_hull_9">
     <visual>
@@ -414,7 +414,7 @@
   <joint name="part_2_hull_9_joint" type="fixed">
     <parent link="box"/>
     <child link="part_2_hull_9"/>
-    <origin xyz="-0.124463 0.04 0.18810000000000004" rpy="3.141592653589793 -1.5707963267948966 3.141592653589793"/>
+    <origin xyz="-0.124463 0.04 0.18810000000000004" rpy="0.0 -1.5707963057214722 0.0"/>
   </joint>
   <link name="part_2_hull_10">
     <visual>
@@ -430,7 +430,7 @@
   <joint name="part_2_hull_10_joint" type="fixed">
     <parent link="box"/>
     <child link="part_2_hull_10"/>
-    <origin xyz="-0.124463 0.04 0.18810000000000004" rpy="3.141592653589793 -1.5707963267948966 3.141592653589793"/>
+    <origin xyz="-0.124463 0.04 0.18810000000000004" rpy="0.0 -1.5707963057214722 0.0"/>
   </joint>
   <link name="part_2_hull_11">
     <visual>
@@ -446,7 +446,7 @@
   <joint name="part_2_hull_11_joint" type="fixed">
     <parent link="box"/>
     <child link="part_2_hull_11"/>
-    <origin xyz="-0.124463 0.04 0.18810000000000004" rpy="3.141592653589793 -1.5707963267948966 3.141592653589793"/>
+    <origin xyz="-0.124463 0.04 0.18810000000000004" rpy="0.0 -1.5707963057214722 0.0"/>
   </joint>
   <link name="part_2_hull_12">
     <visual>
@@ -462,7 +462,7 @@
   <joint name="part_2_hull_12_joint" type="fixed">
     <parent link="box"/>
     <child link="part_2_hull_12"/>
-    <origin xyz="-0.124463 0.04 0.18810000000000004" rpy="3.141592653589793 -1.5707963267948966 3.141592653589793"/>
+    <origin xyz="-0.124463 0.04 0.18810000000000004" rpy="0.0 -1.5707963057214722 0.0"/>
   </joint>
   <link name="part_2_hull_13">
     <visual>
@@ -478,7 +478,7 @@
   <joint name="part_2_hull_13_joint" type="fixed">
     <parent link="box"/>
     <child link="part_2_hull_13"/>
-    <origin xyz="-0.124463 0.04 0.18810000000000004" rpy="3.141592653589793 -1.5707963267948966 3.141592653589793"/>
+    <origin xyz="-0.124463 0.04 0.18810000000000004" rpy="0.0 -1.5707963057214722 0.0"/>
   </joint>
   <link name="part_2_hull_14">
     <visual>
@@ -494,7 +494,7 @@
   <joint name="part_2_hull_14_joint" type="fixed">
     <parent link="box"/>
     <child link="part_2_hull_14"/>
-    <origin xyz="-0.124463 0.04 0.18810000000000004" rpy="3.141592653589793 -1.5707963267948966 3.141592653589793"/>
+    <origin xyz="-0.124463 0.04 0.18810000000000004" rpy="0.0 -1.5707963057214722 0.0"/>
   </joint>
   <link name="part_2_hull_15">
     <visual>
@@ -510,7 +510,7 @@
   <joint name="part_2_hull_15_joint" type="fixed">
     <parent link="box"/>
     <child link="part_2_hull_15"/>
-    <origin xyz="-0.124463 0.04 0.18810000000000004" rpy="3.141592653589793 -1.5707963267948966 3.141592653589793"/>
+    <origin xyz="-0.124463 0.04 0.18810000000000004" rpy="0.0 -1.5707963057214722 0.0"/>
   </joint>
   <link name="part_2_hull_16">
     <visual>
@@ -526,7 +526,7 @@
   <joint name="part_2_hull_16_joint" type="fixed">
     <parent link="box"/>
     <child link="part_2_hull_16"/>
-    <origin xyz="-0.124463 0.04 0.18810000000000004" rpy="3.141592653589793 -1.5707963267948966 3.141592653589793"/>
+    <origin xyz="-0.124463 0.04 0.18810000000000004" rpy="0.0 -1.5707963057214722 0.0"/>
   </joint>
   <link name="part_2_hull_17">
     <visual>
@@ -542,6 +542,6 @@
   <joint name="part_2_hull_17_joint" type="fixed">
     <parent link="box"/>
     <child link="part_2_hull_17"/>
-    <origin xyz="-0.124463 0.04 0.18810000000000004" rpy="3.141592653589793 -1.5707963267948966 3.141592653589793"/>
+    <origin xyz="-0.124463 0.04 0.18810000000000004" rpy="0.0 -1.5707963057214722 0.0"/>
   </joint>
 </robot>
