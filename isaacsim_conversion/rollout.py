@@ -93,10 +93,8 @@ def main():
         app=app,
     )
 
-    # Place object at start pose
     start_pos = np.array(start_pose[:3], dtype=np.float32)
     start_quat_xyzw = np.array(start_pose[3:7], dtype=np.float32)
-    env.set_object_pose(start_pos, start_quat_xyzw)
 
     # --- Load policy ---
     print("\nLoading policy...")
@@ -172,6 +170,9 @@ def main():
             _log(f"Camera setup failed: {e}")
     else:
         _log("Video recording disabled (pass --enable_cameras to enable)")
+
+    # Place object at start pose (must be after camera reset)
+    env.set_object_pose(start_pos, start_quat_xyzw)
 
     # --- Initialize state ---
     env.step(render=True)  # settle + render for camera
