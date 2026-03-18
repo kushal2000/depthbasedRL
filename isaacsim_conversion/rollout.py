@@ -130,33 +130,10 @@ def main():
     video_path = video_dir / f"rollout_{args.assembly}_{args.part_id}.mp4"
     frames = []
 
-    # Set up camera for video recording via omni.replicator
-    try:
-        import omni.replicator.core as rep
-        import omni.usd
-        from pxr import UsdGeom, Gf
-
-        stage = omni.usd.get_context().get_stage()
-        # Create camera prim looking at the workspace
-        cam_prim = stage.DefinePrim("/World/RecordCamera", "Camera")
-        xform = UsdGeom.Xformable(cam_prim)
-        xform.AddTranslateOp().Set(Gf.Vec3d(0.8, 1.5, 1.2))
-        # Point camera at the table/object area
-        cam_prim.GetAttribute("focalLength").Set(24.0)
-
-        render_product = rep.create.render_product(cam_prim.GetPath(), (640, 480))
-        rgb_annot = rep.annotators.get("rgb")
-        rgb_annot.attach(render_product)
-
-        # Warm up the renderer
-        for _ in range(5):
-            rep.orchestrator.step()
-
-        has_camera = True
-        _log(f"Video camera created, saving to {video_path}")
-    except Exception as e:
-        has_camera = False
-        _log(f"WARNING: Could not set up camera for video: {e}")
+    # Record trajectory data for debugging/visualization
+    has_camera = False
+    trajectory_log = []
+    _log(f"Recording trajectory data to {video_dir}/trajectory.npz")
 
     # --- Initialize state ---
     env.step(render=True)  # settle + render for camera
@@ -235,6 +212,15 @@ def main():
             goal_pose = np.array(goals[current_goal_idx], dtype=np.float32)[None]
             _log(f"  -> Advancing to goal {current_goal_idx}/{len(goals)}")
 
+        # Record trajectory data
+        trajectory_log.append({
+            "step": step_i,
+            "q": q.copy(),
+            "object_pose": object_pose[0].copy(),
+            "kp_dist": keypoints_max_dist,
+            "goal_idx": current_goal_idx,
+        })
+
         # Periodic logging
         if step_i % 60 == 0:
             obj_z = object_pose[0, 2]
@@ -245,6 +231,19 @@ def main():
             )
 
     _log(f"\nRollout complete. Final goal: {current_goal_idx}/{len(goals)}")
+
+    # Save trajectory data
+    if trajectory_log:
+        traj_file = video_dir / "trajectory.npz"
+        np.savez(
+            str(traj_file),
+            steps=np.array([t["step"] for t in trajectory_log]),
+            q=np.array([t["q"] for t in trajectory_log]),
+            object_poses=np.array([t["object_pose"] for t in trajectory_log]),
+            kp_dists=np.array([t["kp_dist"] for t in trajectory_log]),
+            goal_idxs=np.array([t["goal_idx"] for t in trajectory_log]),
+        )
+        _log(f"Trajectory saved: {traj_file} ({len(trajectory_log)} steps)")
 
     # Save video
     if frames:

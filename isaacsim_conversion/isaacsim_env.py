@@ -71,6 +71,14 @@ JOINT_DAMPINGS = {
 assert len(JOINT_STIFFNESSES) == 29
 assert len(JOINT_DAMPINGS) == 29
 
+# Isaac Lab's UrdfConverter multiplies revolute joint stiffness/damping by pi/180
+# (rad→deg conversion). But our values are already in PhysX units (same as Isaac Gym).
+# So we pre-compensate by multiplying by 180/pi to cancel out the conversion.
+import math
+RAD_TO_DEG_COMPENSATION = 180.0 / math.pi
+JOINT_STIFFNESSES_COMPENSATED = {k: v * RAD_TO_DEG_COMPENSATION for k, v in JOINT_STIFFNESSES.items()}
+JOINT_DAMPINGS_COMPENSATED = {k: v * RAD_TO_DEG_COMPENSATION for k, v in JOINT_DAMPINGS.items()}
+
 
 def wxyz_to_xyzw(quat_wxyz: np.ndarray) -> np.ndarray:
     """Convert Isaac Sim quaternion (w,x,y,z) to Isaac Gym convention (x,y,z,w)."""
@@ -164,8 +172,8 @@ class IsaacSimEnv:
                 drive_type="force",
                 target_type="position",
                 gains=UrdfConverterCfg.JointDriveCfg.PDGainsCfg(
-                    stiffness=JOINT_STIFFNESSES,
-                    damping=JOINT_DAMPINGS,
+                    stiffness=JOINT_STIFFNESSES_COMPENSATED,
+                    damping=JOINT_DAMPINGS_COMPENSATED,
                 ),
             ),
         )
@@ -203,23 +211,48 @@ class IsaacSimEnv:
 
     def _spawn_scene(self, sim_utils):
         """Spawn robot, table, and object into the USD stage."""
-        # Spawn robot at (0, 0.8, 0)
+        # Spawn robot at (0, 0.8, 0) with gravity disabled and self-collision off
         robot_prim_path = "/World/Robot"
-        cfg = sim_utils.UsdFileCfg(usd_path=self._robot_usd)
+        cfg = sim_utils.UsdFileCfg(
+            usd_path=self._robot_usd,
+            rigid_props=sim_utils.RigidBodyPropertiesCfg(
+                disable_gravity=True,  # Match Isaac Gym
+                contact_offset=0.002,  # Match Isaac Gym (default 0.02 is 10x too large)
+                rest_offset=0.0,
+                max_depenetration_velocity=1000.0,
+            ),
+            articulation_props=sim_utils.ArticulationRootPropertiesCfg(
+                enabled_self_collisions=False,  # Match Isaac Gym
+                solver_position_iteration_count=8,  # Match SimToolReal.yaml
+                solver_velocity_iteration_count=0,
+            ),
+        )
         cfg.func(robot_prim_path, cfg, translation=(0.0, 0.8, 0.0))
         self.robot_prim_path = robot_prim_path
-        _log(f"Robot spawned at {robot_prim_path}")
+        _log(f"Robot spawned at {robot_prim_path} (gravity=off, contact_offset=0.002, self_collision=off)")
 
         # Spawn table at (0, 0, 0.38)
         table_prim_path = "/World/Table"
-        cfg = sim_utils.UsdFileCfg(usd_path=self._table_usd)
+        cfg = sim_utils.UsdFileCfg(
+            usd_path=self._table_usd,
+            rigid_props=sim_utils.RigidBodyPropertiesCfg(
+                contact_offset=0.002,
+                rest_offset=0.0,
+            ),
+        )
         cfg.func(table_prim_path, cfg, translation=(0.0, 0.0, 0.38))
         self.table_prim_path = table_prim_path
         _log(f"Table spawned at {table_prim_path}")
 
         # Spawn object (position set later via set_object_pose)
         object_prim_path = "/World/Object"
-        cfg = sim_utils.UsdFileCfg(usd_path=self._object_usd)
+        cfg = sim_utils.UsdFileCfg(
+            usd_path=self._object_usd,
+            rigid_props=sim_utils.RigidBodyPropertiesCfg(
+                contact_offset=0.002,
+                rest_offset=0.0,
+            ),
+        )
         cfg.func(object_prim_path, cfg)
         self.object_prim_path = object_prim_path
         _log(f"Object spawned at {object_prim_path}")
