@@ -252,6 +252,41 @@ def tolerance_curriculum(
     return success_tolerance, last_curriculum_update
 
 
+def final_goal_tolerance_curriculum(
+    last_update: int,
+    frames_since_restart: int,
+    cooloff_interval: int,
+    prev_episode_successes: Tensor,
+    max_consecutive_successes: int,
+    current_tolerance: float,
+    initial: float,
+    target: float,
+    decrement: float,
+    success_threshold: float,
+) -> Tuple[float, int]:
+    """
+    Curriculum for tightening the final subgoal tolerance based on all-goals-hit ratio.
+    Returns: (new_tolerance, new_last_update)
+    """
+    if frames_since_restart - last_update < cooloff_interval:
+        return current_tolerance, last_update
+
+    all_goals_hit_ratio = (prev_episode_successes >= max_consecutive_successes).float().mean().item()
+
+    if all_goals_hit_ratio < success_threshold:
+        return current_tolerance, last_update
+
+    new_tolerance = current_tolerance - decrement
+    new_tolerance = max(target, new_tolerance)
+
+    print(
+        f"All goals hit ratio: {all_goals_hit_ratio:.3f}, final goal tolerance: {new_tolerance}"
+    )
+
+    last_update = frames_since_restart
+    return new_tolerance, last_update
+
+
 def interp_0_1(x_curr: float, x_initial: float, x_target: float) -> float:
     """
     Outputs 1 when x_curr == x_target (curriculum completed)

@@ -16,18 +16,11 @@
 # ╚══════════════════════════════════════════════════════════════╝
 
 # ── Assembly Details ──────────────────────────────────────────
-# Which assembly and part to train on, and collision representation.
-# COLLISION_METHOD determines both the object URDF and scene URDF:
-#   vhacd → runtime convex decomposition (fast, less accurate)
-#   coacd → pre-computed convex decomposition (balanced)
-#   sdf   → signed distance field (most accurate, slower)
 ASSEMBLY="beam"
 PART_ID="2"
 COLLISION_METHOD="coacd"          # vhacd | coacd | sdf
 
 # ── Training Details ──────────────────────────────────────────
-# CHECKPOINT: path to pretrained model for finetuning. Set "" to
-#             train from scratch.
 CHECKPOINT="/share/portal/kk837/depthbasedRL/pretrained_policy/model.pth"
 NUM_ENVS=24576
 MINIBATCH_SIZE=98304
@@ -40,32 +33,24 @@ FINAL_GOAL_TOLERANCE_TARGET=0.001
 FINAL_GOAL_TOLERANCE_DECREMENT=0.001
 
 # ── Domain Randomization: Forces & Torques ───────────────────
-# External perturbation forces/torques applied to the object
-# during training. Higher values = harder task, more robust policy.
 FORCE_SCALE=0
 TORQUE_SCALE=0
 
 # ── Domain Randomization: Observation & Action Delays ────────
-# Simulate real-world latency in sensor readings and commands.
 USE_OBS_DELAY=False
 USE_ACTION_DELAY=False
 
 # ── Domain Randomization: Object State Noise ─────────────────
-# Noise on the object pose observation (simulates noisy tracking).
-# OBJECT_SCALE_NOISE scales keypoint offsets & reported object
-# size in observations (perception noise, not physical scale).
 USE_OBJECT_STATE_DELAY_NOISE=False
 OBJECT_STATE_XYZ_NOISE_STD=0.01
 OBJECT_STATE_ROTATION_NOISE_DEG=5.0
 OBJECT_SCALE_NOISE="[0.9,1.1]"
 
 # ── Weights & Biases ─────────────────────────────────────────
-# Experiment tracking. All fabrica runs go under one group.
 WANDB_PROJECT="FABRICA_TRAINING"
 WANDB_GROUP="fabrica"
 
 # ── Experiment Tag ──────────────────────────────────────────
-# Human-readable prefix for the experiment name. Leave "" for no prefix.
 EXPERIMENT_TAG="no_dr_fgt_curriculum"
 
 # ╔══════════════════════════════════════════════════════════════╗

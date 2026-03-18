@@ -59,6 +59,7 @@ from dextoolbench.objects import NAME_TO_OBJECT
 import fabrica.objects  # noqa: F401 — registers fabrica parts into NAME_TO_OBJECT
 from isaacgymenvs.tasks.base.vec_task import VecTask
 from isaacgymenvs.tasks.simtoolreal.utils import (
+    final_goal_tolerance_curriculum,
     populate_dof_properties,
     tolerance_curriculum,
     tolerance_successes_objective,
@@ -718,6 +719,13 @@ class SimToolReal(VecTask):
 
         self.last_curriculum_update = 0
 
+        # Final goal tolerance curriculum
+        if self.cfg["env"].get("finalGoalToleranceCurriculumEnabled", False):
+            self.final_goal_success_tolerance = self.cfg["env"].get("finalGoalToleranceInitial", 0.01)
+        else:
+            self.final_goal_success_tolerance = self.cfg["env"].get("finalGoalSuccessTolerance") or 0.01
+        self.last_final_goal_curriculum_update = 0
+
         self.episode_root_state_tensors = [[] for _ in range(self.num_envs)]
         self.episode_dof_states = [[] for _ in range(self.num_envs)]
 
@@ -1147,6 +1155,7 @@ class SimToolReal(VecTask):
     def change_on_restart(self, cfg):
         self.frame_since_restart = 0
         self.last_curriculum_update = 0
+        self.last_final_goal_curriculum_update = 0
 
         self.cfg["env"]["distanceDeltaRewScale"] = cfg["env"]["distanceDeltaRewScale"]
         self.cfg["env"]["liftingRewScale"] = cfg["env"]["liftingRewScale"]
@@ -1528,6 +1537,21 @@ class SimToolReal(VecTask):
             self.tolerance_curriculum_increment,
         )
 
+        if self.cfg["env"].get("finalGoalToleranceCurriculumEnabled", False):
+            self.final_goal_success_tolerance, self.last_final_goal_curriculum_update = \
+                final_goal_tolerance_curriculum(
+                    self.last_final_goal_curriculum_update,
+                    self.frame_since_restart,
+                    self.cfg["env"].get("finalGoalToleranceCurriculumInterval", 3000),
+                    self.prev_episode_successes,
+                    self.max_consecutive_successes,
+                    self.final_goal_success_tolerance,
+                    self.cfg["env"].get("finalGoalToleranceInitial", 0.01),
+                    self.cfg["env"].get("finalGoalToleranceTarget", 0.001),
+                    self.cfg["env"].get("finalGoalToleranceCurriculumDecrement", 0.001),
+                    self.cfg["env"].get("finalGoalToleranceCurriculumSuccessThreshold", 0.8),
+                )
+
         eval_success_tolerance = self.cfg["env"].get("evalSuccessTolerance", None)
         if eval_success_tolerance is not None:
             self.success_tolerance = eval_success_tolerance
@@ -1564,6 +1588,8 @@ class SimToolReal(VecTask):
             goal_keypoint_pos_fixed_size=self.goal_keypoint_pos_fixed_size,
             rewards_episode=self.rewards_episode,
             last_curriculum_update=self.last_curriculum_update,
+            final_goal_success_tolerance=self.final_goal_success_tolerance,
+            last_final_goal_curriculum_update=self.last_final_goal_curriculum_update,
             rb_forces=self.rb_forces,
             rb_torques=self.rb_torques,
             random_force_prob=self.random_force_prob,
@@ -2602,7 +2628,10 @@ class SimToolReal(VecTask):
         if self.cfg["env"]["fixedSizeKeypointReward"]:
             keypoint_rew = keypoint_rew_fixed_size
 
-        final_tol = self.cfg["env"].get("finalGoalSuccessTolerance", None)
+        if self.cfg["env"].get("finalGoalToleranceCurriculumEnabled", False):
+            final_tol = self.final_goal_success_tolerance
+        else:
+            final_tol = self.cfg["env"].get("finalGoalSuccessTolerance", None)
         if final_tol is not None and self.cfg["env"]["useFixedGoalStates"]:
             is_final_goal = self.successes == (self.max_consecutive_successes - 1)
             base_tol = self.success_tolerance * self.keypoint_scale
@@ -2693,6 +2722,8 @@ class SimToolReal(VecTask):
         self.extras["closest_keypoint_max_dist"] = (
             self.prev_episode_closest_keypoint_max_dist
         )
+        self.extras["all_goals_hit_ratio"] = (self.prev_episode_successes >= self.max_consecutive_successes).float().mean().item()
+        self.extras["final_goal_tolerance"] = self.final_goal_success_tolerance
         self.true_objective = self._true_objective()
         self.extras["true_objective"] = self.true_objective
 

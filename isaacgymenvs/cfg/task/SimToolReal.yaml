@@ -91,6 +91,14 @@ env:
   evalSuccessTolerance: null  # If None, will use the default success tolerance. Otherwise, will use this value for evaluation.
   toleranceCurriculumIncrement: 0.9  # multiplicative
   toleranceCurriculumInterval: 3000  # in env steps across all agents, with 8192 this is 3000 * 8192 = 24.6M env steps
+
+  # Final goal tolerance curriculum
+  finalGoalToleranceCurriculumEnabled: False
+  finalGoalToleranceInitial: 0.01        # starting tolerance (matches pretrained policy)
+  finalGoalToleranceTarget: 0.001        # target tight tolerance
+  finalGoalToleranceCurriculumDecrement: 0.001  # linear subtraction per curriculum step
+  finalGoalToleranceCurriculumInterval: 3000   # env steps between updates
+  finalGoalToleranceCurriculumSuccessThreshold: 0.8  # min all_goals_hit_ratio to trigger decay
   maxConsecutiveSuccesses: 50
   successSteps: 10  # how many steps we should be within the tolerance before we declare a success
   forceConsecutiveNearGoalSteps: False  # If True, require near goal consecutively for successSteps
