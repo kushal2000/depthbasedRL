@@ -371,6 +371,19 @@ def run_phase5_test():
         app=app,
     )
 
+    # Place object on the table before tests
+    import json
+    traj_path = repo_root / "fabrica/trajectories/beam_2/pick_place.json"
+    with open(traj_path) as f:
+        traj = json.load(f)
+    start_pose = traj["start_pose"]  # [x,y,z,qx,qy,qz,qw]
+    env.set_object_pose(
+        pos_xyz=np.array(start_pose[:3], dtype=np.float32),
+        quat_xyzw=np.array(start_pose[3:7], dtype=np.float32),
+    )
+    env.step(render=False)  # Apply the pose
+    _log(f"Object placed at start pose: {start_pose}")
+
     # Stability test (Phase 5e)
     _log("\n--- Stability test: robot should hold default pose for 5s ---")
     q_initial = env.get_robot_state()[0].copy()
