@@ -36,7 +36,7 @@ SEED=0
 # ── Final Goal Tolerance Curriculum ──────────────────────────
 FINAL_GOAL_TOLERANCE_CURRICULUM=True
 FINAL_GOAL_TOLERANCE_INITIAL=0.01
-FINAL_GOAL_TOLERANCE_TARGET=0.001
+FINAL_GOAL_TOLERANCE_TARGET=0.002
 FINAL_GOAL_TOLERANCE_DECREMENT=0.001
 
 # ── Domain Randomization: Forces & Torques ───────────────────
