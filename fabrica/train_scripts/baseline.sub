@@ -155,6 +155,7 @@ python -u -m isaacgymenvs.train \
     task.env.useFixedInitObjectPose=True \
     task.env.asset.table="$TABLE_URDF" \
     task.env.tableResetZ=0.38 \
+    task.env.tableResetZRange=0 \
     task.env.useSDF=$USE_SDF \
     task.env.useObsDelay=$USE_OBS_DELAY \
     task.env.useActionDelay=$USE_ACTION_DELAY \
