@@ -119,7 +119,10 @@ def main():
         "palm_rot", "object_rot", "fingertip_pos_rel_palm",
         "keypoints_rel_palm", "keypoints_rel_goal", "object_scales",
     ]
-    object_scales = np.array([[0.141, 0.03025, 0.0271]], dtype=np.float32)  # beam fixedSize
+    # Get object scales from the object registry (matches training)
+    object_scale_tuple = obj_info.scale  # from NAME_TO_OBJECT, computed by rescale_by_factor(extents, 25)
+    object_scales = np.array([list(object_scale_tuple)], dtype=np.float32)
+    _log(f"Object scales from registry: {object_scales[0]}")
     hand_moving_average = 0.1
     arm_moving_average = 0.1
     dof_speed_scale = 1.5
