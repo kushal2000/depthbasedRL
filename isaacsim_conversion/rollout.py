@@ -1,0 +1,195 @@
+"""
+Full policy rollout in Isaac Sim.
+Phase 9 of the plan: obs → policy → action → physics loop.
+
+Usage:
+    source .venv_isaacsim/bin/activate
+    PYTHONPATH=. python isaacsim_conversion/rollout.py \
+        --assembly beam --part_id 2 --collision_method coacd
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+from pathlib import Path
+
+import numpy as np
+import torch
+
+from deployment.rl_player import RlPlayer
+from isaacgymenvs.utils.observation_action_utils_sharpa import (
+    JOINT_NAMES_ISAACGYM,
+    N_OBS,
+    _compute_keypoint_positions,
+    compute_joint_pos_targets,
+    compute_observation,
+    create_urdf_object,
+)
+
+
+def parse_args():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--assembly", default="beam")
+    parser.add_argument("--part_id", default="2")
+    parser.add_argument("--collision_method", default="coacd")
+    parser.add_argument("--headless", action="store_true", default=True)
+    parser.add_argument("--max_steps", type=int, default=6000, help="Max sim steps (100s at 60Hz)")
+    parser.add_argument("--device", default="cuda")
+    return parser.parse_args()
+
+
+def main():
+    args = parse_args()
+    repo_root = Path(__file__).parent.parent
+    device = args.device
+
+    # --- Locate assets ---
+    robot_urdf = str(repo_root / "assets/urdf/kuka_sharpa_description/iiwa14_left_sharpa_adjusted_restricted.urdf")
+    table_urdf = str(repo_root / f"assets/urdf/fabrica/environments/{args.assembly}_{args.part_id}/scene_{args.collision_method}.urdf")
+    traj_path = repo_root / f"fabrica/trajectories/{args.assembly}_{args.part_id}/pick_place.json"
+
+    # Object URDF
+    object_name = f"{args.assembly}_{args.part_id}_{args.collision_method}"
+    import fabrica.objects  # noqa: registers fabrica parts
+    from dextoolbench.objects import NAME_TO_OBJECT
+    obj_info = NAME_TO_OBJECT.get(object_name)
+    assert obj_info is not None, f"Object '{object_name}' not found in NAME_TO_OBJECT"
+    object_urdf = obj_info.urdf_path
+
+    print(f"Robot URDF:  {robot_urdf}")
+    print(f"Table URDF:  {table_urdf}")
+    print(f"Object URDF: {object_urdf}")
+    print(f"Trajectory:  {traj_path}")
+
+    # --- Load trajectory ---
+    with open(traj_path) as f:
+        traj = json.load(f)
+    goals = traj["goals"]  # list of [x,y,z,qx,qy,qz,qw]
+    start_pose = traj["start_pose"]  # [x,y,z,qx,qy,qz,qw]
+    print(f"Trajectory: {len(goals)} goals, start_pose={start_pose}")
+
+    # --- Create Isaac Sim environment ---
+    from isaacsim_conversion.isaacsim_env import IsaacSimEnv
+    env = IsaacSimEnv(
+        robot_urdf=robot_urdf,
+        table_urdf=table_urdf,
+        object_urdf=object_urdf,
+        headless=args.headless,
+    )
+
+    # Place object at start pose
+    start_pos = np.array(start_pose[:3], dtype=np.float32)
+    start_quat_xyzw = np.array(start_pose[3:7], dtype=np.float32)
+    env.set_object_pose(start_pos, start_quat_xyzw)
+
+    # --- Load policy ---
+    print("\nLoading policy...")
+    player = RlPlayer(
+        num_observations=140,
+        num_actions=29,
+        config_path=str(repo_root / "pretrained_policy/config.yaml"),
+        checkpoint_path=str(repo_root / "pretrained_policy/model.pth"),
+        device=device,
+        num_envs=1,
+    )
+
+    # --- Load URDF for FK ---
+    urdf = create_urdf_object("iiwa14_left_sharpa_adjusted_restricted")
+
+    # --- Config from training ---
+    obs_list = [
+        "joint_pos", "joint_vel", "prev_action_targets", "palm_pos",
+        "palm_rot", "object_rot", "fingertip_pos_rel_palm",
+        "keypoints_rel_palm", "keypoints_rel_goal", "object_scales",
+    ]
+    object_scales = np.array([[0.141, 0.03025, 0.0271]], dtype=np.float32)  # beam fixedSize
+    hand_moving_average = 0.1
+    arm_moving_average = 0.1
+    dof_speed_scale = 1.5
+    dt = 1 / 60
+    success_steps = 10
+    keypoint_tolerance = 0.01 * 1.5  # targetSuccessTolerance * keypointScale
+
+    # --- Initialize state ---
+    env.step(render=False)  # settle
+    q_init, _ = env.get_robot_state()
+    prev_targets = q_init[None].copy()  # (1, 29)
+
+    current_goal_idx = 0
+    goal_pose = np.array(goals[current_goal_idx], dtype=np.float32)[None]  # (1, 7)
+    near_goal_steps = 0
+
+    player.player.init_rnn()  # fresh LSTM state
+
+    print(f"\n=== Starting rollout: {args.max_steps} steps, {len(goals)} goals ===\n")
+
+    # --- Main loop ---
+    for step_i in range(args.max_steps):
+        # 1. Extract state
+        q, qd = env.get_robot_state()
+        object_pose = env.get_object_pose_xyzw()[None]  # (1, 7)
+
+        # 2. Compute observation
+        obs = compute_observation(
+            q=q[None], qd=qd[None], prev_action_targets=prev_targets,
+            object_pose=object_pose, goal_object_pose=goal_pose,
+            object_scales=object_scales, urdf=urdf, obs_list=obs_list,
+        )
+
+        # 3. Policy inference
+        obs_tensor = torch.from_numpy(obs).float().to(device)
+        action = player.get_normalized_action(obs_tensor, deterministic_actions=True)
+
+        # 4. Compute joint targets
+        targets = compute_joint_pos_targets(
+            actions=action.cpu().numpy(),
+            prev_targets=prev_targets,
+            hand_moving_average=hand_moving_average,
+            arm_moving_average=arm_moving_average,
+            hand_dof_speed_scale=dof_speed_scale,
+            dt=dt,
+        )
+        prev_targets = targets
+
+        # 5. Apply and step
+        env.set_joint_position_targets(targets[0])
+        env.step(render=not args.headless)
+
+        # 6. Goal switching
+        object_kps = _compute_keypoint_positions(object_pose, object_scales)
+        goal_kps = _compute_keypoint_positions(goal_pose, object_scales)
+        keypoints_max_dist = np.max(np.linalg.norm(
+            object_kps[0] - goal_kps[0], axis=-1
+        ))
+
+        if keypoints_max_dist < keypoint_tolerance:
+            near_goal_steps += 1
+        else:
+            near_goal_steps = 0  # forceConsecutiveNearGoalSteps=True
+
+        if near_goal_steps >= success_steps:
+            print(f"[step {step_i}] Goal {current_goal_idx} REACHED! (dist={keypoints_max_dist:.4f})")
+            current_goal_idx += 1
+            near_goal_steps = 0
+            if current_goal_idx >= len(goals):
+                print(f"\n=== ALL {len(goals)} GOALS REACHED at step {step_i}! ===")
+                break
+            goal_pose = np.array(goals[current_goal_idx], dtype=np.float32)[None]
+            print(f"  -> Advancing to goal {current_goal_idx}/{len(goals)}")
+
+        # Periodic logging
+        if step_i % 60 == 0:
+            obj_z = object_pose[0, 2]
+            print(
+                f"[step {step_i:5d}] goal={current_goal_idx}/{len(goals)}, "
+                f"kp_dist={keypoints_max_dist:.4f}, obj_z={obj_z:.3f}, "
+                f"near_goal={near_goal_steps}/{success_steps}"
+            )
+
+    print(f"\nRollout complete. Final goal: {current_goal_idx}/{len(goals)}")
+    env.close()
+
+
+if __name__ == "__main__":
+    main()
