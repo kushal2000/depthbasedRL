@@ -156,8 +156,9 @@ class IsaacSimEnv:
         cfg = UrdfConverterCfg(
             asset_path=urdf_path,
             usd_dir=f"{self._usd_cache_dir}/robot",
+            force_usd_conversion=True,  # Regenerate USD with updated settings
             fix_base=True,
-            merge_fixed_joints=False,
+            merge_fixed_joints=True,  # Match Isaac Gym's collapse_fixed_joints=True
             self_collision=False,
             joint_drive=UrdfConverterCfg.JointDriveCfg(
                 drive_type="force",
@@ -232,7 +233,7 @@ class IsaacSimEnv:
         # Robot articulation with implicit PD actuators
         robot_cfg = ArticulationCfg(
             prim_path=self.robot_prim_path,
-            spawn=None,  # Already spawned
+            spawn=None,  # Already spawned in _spawn_scene
             actuators={
                 "arm": ImplicitActuatorCfg(
                     joint_names_expr=["iiwa14_joint_.*"],

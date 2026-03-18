@@ -37,6 +37,8 @@ def launch_app():
     parser.add_argument("--part_id", default="2")
     parser.add_argument("--collision_method", default="coacd")
     parser.add_argument("--max_steps", type=int, default=6000, help="Max sim steps (100s at 60Hz)")
+    parser.add_argument("--video_dir", default="rollout_videos", help="Directory to save video")
+    parser.add_argument("--video_fps", type=int, default=30, help="Video FPS (sim runs at 60Hz, record every 2nd frame)")
     AppLauncher.add_app_launcher_args(parser)
     args = parser.parse_args()
     app_launcher = AppLauncher(args)
@@ -52,6 +54,7 @@ def main():
     app = _app
     repo_root = Path(__file__).parent.parent
     device = "cuda"
+    import isaaclab.sim as sim_utils
 
     # --- Locate assets ---
     robot_urdf = str(repo_root / "assets/urdf/kuka_sharpa_description/iiwa14_left_sharpa_adjusted_restricted.urdf")
@@ -121,8 +124,37 @@ def main():
     success_steps = 10
     keypoint_tolerance = 0.01 * 1.5  # targetSuccessTolerance * keypointScale
 
+    # --- Set up video recording ---
+    video_dir = Path(args.video_dir)
+    video_dir.mkdir(parents=True, exist_ok=True)
+    video_path = video_dir / f"rollout_{args.assembly}_{args.part_id}.mp4"
+    frames = []
+
+    # Add camera for recording
+    from isaaclab.sensors import Camera, CameraCfg
+    camera_cfg = CameraCfg(
+        prim_path="/World/Camera",
+        update_period=0,
+        height=480,
+        width=640,
+        data_types=["rgb"],
+        spawn=sim_utils.PinholeCameraCfg(
+            focal_length=24.0,
+            focus_distance=400.0,
+            horizontal_aperture=20.955,
+            clipping_range=(0.1, 100.0),
+        ),
+        offset=CameraCfg.OffsetCfg(
+            pos=(1.5, 1.5, 1.5),
+            rot=(0.7071, 0.0, 0.0, 0.7071),  # wxyz, looking down
+            convention="world",
+        ),
+    )
+    camera = Camera(camera_cfg)
+    _log(f"Camera created, saving video to {video_path}")
+
     # --- Initialize state ---
-    env.step(render=False)  # settle
+    env.step(render=True)  # settle + render for camera
     q_init, _ = env.get_robot_state()
     prev_targets = q_init[None].copy()  # (1, 29)
 
@@ -164,9 +196,16 @@ def main():
 
         # 5. Apply and step
         env.set_joint_position_targets(targets[0])
-        env.step(render=not args.headless)
+        env.step(render=True)  # Always render for camera
 
-        # 6. Goal switching
+        # 6. Capture frame (every 2nd step = 30fps video from 60Hz sim)
+        if step_i % 2 == 0:
+            camera.update(dt)
+            rgb = camera.data.output["rgb"]
+            if rgb is not None and len(rgb) > 0:
+                frames.append(rgb[0].cpu().numpy())
+
+        # 7. Goal switching
         object_kps = _compute_keypoint_positions(object_pose, object_scales)
         goal_kps = _compute_keypoint_positions(goal_pose, object_scales)
         keypoints_max_dist = np.max(np.linalg.norm(
@@ -198,6 +237,16 @@ def main():
             )
 
     _log(f"\nRollout complete. Final goal: {current_goal_idx}/{len(goals)}")
+
+    # Save video
+    if frames:
+        import imageio
+        _log(f"Saving {len(frames)} frames to {video_path}")
+        imageio.mimwrite(str(video_path), frames, fps=args.video_fps)
+        _log(f"Video saved: {video_path}")
+    else:
+        _log("WARNING: No frames captured for video")
+
     env.close()
 
 
