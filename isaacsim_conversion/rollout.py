@@ -119,10 +119,14 @@ def main():
         "palm_rot", "object_rot", "fingertip_pos_rel_palm",
         "keypoints_rel_palm", "keypoints_rel_goal", "object_scales",
     ]
-    # Get object scales from the object registry (matches training)
-    object_scale_tuple = obj_info.scale  # from NAME_TO_OBJECT, computed by rescale_by_factor(extents, 25)
-    object_scales = np.array([list(object_scale_tuple)], dtype=np.float32)
-    _log(f"Object scales from registry: {object_scales[0]}")
+    # Object scales for keypoint computation — use fixedSize from training config
+    # This is the bounding box dimensions in meters, NOT the mesh scale factor from Object.scale
+    import yaml
+    with open(config_path) as f:
+        policy_cfg = yaml.safe_load(f)
+    fixed_size = policy_cfg.get("task", {}).get("env", {}).get("fixedSize", [0.141, 0.03025, 0.0271])
+    object_scales = np.array([fixed_size], dtype=np.float32)
+    _log(f"Object scales (fixedSize): {object_scales[0]}")
     hand_moving_average = 0.1
     arm_moving_average = 0.1
     dof_speed_scale = 1.5
