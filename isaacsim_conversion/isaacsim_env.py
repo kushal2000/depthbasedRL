@@ -1,49 +1,73 @@
 """
-Isaac Sim environment for policy rollout.
-Handles scene setup (robot, table, object), physics config, state extraction.
+Isaac Sim environment for policy rollout, using Isaac Lab APIs.
+Handles URDF→USD conversion, scene setup, physics config, state extraction.
 
-Phases 4-6 of the plan:
-  - URDF → USD conversion
-  - Scene setup with correct physics params
-  - State extraction with quaternion conversion
+Uses isaaclab.sim.converters.UrdfConverter for URDF import with per-joint PD gains,
+and isaaclab.sim.SimulationContext for physics.
 """
 
 from __future__ import annotations
 
-import json
+import sys
 from pathlib import Path
 from typing import Optional
 
 import numpy as np
 
+from isaacgymenvs.utils.observation_action_utils_sharpa import JOINT_NAMES_ISAACGYM
+
 
 # DOF drive properties from isaacgymenvs/tasks/simtoolreal/utils.py
-KUKA_STIFFNESSES = [600, 600, 500, 400, 200, 200, 200]
-KUKA_DAMPINGS = [
-    27.027026473513512, 27.027026473513512, 24.672186769721083,
-    22.067474708266914, 9.752538131173853, 9.147747263670984, 9.147747263670984,
-]
-KUKA_EFFORTS = [300, 300, 300, 300, 300, 300, 300]
+# These are the exact values used during training in Isaac Gym.
+JOINT_STIFFNESSES = {
+    # Arm (7 DOF)
+    "iiwa14_joint_1": 600, "iiwa14_joint_2": 600, "iiwa14_joint_3": 500,
+    "iiwa14_joint_4": 400, "iiwa14_joint_5": 200, "iiwa14_joint_6": 200,
+    "iiwa14_joint_7": 200,
+    # Hand — thumb (5 DOF)
+    "left_1_thumb_CMC_FE": 6.95, "left_thumb_CMC_AA": 13.2,
+    "left_thumb_MCP_FE": 4.76, "left_thumb_MCP_AA": 6.62, "left_thumb_IP": 0.9,
+    # Hand — index (4 DOF)
+    "left_2_index_MCP_FE": 4.76, "left_index_MCP_AA": 6.62,
+    "left_index_PIP": 0.9, "left_index_DIP": 0.9,
+    # Hand — middle (4 DOF)
+    "left_3_middle_MCP_FE": 4.76, "left_middle_MCP_AA": 6.62,
+    "left_middle_PIP": 0.9, "left_middle_DIP": 0.9,
+    # Hand — ring (4 DOF)
+    "left_4_ring_MCP_FE": 4.76, "left_ring_MCP_AA": 6.62,
+    "left_ring_PIP": 0.9, "left_ring_DIP": 0.9,
+    # Hand — pinky (5 DOF)
+    "left_5_pinky_CMC": 1.38, "left_pinky_MCP_FE": 4.76,
+    "left_pinky_MCP_AA": 6.62, "left_pinky_PIP": 0.9, "left_pinky_DIP": 0.9,
+}
 
-HAND_STIFFNESSES = [
-    6.95, 13.2, 4.76, 6.62, 0.9,
-    4.76, 6.62, 0.9, 0.9,
-    4.76, 6.62, 0.9, 0.9,
-    4.76, 6.62, 0.9, 0.9,
-    1.38, 4.76, 6.62, 0.9, 0.9,
-]
-HAND_DAMPINGS = [
-    0.28676845, 0.40845109, 0.20394083, 0.24044435, 0.04190723,
-    0.20859232, 0.24595532, 0.04243185, 0.03504461,
-    0.2085923, 0.24595532, 0.04243185, 0.03504461,
-    0.20859226, 0.24595528, 0.04243183, 0.0350446,
-    0.02782345, 0.20859229, 0.24595528, 0.04243183, 0.0350446,
-]
+JOINT_DAMPINGS = {
+    # Arm
+    "iiwa14_joint_1": 27.027026473513512, "iiwa14_joint_2": 27.027026473513512,
+    "iiwa14_joint_3": 24.672186769721083, "iiwa14_joint_4": 22.067474708266914,
+    "iiwa14_joint_5": 9.752538131173853, "iiwa14_joint_6": 9.147747263670984,
+    "iiwa14_joint_7": 9.147747263670984,
+    # Hand — thumb
+    "left_1_thumb_CMC_FE": 0.28676845, "left_thumb_CMC_AA": 0.40845109,
+    "left_thumb_MCP_FE": 0.20394083, "left_thumb_MCP_AA": 0.24044435,
+    "left_thumb_IP": 0.04190723,
+    # Hand — index
+    "left_2_index_MCP_FE": 0.20859232, "left_index_MCP_AA": 0.24595532,
+    "left_index_PIP": 0.04243185, "left_index_DIP": 0.03504461,
+    # Hand — middle
+    "left_3_middle_MCP_FE": 0.2085923, "left_middle_MCP_AA": 0.24595532,
+    "left_middle_PIP": 0.04243185, "left_middle_DIP": 0.03504461,
+    # Hand — ring
+    "left_4_ring_MCP_FE": 0.20859226, "left_ring_MCP_AA": 0.24595528,
+    "left_ring_PIP": 0.04243183, "left_ring_DIP": 0.0350446,
+    # Hand — pinky
+    "left_5_pinky_CMC": 0.02782345, "left_pinky_MCP_FE": 0.20859229,
+    "left_pinky_MCP_AA": 0.24595528, "left_pinky_PIP": 0.04243183,
+    "left_pinky_DIP": 0.0350446,
+}
 
-ALL_STIFFNESSES = KUKA_STIFFNESSES + HAND_STIFFNESSES
-ALL_DAMPINGS = KUKA_DAMPINGS + HAND_DAMPINGS
-assert len(ALL_STIFFNESSES) == 29
-assert len(ALL_DAMPINGS) == 29
+assert len(JOINT_STIFFNESSES) == 29
+assert len(JOINT_DAMPINGS) == 29
 
 
 def wxyz_to_xyzw(quat_wxyz: np.ndarray) -> np.ndarray:
@@ -56,6 +80,10 @@ def xyzw_to_wxyz(quat_xyzw: np.ndarray) -> np.ndarray:
     return quat_xyzw[[3, 0, 1, 2]]
 
 
+def _log(msg: str):
+    print(msg, flush=True)
+
+
 class IsaacSimEnv:
     def __init__(
         self,
@@ -63,179 +91,184 @@ class IsaacSimEnv:
         table_urdf: str,
         object_urdf: str,
         headless: bool = True,
+        usd_cache_dir: str | None = None,
     ):
-        # Must import after SimulationApp is created
+        """Create Isaac Sim environment with robot, table, and object.
+
+        Args:
+            robot_urdf: Path to robot URDF.
+            table_urdf: Path to table/scene URDF.
+            object_urdf: Path to manipulation object URDF.
+            headless: Run without display.
+            usd_cache_dir: Directory to cache converted USD files. If None, uses /tmp.
+        """
+        # Launch Isaac Sim
         from isaacsim import SimulationApp
         self.app = SimulationApp({"headless": headless})
+        _log("SimulationApp created")
 
-        from omni.isaac.core import World
-        from omni.isaac.core.utils.extensions import enable_extension
+        # Isaac Lab imports (must be after SimulationApp)
+        import isaaclab.sim as sim_utils
+        from isaaclab.sim import SimulationCfg, SimulationContext
+        from isaaclab.sim.converters import UrdfConverter, UrdfConverterCfg
 
-        # Physics params matching SimToolReal.yaml
-        self.world = World(
-            physics_dt=1 / 60,
-            rendering_dt=1 / 60,
-            stage_units_in_meters=1.0,
+        self._usd_cache_dir = usd_cache_dir or "/tmp/isaaclab_usd_cache"
+
+        # Create simulation context with physics params matching SimToolReal.yaml
+        sim_cfg = SimulationCfg(
+            dt=1 / 60,
+            render_interval=1,
+            gravity=(0.0, 0.0, -9.81),
+            physx=SimulationCfg.PhysxCfg(
+                solver_type=1,  # TGS
+                bounce_threshold_velocity=0.2,
+            ),
         )
-        print("World created", flush=True)
+        self.sim = SimulationContext(sim_cfg)
+        _log("SimulationContext created")
 
-        # URDF import
-        enable_extension("omni.importer.urdf")
-        from omni.importer.urdf import _urdf
-        self._urdf_interface = _urdf
-        print("URDF importer ready")
+        # Convert and spawn assets
+        self._robot_usd = self._convert_robot_urdf(robot_urdf, UrdfConverterCfg, UrdfConverter)
+        self._table_usd = self._convert_table_urdf(table_urdf, UrdfConverterCfg, UrdfConverter)
+        self._object_usd = self._convert_object_urdf(object_urdf, UrdfConverterCfg, UrdfConverter)
 
-        # Import assets
-        self.robot_prim_path = self._import_robot(robot_urdf)
-        self.table_prim_path = self._import_table(table_urdf)
-        self.object_prim_path = self._import_object(object_urdf)
+        # Spawn into scene
+        self._spawn_scene(sim_utils)
 
-        # Set physics params after scene is populated
-        self._set_physics_params()
+        # Reset to initialize physics
+        self.sim.reset()
+        _log("Simulation reset complete")
 
-        # Set up articulations after world reset
-        self._setup_robot()
-        self._set_friction_properties()
+        # Set up articulation handle
+        self._setup_articulations()
 
-        # Joint ordering validation
+        # Validate joint ordering
         self.permutation = self._validate_joint_ordering()
 
-    def _set_physics_params(self):
-        """Set PhysX scene params to match SimToolReal.yaml."""
-        from pxr import UsdPhysics, PhysxSchema, Gf
-        stage = self.world.stage
+    def _convert_robot_urdf(self, urdf_path, UrdfConverterCfg, UrdfConverter):
+        """Convert robot URDF to USD with per-joint PD gains."""
+        _log(f"Converting robot URDF: {urdf_path}")
+        cfg = UrdfConverterCfg(
+            asset_path=urdf_path,
+            usd_dir=f"{self._usd_cache_dir}/robot",
+            fix_base=True,
+            merge_fixed_joints=False,
+            self_collision=False,
+            joint_drive=UrdfConverterCfg.JointDriveCfg(
+                drive_type="force",
+                target_type="position",
+                gains=UrdfConverterCfg.JointDriveCfg.PDGainsCfg(
+                    stiffness=JOINT_STIFFNESSES,
+                    damping=JOINT_DAMPINGS,
+                ),
+            ),
+        )
+        converter = UrdfConverter(cfg)
+        _log(f"Robot USD: {converter.usd_path}")
+        return converter.usd_path
 
-        # Find the physics scene
-        for prim in stage.Traverse():
-            if prim.HasAPI(PhysxSchema.PhysxSceneAPI):
-                physx_scene = PhysxSchema.PhysxSceneAPI(prim)
-                physx_scene.GetSolverTypeAttr().Set("TGS")
-                physx_scene.GetEnableStabilizationAttr().Set(True)
-                physx_scene.GetBounceThresholdAttr().Set(0.2)
+    def _convert_table_urdf(self, urdf_path, UrdfConverterCfg, UrdfConverter):
+        """Convert table URDF to USD (static, fixed base)."""
+        _log(f"Converting table URDF: {urdf_path}")
+        cfg = UrdfConverterCfg(
+            asset_path=urdf_path,
+            usd_dir=f"{self._usd_cache_dir}/table",
+            fix_base=True,
+            merge_fixed_joints=True,
+            joint_drive=None,
+        )
+        converter = UrdfConverter(cfg)
+        _log(f"Table USD: {converter.usd_path}")
+        return converter.usd_path
 
-                scene_api = UsdPhysics.Scene(prim)
-                scene_api.GetGravityDirectionAttr().Set(Gf.Vec3f(0, 0, -1))
-                scene_api.GetGravityMagnitudeAttr().Set(9.81)
-                print(f"Physics scene configured: TGS solver, gravity=-9.81")
-                break
+    def _convert_object_urdf(self, urdf_path, UrdfConverterCfg, UrdfConverter):
+        """Convert object URDF to USD (dynamic, not fixed)."""
+        _log(f"Converting object URDF: {urdf_path}")
+        cfg = UrdfConverterCfg(
+            asset_path=urdf_path,
+            usd_dir=f"{self._usd_cache_dir}/object",
+            fix_base=False,
+            merge_fixed_joints=True,
+            joint_drive=None,
+        )
+        converter = UrdfConverter(cfg)
+        _log(f"Object USD: {converter.usd_path}")
+        return converter.usd_path
 
-    def _import_robot(self, urdf_path: str) -> str:
-        """Import robot URDF, place at (0, 0.8, 0)."""
-        _urdf = self._urdf_interface
-
-        config = _urdf.ImportConfig()
-        config.merge_fixed_joints = False
-        config.fix_base = True
-        config.default_drive_type = _urdf.UrdfJointTargetType.JOINT_DRIVE_POSITION
-        config.self_collision = False
-
-        prim_path = "/World/Robot"
-        result = _urdf.import_robot(urdf_path, prim_path, config)
-        print(f"Robot imported to {prim_path}")
-
-        # Set position to (0, 0.8, 0)
+    def _spawn_scene(self, sim_utils):
+        """Spawn robot, table, and object into the USD stage."""
         from pxr import UsdGeom, Gf
-        stage = self.world.stage
-        xform = UsdGeom.Xformable(stage.GetPrimAtPath(prim_path))
+        import omni.usd
+
+        stage = omni.usd.get_context().get_stage()
+
+        # Spawn robot at (0, 0.8, 0)
+        robot_prim_path = "/World/Robot"
+        sim_utils.spawners.from_files.spawn_from_usd(
+            robot_prim_path, sim_utils.spawners.from_files.UsdFileCfg(usd_path=self._robot_usd)
+        )
+        xform = UsdGeom.Xformable(stage.GetPrimAtPath(robot_prim_path))
         xform.ClearXformOpOrder()
         xform.AddTranslateOp().Set(Gf.Vec3d(0.0, 0.8, 0.0))
+        self.robot_prim_path = robot_prim_path
+        _log(f"Robot spawned at {robot_prim_path}")
 
-        return prim_path
-
-    def _import_table(self, urdf_path: str) -> str:
-        """Import table/scene URDF at (0, 0, 0.38)."""
-        _urdf = self._urdf_interface
-
-        config = _urdf.ImportConfig()
-        config.merge_fixed_joints = True
-        config.fix_base = True
-        config.default_drive_type = _urdf.UrdfJointTargetType.JOINT_DRIVE_NONE
-
-        prim_path = "/World/Table"
-        result = _urdf.import_robot(urdf_path, prim_path, config)
-        print(f"Table imported to {prim_path}")
-
-        from pxr import UsdGeom, Gf
-        stage = self.world.stage
-        xform = UsdGeom.Xformable(stage.GetPrimAtPath(prim_path))
+        # Spawn table at (0, 0, 0.38)
+        table_prim_path = "/World/Table"
+        sim_utils.spawners.from_files.spawn_from_usd(
+            table_prim_path, sim_utils.spawners.from_files.UsdFileCfg(usd_path=self._table_usd)
+        )
+        xform = UsdGeom.Xformable(stage.GetPrimAtPath(table_prim_path))
         xform.ClearXformOpOrder()
         xform.AddTranslateOp().Set(Gf.Vec3d(0.0, 0.0, 0.38))
+        self.table_prim_path = table_prim_path
+        _log(f"Table spawned at {table_prim_path}")
 
-        return prim_path
-
-    def _import_object(self, urdf_path: str) -> str:
-        """Import manipulation object (dynamic, not fixed)."""
-        _urdf = self._urdf_interface
-
-        config = _urdf.ImportConfig()
-        config.merge_fixed_joints = True
-        config.fix_base = False
-        config.default_drive_type = _urdf.UrdfJointTargetType.JOINT_DRIVE_NONE
-
-        prim_path = "/World/Object"
-        result = _urdf.import_robot(urdf_path, prim_path, config)
-        print(f"Object imported to {prim_path}")
-        return prim_path
-
-    def _setup_robot(self):
-        """Set up robot articulation and DOF drive properties."""
-        from omni.isaac.core.articulations import Articulation
-
-        self.robot = self.world.scene.add(
-            Articulation(prim_path=self.robot_prim_path, name="robot")
+        # Spawn object (position set later via set_object_pose)
+        object_prim_path = "/World/Object"
+        sim_utils.spawners.from_files.spawn_from_usd(
+            object_prim_path, sim_utils.spawners.from_files.UsdFileCfg(usd_path=self._object_usd)
         )
-        self.world.reset()  # Initialize articulation
+        self.object_prim_path = object_prim_path
+        _log(f"Object spawned at {object_prim_path}")
 
-        # Set drive properties
+    def _setup_articulations(self):
+        """Set up articulation views for robot and object."""
+        from omni.isaac.core.articulations import Articulation
+        from omni.isaac.core.prims import RigidPrim
+
+        self.robot = Articulation(prim_path=self.robot_prim_path)
+        self.robot.initialize()
+
         num_dofs = self.robot.num_dof
-        print(f"Robot has {num_dofs} DOFs")
+        _log(f"Robot has {num_dofs} DOFs")
         assert num_dofs == 29, f"Expected 29 DOFs, got {num_dofs}"
 
-        stiffnesses = np.array(ALL_STIFFNESSES, dtype=np.float32)
-        dampings = np.array(ALL_DAMPINGS, dtype=np.float32)
-
-        self.robot.set_gains(
-            kps=stiffnesses,
-            kds=dampings,
-        )
-
-        # Verify by reading back
-        kps, kds = self.robot.get_gains()
-        print(f"Drive stiffness set: {kps[:7]} (arm), {kps[7:12]} (thumb)")
-        print(f"Drive damping set:   {kds[:7]} (arm), {kds[7:12]} (thumb)")
-
-    def _set_friction_properties(self):
-        """Set friction: robot=0.5, fingertips=1.5, object=0.5, table=0.5."""
-        # TODO: Set per-link friction via PhysxMaterialAPI
-        # For now, rely on URDF defaults
-        print("WARNING: Per-link friction not yet set (using URDF defaults)")
+        self.object_prim = RigidPrim(prim_path=self.object_prim_path)
+        self.object_prim.initialize()
 
     def _validate_joint_ordering(self) -> Optional[np.ndarray]:
         """Compare Isaac Sim joint names to JOINT_NAMES_ISAACGYM. Return permutation if needed."""
-        from isaacgymenvs.utils.observation_action_utils_sharpa import JOINT_NAMES_ISAACGYM
-
         sim_names = list(self.robot.dof_names)
-        print(f"\nJoint ordering validation:")
-        print(f"  Isaac Sim:  {sim_names}")
-        print(f"  Isaac Gym:  {JOINT_NAMES_ISAACGYM}")
+        _log(f"Joint ordering validation:")
+        _log(f"  Isaac Sim:  {sim_names}")
+        _log(f"  Isaac Gym:  {JOINT_NAMES_ISAACGYM}")
 
         if sim_names == JOINT_NAMES_ISAACGYM:
-            print("  -> MATCH! No permutation needed.")
+            _log("  -> MATCH! No permutation needed.")
             return None
         else:
-            print("  -> MISMATCH! Computing permutation...")
+            _log("  -> MISMATCH! Computing permutation...")
             permutation = np.array(
                 [sim_names.index(name) for name in JOINT_NAMES_ISAACGYM]
             )
-            print(f"  -> Permutation: {permutation}")
+            _log(f"  -> Permutation: {permutation}")
             return permutation
 
     def set_object_pose(self, pos_xyz: np.ndarray, quat_xyzw: np.ndarray):
         """Set object world pose. Takes xyzw quaternion (Isaac Gym convention)."""
-        from omni.isaac.core.prims import RigidPrim
-        obj = RigidPrim(prim_path=self.object_prim_path)
         quat_wxyz = xyzw_to_wxyz(quat_xyzw)
-        obj.set_world_pose(position=pos_xyz, orientation=quat_wxyz)
+        self.object_prim.set_world_pose(position=pos_xyz, orientation=quat_wxyz)
 
     def get_robot_state(self) -> tuple[np.ndarray, np.ndarray]:
         """Get joint positions and velocities in JOINT_NAMES_ISAACGYM order."""
@@ -248,9 +281,7 @@ class IsaacSimEnv:
 
     def get_object_pose_xyzw(self) -> np.ndarray:
         """Get object world pose as (7,) array: [x, y, z, qx, qy, qz, qw]."""
-        from omni.isaac.core.prims import RigidPrim
-        obj = RigidPrim(prim_path=self.object_prim_path)
-        pos, quat_wxyz = obj.get_world_pose()
+        pos, quat_wxyz = self.object_prim.get_world_pose()
         quat_xyzw = wxyz_to_xyzw(quat_wxyz)
         return np.concatenate([pos, quat_xyzw])
 
@@ -264,34 +295,32 @@ class IsaacSimEnv:
         self.robot.set_joint_position_targets(targets)
 
     def step(self, render: bool = True):
-        self.world.step(render=render)
-
-    def reset(self):
-        self.world.reset()
+        self.sim.step(render=render)
 
     def close(self):
+        self.sim.stop()
         self.app.close()
 
 
 def run_phase5_test():
-    """Phase 5: Robot-only scene stability test."""
+    """Phase 5-6: Scene setup and stability tests."""
     repo_root = Path(__file__).parent.parent
     robot_urdf = str(repo_root / "assets/urdf/kuka_sharpa_description/iiwa14_left_sharpa_adjusted_restricted.urdf")
     table_urdf = str(repo_root / "assets/urdf/fabrica/environments/beam_2/scene_coacd.urdf")
 
     # Find object URDF
-    from dextoolbench.objects import NAME_TO_OBJECT
+    sys.path.insert(0, str(repo_root))
     import fabrica.objects  # noqa: registers fabrica parts
+    from dextoolbench.objects import NAME_TO_OBJECT
     obj_info = NAME_TO_OBJECT.get("beam_2_coacd")
     if obj_info:
         object_urdf = obj_info.urdf_path
     else:
-        # Fallback: use a simple cube
         object_urdf = str(repo_root / "assets/urdf/objects/cube_multicolor.urdf")
 
-    print(f"Robot URDF:  {robot_urdf}")
-    print(f"Table URDF:  {table_urdf}")
-    print(f"Object URDF: {object_urdf}")
+    _log(f"Robot URDF:  {robot_urdf}")
+    _log(f"Table URDF:  {table_urdf}")
+    _log(f"Object URDF: {object_urdf}")
 
     env = IsaacSimEnv(
         robot_urdf=robot_urdf,
@@ -301,33 +330,28 @@ def run_phase5_test():
     )
 
     # Stability test (Phase 5e)
-    print("\n--- Stability test: robot should hold default pose for 5s ---")
+    _log("\n--- Stability test: robot should hold default pose for 5s ---")
     q_initial = env.get_robot_state()[0].copy()
-    for i in range(300):  # 5 seconds at 60Hz
+    for i in range(300):
         env.step(render=False)
     q_final = env.get_robot_state()[0]
     drift = np.abs(q_final - q_initial).max()
-    print(f"Max joint drift after 5s: {drift:.6f} rad")
-    if drift < 0.01:
-        print("PASS: Robot holds pose stably")
-    else:
-        print(f"WARN: Drift {drift:.4f} > 0.01 — check drive properties")
+    _log(f"Max joint drift after 5s: {drift:.6f} rad")
+    _log("PASS: Robot holds pose stably" if drift < 0.01 else f"WARN: Drift {drift:.4f} > 0.01")
 
     # Object stability test (Phase 6d)
-    print("\n--- Object stability test ---")
+    _log("\n--- Object stability test ---")
     obj_pose = env.get_object_pose_xyzw()
-    print(f"Object pose: {obj_pose}")
-    for i in range(120):  # 2 seconds
+    _log(f"Object pose: {obj_pose}")
+    for i in range(120):
         env.step(render=False)
     obj_pose_after = env.get_object_pose_xyzw()
-    print(f"Object pose after 2s: {obj_pose_after}")
-    if obj_pose_after[2] > 0.3:
-        print(f"PASS: Object stable at z={obj_pose_after[2]:.3f}")
-    else:
-        print(f"FAIL: Object fell! z={obj_pose_after[2]:.3f}")
+    _log(f"Object pose after 2s: {obj_pose_after}")
+    _log(f"PASS: Object stable at z={obj_pose_after[2]:.3f}" if obj_pose_after[2] > 0.3
+         else f"FAIL: Object fell! z={obj_pose_after[2]:.3f}")
 
     # Manual action test (Phase 8d)
-    print("\n--- Manual action test: move arm joint 1 by 0.1 rad ---")
+    _log("\n--- Manual action test: move arm joint 1 by 0.1 rad ---")
     q0 = env.get_robot_state()[0].copy()
     test_targets = q0.copy()
     test_targets[0] += 0.1
@@ -336,14 +360,11 @@ def run_phase5_test():
         env.step(render=False)
     q_after = env.get_robot_state()[0]
     error = abs(q_after[0] - test_targets[0])
-    print(f"Commanded: {test_targets[0]:.3f}, Achieved: {q_after[0]:.3f}, Error: {error:.4f}")
-    if error < 0.01:
-        print("PASS: Joint tracking OK")
-    else:
-        print(f"WARN: Tracking error {error:.4f} > 0.01")
+    _log(f"Commanded: {test_targets[0]:.3f}, Achieved: {q_after[0]:.3f}, Error: {error:.4f}")
+    _log("PASS: Joint tracking OK" if error < 0.01 else f"WARN: Tracking error {error:.4f} > 0.01")
 
     env.close()
-    print("\n=== Phase 5-6 tests complete ===")
+    _log("\n=== Phase 5-6 tests complete ===")
 
 
 if __name__ == "__main__":
