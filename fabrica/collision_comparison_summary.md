@@ -62,6 +62,20 @@ Tested with `debug_insertion_training.py` using full trajectory (all 12 waypoint
 
 All parts now under 1.2mm. The ~2mm constant baseline delta visible throughout trajectories is a GPU pipeline physics offset (present even in free air), not real collision.
 
+### Experiment: v2 params on all parts (branch `2026_03_18_FineGrainedInsertions`)
+
+Tested applying v2 params to all 5 parts (not just part 6). Hull counts changed: Part 2: 18→14, Part 3: 17→19, others unchanged.
+
+| Part | v1 all | v2 part6-only | v2 all parts |
+|---|---|---|---|
+| Part 0 | 1.2mm | 1.2mm | 1.3mm |
+| Part 1 | 1.0mm | 1.0mm | 1.4mm |
+| Part 2 | 1.3mm | 1.0mm | 0.4mm |
+| Part 3 | 3.9mm | 0.6mm | 1.9mm |
+| Part 6 | 0.4mm | 0.4mm | 0.4mm |
+
+**Decision:** Keep v2 on part 6 only (max 1.2mm across all parts). Applying v2 to all parts regressed part 3 from 0.6mm to 1.9mm due to CoACD non-determinism producing a different decomposition for part 3 (19 vs 17 hulls). Per-part tuning is more reliable than blanket parameter changes.
+
 ## Quality Ranking
 
 **SDF > CoACD (tuned) > CoACD (default) > VHACD**
