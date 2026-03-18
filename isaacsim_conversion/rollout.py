@@ -130,28 +130,33 @@ def main():
     video_path = video_dir / f"rollout_{args.assembly}_{args.part_id}.mp4"
     frames = []
 
-    # Add camera for recording
-    from isaaclab.sensors import Camera, CameraCfg
-    camera_cfg = CameraCfg(
-        prim_path="/World/Camera",
-        update_period=0,
-        height=480,
-        width=640,
-        data_types=["rgb"],
-        spawn=sim_utils.PinholeCameraCfg(
-            focal_length=24.0,
-            focus_distance=400.0,
-            horizontal_aperture=20.955,
-            clipping_range=(0.1, 100.0),
-        ),
-        offset=CameraCfg.OffsetCfg(
-            pos=(1.5, 1.5, 1.5),
-            rot=(0.7071, 0.0, 0.0, 0.7071),  # wxyz, looking down
-            convention="world",
-        ),
-    )
-    camera = Camera(camera_cfg)
-    _log(f"Camera created, saving video to {video_path}")
+    # Set up camera for video recording via omni.replicator
+    try:
+        import omni.replicator.core as rep
+        import omni.usd
+        from pxr import UsdGeom, Gf
+
+        stage = omni.usd.get_context().get_stage()
+        # Create camera prim looking at the workspace
+        cam_prim = stage.DefinePrim("/World/RecordCamera", "Camera")
+        xform = UsdGeom.Xformable(cam_prim)
+        xform.AddTranslateOp().Set(Gf.Vec3d(0.8, 1.5, 1.2))
+        # Point camera at the table/object area
+        cam_prim.GetAttribute("focalLength").Set(24.0)
+
+        render_product = rep.create.render_product(cam_prim.GetPath(), (640, 480))
+        rgb_annot = rep.annotators.get("rgb")
+        rgb_annot.attach(render_product)
+
+        # Warm up the renderer
+        for _ in range(5):
+            rep.orchestrator.step()
+
+        has_camera = True
+        _log(f"Video camera created, saving to {video_path}")
+    except Exception as e:
+        has_camera = False
+        _log(f"WARNING: Could not set up camera for video: {e}")
 
     # --- Initialize state ---
     env.step(render=True)  # settle + render for camera
@@ -199,11 +204,14 @@ def main():
         env.step(render=True)  # Always render for camera
 
         # 6. Capture frame (every 2nd step = 30fps video from 60Hz sim)
-        if step_i % 2 == 0:
-            camera.update(dt)
-            rgb = camera.data.output["rgb"]
-            if rgb is not None and len(rgb) > 0:
-                frames.append(rgb[0].cpu().numpy())
+        if has_camera and step_i % 2 == 0:
+            try:
+                rep.orchestrator.step(rt_subframes=1)
+                data = rgb_annot.get_data()
+                if data is not None and data.size > 0:
+                    frames.append(np.array(data[:, :, :3], dtype=np.uint8))
+            except Exception:
+                pass
 
         # 7. Goal switching
         object_kps = _compute_keypoint_positions(object_pose, object_scales)
