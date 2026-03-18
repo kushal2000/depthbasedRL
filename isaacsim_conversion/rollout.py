@@ -18,6 +18,7 @@ import numpy as np
 import torch
 
 from deployment.rl_player import RlPlayer
+from isaacsim_conversion.isaacsim_env import _log
 from isaacgymenvs.utils.observation_action_utils_sharpa import (
     JOINT_NAMES_ISAACGYM,
     N_OBS,
@@ -28,21 +29,29 @@ from isaacgymenvs.utils.observation_action_utils_sharpa import (
 )
 
 
-def parse_args():
+def launch_app():
+    """Create AppLauncher FIRST, before any isaaclab/omni imports."""
+    from isaaclab.app import AppLauncher
     parser = argparse.ArgumentParser()
     parser.add_argument("--assembly", default="beam")
     parser.add_argument("--part_id", default="2")
     parser.add_argument("--collision_method", default="coacd")
-    parser.add_argument("--headless", action="store_true", default=True)
     parser.add_argument("--max_steps", type=int, default=6000, help="Max sim steps (100s at 60Hz)")
-    parser.add_argument("--device", default="cuda")
-    return parser.parse_args()
+    AppLauncher.add_app_launcher_args(parser)
+    args = parser.parse_args()
+    app_launcher = AppLauncher(args)
+    return app_launcher.app, args
+
+
+# Must happen at module level, before any other imports
+_app, _args = launch_app()
 
 
 def main():
-    args = parse_args()
+    args = _args
+    app = _app
     repo_root = Path(__file__).parent.parent
-    device = args.device
+    device = "cuda"
 
     # --- Locate assets ---
     robot_urdf = str(repo_root / "assets/urdf/kuka_sharpa_description/iiwa14_left_sharpa_adjusted_restricted.urdf")
@@ -75,7 +84,8 @@ def main():
         robot_urdf=robot_urdf,
         table_urdf=table_urdf,
         object_urdf=object_urdf,
-        headless=args.headless,
+        headless=True,
+        app=app,
     )
 
     # Place object at start pose
@@ -122,7 +132,7 @@ def main():
 
     player.player.init_rnn()  # fresh LSTM state
 
-    print(f"\n=== Starting rollout: {args.max_steps} steps, {len(goals)} goals ===\n")
+    _log(f"\n=== Starting rollout: {args.max_steps} steps, {len(goals)} goals ===\n")
 
     # --- Main loop ---
     for step_i in range(args.max_steps):
@@ -169,25 +179,25 @@ def main():
             near_goal_steps = 0  # forceConsecutiveNearGoalSteps=True
 
         if near_goal_steps >= success_steps:
-            print(f"[step {step_i}] Goal {current_goal_idx} REACHED! (dist={keypoints_max_dist:.4f})")
+            _log(f"[step {step_i}] Goal {current_goal_idx} REACHED! (dist={keypoints_max_dist:.4f})")
             current_goal_idx += 1
             near_goal_steps = 0
             if current_goal_idx >= len(goals):
-                print(f"\n=== ALL {len(goals)} GOALS REACHED at step {step_i}! ===")
+                _log(f"\n=== ALL {len(goals)} GOALS REACHED at step {step_i}! ===")
                 break
             goal_pose = np.array(goals[current_goal_idx], dtype=np.float32)[None]
-            print(f"  -> Advancing to goal {current_goal_idx}/{len(goals)}")
+            _log(f"  -> Advancing to goal {current_goal_idx}/{len(goals)}")
 
         # Periodic logging
         if step_i % 60 == 0:
             obj_z = object_pose[0, 2]
-            print(
+            _log(
                 f"[step {step_i:5d}] goal={current_goal_idx}/{len(goals)}, "
                 f"kp_dist={keypoints_max_dist:.4f}, obj_z={obj_z:.3f}, "
                 f"near_goal={near_goal_steps}/{success_steps}"
             )
 
-    print(f"\nRollout complete. Final goal: {current_goal_idx}/{len(goals)}")
+    _log(f"\nRollout complete. Final goal: {current_goal_idx}/{len(goals)}")
     env.close()
 
 
