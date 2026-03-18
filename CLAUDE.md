@@ -36,4 +36,4 @@ Each assembly has numbered part subdirs (e.g., `beam/0/0.obj`) and an `assembly_
 - Assembly task specs (order, rotations) go in JSON config files, not hardcoded in Python
 - OBJ meshes are in assembled reference frame — no rotation needed at final position
 - Part IDs are strings ("0", "1", ...) not ints
-- Branch names start with the creation date in `YY_MM_DD` format (e.g., `25_03_18_my_feature`)
+- Branch names start with the creation date in `YYYY_MM_DD` format (e.g., `2025_03_18_my_feature`)
