@@ -4,7 +4,7 @@ Roll out the pretrained Isaac Gym policy in Isaac Sim (via Isaac Lab) for visual
 
 ## Prerequisites
 
-- Python 3.10 (Isaac Sim 4.x requirement)
+- Python 3.11 (Isaac Sim 5.x / Isaac Lab 2.3.x requirement)
 - NVIDIA GPU with driver >= 525.60 (we have 570.124.06)
 - CUDA 12+ (we have 12.8)
 - `uv` for package management
@@ -13,14 +13,14 @@ Roll out the pretrained Isaac Gym policy in Isaac Sim (via Isaac Lab) for visual
 
 All commands assume you're in the repo root: `/share/portal/kk837/depthbasedRL`
 
-### 1. Create Python 3.10 venv
+### 1. Create Python 3.11 venv
 
 ```bash
-uv venv .venv_isaacsim --python 3.10
+uv venv .venv_isaacsim --python 3.11
 source .venv_isaacsim/bin/activate
 ```
 
-If Python 3.10 is not available: `uv python install 3.10`
+If Python 3.11 is not available: `uv python install 3.11`
 
 ### 2. Install PyTorch (CUDA 12.1)
 
@@ -30,45 +30,29 @@ uv pip install torch --index-url https://download.pytorch.org/whl/cu121
 
 Verify: `python -c "import torch; print(torch.__version__, torch.cuda.is_available())"`
 
-### 3. Install vendored rl_games
+### 3. Install vendored rl_games and inference deps
 
 ```bash
 uv pip install -e ./rl_games/
-```
-
-### 4. Install inference dependencies
-
-```bash
 uv pip install omegaconf hydra-core "gym==0.23.1" scipy numpy yourdfpy
 ```
 
-**Do NOT** run `uv pip install -e .` — the project's pyproject.toml pins `numpy==1.23.0`, `isaacgym-stubs`, and `warp-lang==0.10.1` which conflict with Python 3.10 / Isaac Sim.
+**Do NOT** run `uv pip install -e .` — the project's pyproject.toml pins `numpy==1.23.0`, `isaacgym-stubs`, and `warp-lang==0.10.1` which conflict with Python 3.11 / Isaac Sim.
 
-### 5. Install Isaac Sim 4.5.0
+### 4. Install Isaac Lab (bundles Isaac Sim)
 
 ```bash
-uv pip install 'isaacsim[all,extscache]==4.5.0' --extra-index-url https://pypi.nvidia.com
+uv pip install "isaaclab[isaacsim,all]==2.3.2.post1" --extra-index-url https://pypi.nvidia.com
 ```
 
-This is a ~15GB+ download. The `[all,extscache]` extra installs all extensions including `isaacsim.simulation_app`, physics, and the kit SDK.
+This is a ~15GB download. The `[isaacsim,all]` extra bundles Isaac Sim + all extensions + Isaac Lab modules (`isaaclab.sim`, `isaaclab.assets`, etc.).
 
 **First launch notes**:
 - Isaac Sim will prompt to accept the NVIDIA EULA on first run.
-- First launch takes ~2-5 minutes (shader compilation). Subsequent launches use cached shaders (~30s).
-- Shader cache lives in `~/.cache/ov/`. On NFS this is slow — see step 7 for speedup.
+- First launch takes ~2-5 minutes (shader compilation). Subsequent launches are ~16-30s.
+- Shader cache lives in `~/.cache/ov/`. On NFS this is slow — see step 5 for speedup.
 
-### 6. Install Isaac Lab 2.1.0
-
-```bash
-# flatdict (isaaclab dependency) has a broken build config — pre-install it
-uv pip install flatdict==4.0.1 --no-build-isolation
-# Then install Isaac Lab
-uv pip install "isaaclab[all]==2.1.0" --extra-index-url https://pypi.nvidia.com
-```
-
-Isaac Lab provides higher-level APIs on top of Isaac Sim for articulations, scene setup, and URDF import. We use it instead of raw `pxr`/`omni.isaac.core` APIs.
-
-### 7. (Optional) Speed up startup with local cache
+### 5. (Optional) Speed up startup with local cache
 
 Isaac Sim startup is slow (~2 min) when caches are on NFS (`~/.cache/ov/` is on `portal-nfs-01`). On compute nodes with local SSD (`/scratch`):
 
@@ -79,17 +63,18 @@ mkdir -p $OMNI_KIT_CACHE_PATH
 
 Note: `/scratch` is node-local and won't persist across different SLURM nodes.
 
-### 8. Verify installation
+### 6. Verify installation
 
 ```bash
 # 1. Policy inference smoke test (no simulator needed)
 PYTHONPATH=. python isaacsim_conversion/test_inference.py
 
-# 2. Isaac Sim launch test (~2 min first time)
+# 2. Isaac Sim + Isaac Lab launch test (~2 min first time)
 python -c "
 from isaacsim import SimulationApp
 app = SimulationApp({'headless': True})
-print('Isaac Sim OK')
+import isaaclab.sim as sim_utils
+print('Isaac Sim + Isaac Lab OK')
 app.close()
 "
 ```
@@ -98,14 +83,12 @@ app.close()
 
 ```bash
 cd /share/portal/kk837/depthbasedRL
-uv venv .venv_isaacsim --python 3.10
+uv venv .venv_isaacsim --python 3.11
 source .venv_isaacsim/bin/activate
 uv pip install torch --index-url https://download.pytorch.org/whl/cu121
 uv pip install -e ./rl_games/
 uv pip install omegaconf hydra-core "gym==0.23.1" scipy numpy yourdfpy
-uv pip install 'isaacsim[all,extscache]==4.5.0' --extra-index-url https://pypi.nvidia.com
-uv pip install flatdict==4.0.1 --no-build-isolation
-uv pip install "isaaclab[all]==2.1.0" --extra-index-url https://pypi.nvidia.com
+uv pip install "isaaclab[isaacsim,all]==2.3.2.post1" --extra-index-url https://pypi.nvidia.com
 ```
 
 ## Usage
@@ -132,7 +115,7 @@ PYTHONPATH=. python isaacsim_conversion/rollout.py \
 - **Headless mode**: On the SLURM cluster (no display), always use `SimulationApp({"headless": True})`. For visual feedback, use Isaac Sim's WebRTC livestream.
 - **contact_offset=0.002**: The training uses a very small contact offset (default is 0.02). Must set explicitly or contacts behave differently.
 - **NFS vs local cache**: First Isaac Sim launch is slow on NFS. Use `/scratch` for faster subsequent launches.
-- **flatdict build issue**: `uv` can't build `flatdict==4.0.1` due to missing `setuptools` in build isolation. Pre-install it with `--no-build-isolation`.
+- **SimulationApp must be created first**: Before any `isaaclab.*` or `omni.*` imports. Our code handles this.
 
 ## Architecture
 

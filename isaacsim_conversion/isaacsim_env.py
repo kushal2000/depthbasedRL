@@ -17,6 +17,8 @@ import numpy as np
 from isaacgymenvs.utils.observation_action_utils_sharpa import JOINT_NAMES_ISAACGYM
 
 
+
+
 # DOF drive properties from isaacgymenvs/tasks/simtoolreal/utils.py
 # These are the exact values used during training in Isaac Gym.
 JOINT_STIFFNESSES = {
@@ -81,7 +83,10 @@ def xyzw_to_wxyz(quat_xyzw: np.ndarray) -> np.ndarray:
 
 
 def _log(msg: str):
-    print(msg, flush=True)
+    # Isaac Sim's Kit runtime captures stdout. Use stderr + carb logging to ensure visibility.
+    import sys
+    sys.stderr.write(f"[IsaacSimEnv] {msg}\n")
+    sys.stderr.flush()
 
 
 class IsaacSimEnv:
@@ -92,6 +97,7 @@ class IsaacSimEnv:
         object_urdf: str,
         headless: bool = True,
         usd_cache_dir: str | None = None,
+        app=None,
     ):
         """Create Isaac Sim environment with robot, table, and object.
 
@@ -101,15 +107,18 @@ class IsaacSimEnv:
             object_urdf: Path to manipulation object URDF.
             headless: Run without display.
             usd_cache_dir: Directory to cache converted USD files. If None, uses /tmp.
+            app: Existing SimulationApp instance. If None, creates a new one.
+                 IMPORTANT: SimulationApp must be created BEFORE any isaaclab imports.
         """
-        # Launch Isaac Sim
-        from isaacsim import SimulationApp
-        self.app = SimulationApp({"headless": headless})
-        _log("SimulationApp created")
+        if app is None:
+            from isaacsim import SimulationApp
+            app = SimulationApp({"headless": headless})
+        self.app = app
+        _log("SimulationApp ready")
 
-        # Isaac Lab imports (must be after SimulationApp)
+        # Isaac Lab imports (must be after SimulationApp/AppLauncher)
         import isaaclab.sim as sim_utils
-        from isaaclab.sim import SimulationCfg, SimulationContext
+        from isaaclab.sim import PhysxCfg, SimulationCfg, SimulationContext
         from isaaclab.sim.converters import UrdfConverter, UrdfConverterCfg
 
         self._usd_cache_dir = usd_cache_dir or "/tmp/isaaclab_usd_cache"
@@ -119,7 +128,7 @@ class IsaacSimEnv:
             dt=1 / 60,
             render_interval=1,
             gravity=(0.0, 0.0, -9.81),
-            physx=SimulationCfg.PhysxCfg(
+            physx=PhysxCfg(
                 solver_type=1,  # TGS
                 bounce_threshold_velocity=0.2,
             ),
@@ -135,11 +144,7 @@ class IsaacSimEnv:
         # Spawn into scene
         self._spawn_scene(sim_utils)
 
-        # Reset to initialize physics
-        self.sim.reset()
-        _log("Simulation reset complete")
-
-        # Set up articulation handle
+        # Set up articulation (includes sim.reset())
         self._setup_articulations()
 
         # Validate joint ordering
@@ -197,59 +202,71 @@ class IsaacSimEnv:
 
     def _spawn_scene(self, sim_utils):
         """Spawn robot, table, and object into the USD stage."""
-        from pxr import UsdGeom, Gf
-        import omni.usd
-
-        stage = omni.usd.get_context().get_stage()
-
         # Spawn robot at (0, 0.8, 0)
         robot_prim_path = "/World/Robot"
-        sim_utils.spawners.from_files.spawn_from_usd(
-            robot_prim_path, sim_utils.spawners.from_files.UsdFileCfg(usd_path=self._robot_usd)
-        )
-        xform = UsdGeom.Xformable(stage.GetPrimAtPath(robot_prim_path))
-        xform.ClearXformOpOrder()
-        xform.AddTranslateOp().Set(Gf.Vec3d(0.0, 0.8, 0.0))
+        cfg = sim_utils.UsdFileCfg(usd_path=self._robot_usd)
+        cfg.func(robot_prim_path, cfg, translation=(0.0, 0.8, 0.0))
         self.robot_prim_path = robot_prim_path
         _log(f"Robot spawned at {robot_prim_path}")
 
         # Spawn table at (0, 0, 0.38)
         table_prim_path = "/World/Table"
-        sim_utils.spawners.from_files.spawn_from_usd(
-            table_prim_path, sim_utils.spawners.from_files.UsdFileCfg(usd_path=self._table_usd)
-        )
-        xform = UsdGeom.Xformable(stage.GetPrimAtPath(table_prim_path))
-        xform.ClearXformOpOrder()
-        xform.AddTranslateOp().Set(Gf.Vec3d(0.0, 0.0, 0.38))
+        cfg = sim_utils.UsdFileCfg(usd_path=self._table_usd)
+        cfg.func(table_prim_path, cfg, translation=(0.0, 0.0, 0.38))
         self.table_prim_path = table_prim_path
         _log(f"Table spawned at {table_prim_path}")
 
         # Spawn object (position set later via set_object_pose)
         object_prim_path = "/World/Object"
-        sim_utils.spawners.from_files.spawn_from_usd(
-            object_prim_path, sim_utils.spawners.from_files.UsdFileCfg(usd_path=self._object_usd)
-        )
+        cfg = sim_utils.UsdFileCfg(usd_path=self._object_usd)
+        cfg.func(object_prim_path, cfg)
         self.object_prim_path = object_prim_path
         _log(f"Object spawned at {object_prim_path}")
 
     def _setup_articulations(self):
-        """Set up articulation views for robot and object."""
-        from omni.isaac.core.articulations import Articulation
-        from omni.isaac.core.prims import RigidPrim
+        """Set up articulation and rigid object using Isaac Lab APIs."""
+        from isaaclab.assets import Articulation, ArticulationCfg, RigidObject, RigidObjectCfg
+        from isaaclab.actuators import ImplicitActuatorCfg
+        import isaaclab.sim as sim_utils
 
-        self.robot = Articulation(prim_path=self.robot_prim_path)
-        self.robot.initialize()
+        # Robot articulation with implicit PD actuators
+        robot_cfg = ArticulationCfg(
+            prim_path=self.robot_prim_path,
+            spawn=None,  # Already spawned
+            actuators={
+                "arm": ImplicitActuatorCfg(
+                    joint_names_expr=["iiwa14_joint_.*"],
+                    stiffness={k: v for k, v in JOINT_STIFFNESSES.items() if k.startswith("iiwa14")},
+                    damping={k: v for k, v in JOINT_DAMPINGS.items() if k.startswith("iiwa14")},
+                ),
+                "hand": ImplicitActuatorCfg(
+                    joint_names_expr=["left_.*"],
+                    stiffness={k: v for k, v in JOINT_STIFFNESSES.items() if k.startswith("left")},
+                    damping={k: v for k, v in JOINT_DAMPINGS.items() if k.startswith("left")},
+                ),
+            },
+        )
+        self.robot = Articulation(cfg=robot_cfg)
 
-        num_dofs = self.robot.num_dof
+        # Object as rigid body
+        object_cfg = RigidObjectCfg(
+            prim_path=self.object_prim_path,
+            spawn=None,  # Already spawned
+        )
+        self.object_rigid = RigidObject(cfg=object_cfg)
+
+        # Initialize after sim reset
+        self.sim.reset()
+        _log("Simulation reset for articulation init")
+
+        num_dofs = self.robot.num_joints
         _log(f"Robot has {num_dofs} DOFs")
+        _log(f"Robot joint names: {self.robot.joint_names}")
         assert num_dofs == 29, f"Expected 29 DOFs, got {num_dofs}"
-
-        self.object_prim = RigidPrim(prim_path=self.object_prim_path)
-        self.object_prim.initialize()
 
     def _validate_joint_ordering(self) -> Optional[np.ndarray]:
         """Compare Isaac Sim joint names to JOINT_NAMES_ISAACGYM. Return permutation if needed."""
-        sim_names = list(self.robot.dof_names)
+        sim_names = list(self.robot.joint_names)
         _log(f"Joint ordering validation:")
         _log(f"  Isaac Sim:  {sim_names}")
         _log(f"  Isaac Gym:  {JOINT_NAMES_ISAACGYM}")
@@ -267,13 +284,18 @@ class IsaacSimEnv:
 
     def set_object_pose(self, pos_xyz: np.ndarray, quat_xyzw: np.ndarray):
         """Set object world pose. Takes xyzw quaternion (Isaac Gym convention)."""
+        import torch
         quat_wxyz = xyzw_to_wxyz(quat_xyzw)
-        self.object_prim.set_world_pose(position=pos_xyz, orientation=quat_wxyz)
+        # Isaac Lab uses (N, 7) tensors in wxyz format
+        pose = torch.tensor(
+            [list(pos_xyz) + list(quat_wxyz)], dtype=torch.float32, device=self.sim.device
+        )
+        self.object_rigid.write_root_pose_to_sim(pose)
 
     def get_robot_state(self) -> tuple[np.ndarray, np.ndarray]:
         """Get joint positions and velocities in JOINT_NAMES_ISAACGYM order."""
-        q = self.robot.get_joint_positions()
-        qd = self.robot.get_joint_velocities()
+        q = self.robot.data.joint_pos[0].cpu().numpy()   # (num_joints,)
+        qd = self.robot.data.joint_vel[0].cpu().numpy()  # (num_joints,)
         if self.permutation is not None:
             q = q[self.permutation]
             qd = qd[self.permutation]
@@ -281,21 +303,29 @@ class IsaacSimEnv:
 
     def get_object_pose_xyzw(self) -> np.ndarray:
         """Get object world pose as (7,) array: [x, y, z, qx, qy, qz, qw]."""
-        pos, quat_wxyz = self.object_prim.get_world_pose()
+        # Isaac Lab root_pos_w is (N, 3), root_quat_w is (N, 4) in wxyz
+        pos = self.object_rigid.data.root_pos_w[0].cpu().numpy()
+        quat_wxyz = self.object_rigid.data.root_quat_w[0].cpu().numpy()
         quat_xyzw = wxyz_to_xyzw(quat_wxyz)
         return np.concatenate([pos, quat_xyzw])
 
     def set_joint_position_targets(self, targets: np.ndarray):
         """Set joint position targets. Takes targets in JOINT_NAMES_ISAACGYM order."""
+        import torch
         if self.permutation is not None:
             reordered = np.zeros_like(targets)
             for i, p in enumerate(self.permutation):
                 reordered[p] = targets[i]
             targets = reordered
-        self.robot.set_joint_position_targets(targets)
+        targets_t = torch.tensor(targets, dtype=torch.float32, device=self.sim.device).unsqueeze(0)
+        self.robot.set_joint_position_target(targets_t)
+        self.robot.write_data_to_sim()
 
     def step(self, render: bool = True):
         self.sim.step(render=render)
+        # Update articulation data buffers
+        self.robot.update(self.sim.get_physics_dt())
+        self.object_rigid.update(self.sim.get_physics_dt())
 
     def close(self):
         self.sim.stop()
@@ -304,11 +334,22 @@ class IsaacSimEnv:
 
 def run_phase5_test():
     """Phase 5-6: Scene setup and stability tests."""
+    # IMPORTANT: AppLauncher must be created BEFORE any isaaclab/omni imports.
+    import argparse
+    from isaaclab.app import AppLauncher
+    parser = argparse.ArgumentParser()
+    AppLauncher.add_app_launcher_args(parser)
+    args = parser.parse_args(["--headless"])
+    app_launcher = AppLauncher(args)
+    app = app_launcher.app
+    _log("AppLauncher created")
+
     repo_root = Path(__file__).parent.parent
+
     robot_urdf = str(repo_root / "assets/urdf/kuka_sharpa_description/iiwa14_left_sharpa_adjusted_restricted.urdf")
     table_urdf = str(repo_root / "assets/urdf/fabrica/environments/beam_2/scene_coacd.urdf")
 
-    # Find object URDF
+    # Find object URDF (these imports are safe — no omni/isaaclab deps)
     sys.path.insert(0, str(repo_root))
     import fabrica.objects  # noqa: registers fabrica parts
     from dextoolbench.objects import NAME_TO_OBJECT
@@ -327,6 +368,7 @@ def run_phase5_test():
         table_urdf=table_urdf,
         object_urdf=object_urdf,
         headless=True,
+        app=app,
     )
 
     # Stability test (Phase 5e)
