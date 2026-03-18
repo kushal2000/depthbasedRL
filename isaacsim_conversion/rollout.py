@@ -38,7 +38,9 @@ def launch_app():
     parser.add_argument("--collision_method", default="coacd")
     parser.add_argument("--max_steps", type=int, default=6000, help="Max sim steps (100s at 60Hz)")
     parser.add_argument("--video_dir", default="rollout_videos", help="Directory to save video")
-    parser.add_argument("--video_fps", type=int, default=30, help="Video FPS (sim runs at 60Hz, record every 2nd frame)")
+    parser.add_argument("--video_fps", type=int, default=30, help="Video FPS")
+    parser.add_argument("--checkpoint", default="pretrained_policy/model.pth", help="Policy checkpoint path")
+    parser.add_argument("--config", default="pretrained_policy/config.yaml", help="Policy config path")
     AppLauncher.add_app_launcher_args(parser)
     args = parser.parse_args()
     app_launcher = AppLauncher(args)
@@ -98,11 +100,14 @@ def main():
 
     # --- Load policy ---
     print("\nLoading policy...")
+    checkpoint_path = str(repo_root / args.checkpoint) if not args.checkpoint.startswith("/") else args.checkpoint
+    config_path = str(repo_root / args.config) if not args.config.startswith("/") else args.config
+    _log(f"Loading policy: checkpoint={checkpoint_path}, config={config_path}")
     player = RlPlayer(
         num_observations=140,
         num_actions=29,
-        config_path=str(repo_root / "pretrained_policy/config.yaml"),
-        checkpoint_path=str(repo_root / "pretrained_policy/model.pth"),
+        config_path=config_path,
+        checkpoint_path=checkpoint_path,
         device=device,
         num_envs=1,
     )
