@@ -216,26 +216,28 @@ class IsaacSimEnv:
         cfg = sim_utils.UsdFileCfg(
             usd_path=self._robot_usd,
             rigid_props=sim_utils.RigidBodyPropertiesCfg(
-                disable_gravity=True,  # Match Isaac Gym
-                contact_offset=0.002,  # Match Isaac Gym (default 0.02 is 10x too large)
-                rest_offset=0.0,
+                disable_gravity=True,
                 max_depenetration_velocity=1000.0,
             ),
+            collision_props=sim_utils.CollisionPropertiesCfg(
+                contact_offset=0.002,
+                rest_offset=0.0,
+            ),
             articulation_props=sim_utils.ArticulationRootPropertiesCfg(
-                enabled_self_collisions=False,  # Match Isaac Gym
-                solver_position_iteration_count=8,  # Match SimToolReal.yaml
+                enabled_self_collisions=False,
+                solver_position_iteration_count=8,
                 solver_velocity_iteration_count=0,
             ),
         )
         cfg.func(robot_prim_path, cfg, translation=(0.0, 0.8, 0.0))
         self.robot_prim_path = robot_prim_path
-        _log(f"Robot spawned at {robot_prim_path} (gravity=off, contact_offset=0.002, self_collision=off)")
+        _log(f"Robot spawned (gravity=off, contact_offset=0.002, self_collision=off)")
 
         # Spawn table at (0, 0, 0.38)
         table_prim_path = "/World/Table"
         cfg = sim_utils.UsdFileCfg(
             usd_path=self._table_usd,
-            rigid_props=sim_utils.RigidBodyPropertiesCfg(
+            collision_props=sim_utils.CollisionPropertiesCfg(
                 contact_offset=0.002,
                 rest_offset=0.0,
             ),
@@ -248,7 +250,7 @@ class IsaacSimEnv:
         object_prim_path = "/World/Object"
         cfg = sim_utils.UsdFileCfg(
             usd_path=self._object_usd,
-            rigid_props=sim_utils.RigidBodyPropertiesCfg(
+            collision_props=sim_utils.CollisionPropertiesCfg(
                 contact_offset=0.002,
                 rest_offset=0.0,
             ),
