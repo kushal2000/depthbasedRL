@@ -140,31 +140,34 @@ def main():
 
     # Set up camera for video recording (requires --enable_cameras flag)
     has_camera = False
-    try:
-        from isaaclab.sensors import Camera, CameraCfg
-        camera_cfg = CameraCfg(
-            prim_path="/World/RecordCamera",
-            update_period=0,
-            height=480,
-            width=640,
-            data_types=["rgb"],
-            spawn=sim_utils.PinholeCameraCfg(
-                focal_length=24.0,
-                focus_distance=400.0,
-                horizontal_aperture=20.955,
-                clipping_range=(0.1, 100.0),
-            ),
-            offset=CameraCfg.OffsetCfg(
-                pos=(0.8, 1.5, 1.2),
-                rot=(0.7071, 0.0, 0.3536, -0.6124),
-                convention="world",
-            ),
-        )
-        camera = Camera(cfg=camera_cfg)
-        has_camera = True
-        _log(f"Camera created for video recording to {video_dir}")
-    except Exception as e:
-        _log(f"Camera setup failed (run with --enable_cameras): {e}")
+    if getattr(args, 'enable_cameras', False):
+        try:
+            from isaaclab.sensors import Camera, CameraCfg
+            camera_cfg = CameraCfg(
+                prim_path="/World/RecordCamera",
+                update_period=0,
+                height=480,
+                width=640,
+                data_types=["rgb"],
+                spawn=sim_utils.PinholeCameraCfg(
+                    focal_length=24.0,
+                    focus_distance=400.0,
+                    horizontal_aperture=20.955,
+                    clipping_range=(0.1, 100.0),
+                ),
+                offset=CameraCfg.OffsetCfg(
+                    pos=(0.8, 1.5, 1.2),
+                    rot=(0.7071, 0.0, 0.3536, -0.6124),
+                    convention="world",
+                ),
+            )
+            camera = Camera(cfg=camera_cfg)
+            has_camera = True
+            _log(f"Camera created for video recording to {video_dir}")
+        except Exception as e:
+            _log(f"Camera setup failed: {e}")
+    else:
+        _log("Video recording disabled (pass --enable_cameras to enable)")
 
     # --- Initialize state ---
     env.step(render=True)  # settle + render for camera
