@@ -6,12 +6,13 @@ this script loads the scene URDF (table + already-placed parts as a single
 fixed asset) — matching what the RL training environment actually sees.
 
 Usage:
-    python fabrica/debug_insertion_training.py --method coacd
-    python fabrica/debug_insertion_training.py --method sdf
-    python fabrica/debug_insertion_training.py --method vhacd
+    python fabrica/debug_insertion_training.py --assembly beam --part 2 --method coacd
+    python fabrica/debug_insertion_training.py --assembly beam --part 0 --method coacd
+    python fabrica/debug_insertion_training.py --assembly beam --part 6 --method sdf
 """
 
 import argparse
+import json
 from pathlib import Path
 
 from isaacgym import gymapi, gymtorch
@@ -20,14 +21,6 @@ import imageio
 import numpy as np
 import torch
 
-
-# Part 2 insertion waypoints 8-11 (from beam_2/pick_place.json goals[8:12])
-INSERTION_WAYPOINTS = [
-    [-0.124463, 0.04, 0.68,      0.0, -0.707107, 0.0, 0.707107],
-    [-0.124463, 0.04, 0.617833,  0.0, -0.707107, 0.0, 0.707107],
-    [-0.124463, 0.04, 0.580533,  0.0, -0.707107, 0.0, 0.707107],
-    [-0.124463, 0.04, 0.5681,    0.0, -0.707107, 0.0, 0.707107],
-]
 
 TABLE_Z = 0.38
 
@@ -69,19 +62,74 @@ def interpolate_waypoints(waypoints, steps_per):
     return poses
 
 
+def load_trajectory(assembly, part, start_waypoint, end_waypoint):
+    """Load waypoints from the trajectory JSON file."""
+    traj_path = Path(f"fabrica/trajectories/{assembly}_{part}/pick_place.json")
+    if not traj_path.exists():
+        raise FileNotFoundError(f"Trajectory not found: {traj_path}")
+
+    with open(traj_path) as f:
+        traj = json.load(f)
+
+    goals = traj["goals"]
+    end = end_waypoint + 1 if end_waypoint is not None else len(goals)
+    waypoints = goals[start_waypoint:end]
+
+    if len(waypoints) < 2:
+        raise ValueError(
+            f"Need at least 2 waypoints, got {len(waypoints)} "
+            f"(goals has {len(goals)} entries, slice [{start_waypoint}:{end}])"
+        )
+
+    print(f"Loaded {len(waypoints)} waypoints from {traj_path} "
+          f"(goals[{start_waypoint}:{end}] of {len(goals)})")
+    return waypoints
+
+
+def compute_camera_for_trajectory(waypoints):
+    """Compute camera position and target to frame the trajectory."""
+    positions = np.array([wp[:3] for wp in waypoints])
+    center = positions.mean(axis=0)
+    span = positions.max(axis=0) - positions.min(axis=0)
+    max_span = max(span.max(), 0.15)
+
+    # Place camera offset from center, looking at it
+    cam_pos = gymapi.Vec3(
+        center[0] + max_span * 0.6,
+        center[1] - max_span * 1.2,
+        center[2] + max_span * 0.3,
+    )
+    cam_target = gymapi.Vec3(center[0], center[1], center[2])
+    return cam_pos, cam_target
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="Debug insertion using training-style scene URDFs")
-    parser.add_argument("--method", type=str, required=True,
+    parser.add_argument("--assembly", type=str, default="beam",
+                        help="Assembly name (default: beam)")
+    parser.add_argument("--part", type=str, default="2",
+                        help="Part ID (default: 2)")
+    parser.add_argument("--method", type=str, default="coacd",
                         choices=["vhacd", "coacd", "sdf"])
+    parser.add_argument("--start-waypoint", type=int, default=0,
+                        help="First waypoint index in goals (default: 0)")
+    parser.add_argument("--end-waypoint", type=int, default=None,
+                        help="Last waypoint index in goals (default: last)")
     parser.add_argument("--steps-per-waypoint", type=int, default=50)
     parser.add_argument("--settle-frames", type=int, default=100,
                         help="Extra frames after teleport to let physics settle")
-    parser.add_argument("--output-dir", type=str, default="debug_output/insertion")
+    parser.add_argument("--output-dir", type=str, default="fabrica/debug_output/insertion")
     args = parser.parse_args()
 
-    output_dir = Path(args.output_dir) / args.method
+    assembly = args.assembly
+    part = args.part
+
+    output_dir = Path(args.output_dir) / f"{assembly}_{part}" / args.method
     output_dir.mkdir(parents=True, exist_ok=True)
+
+    # Load trajectory
+    waypoints = load_trajectory(assembly, part, args.start_waypoint, args.end_waypoint)
 
     gym = gymapi.acquire_gym()
 
@@ -101,6 +149,7 @@ def main():
     sim_params.physx.friction_offset_threshold = 0.01
     sim_params.physx.friction_correlation_distance = 0.00625
     sim_params.physx.max_depenetration_velocity = 5.0
+    sim_params.physx.max_gpu_contact_pairs = 16 * 1024 * 1024
     sim_params.physx.num_threads = 0
     sim_params.physx.use_gpu = True
 
@@ -113,7 +162,7 @@ def main():
     gym.add_ground(sim, plane_params)
 
     # --- Scene asset (table + already-placed parts) ---
-    scene_root = "assets/urdf/fabrica/environments/beam_2"
+    scene_root = f"assets/urdf/fabrica/environments/{assembly}_{part}"
     scene_options = gymapi.AssetOptions()
     scene_options.fix_base_link = True
     scene_options.collapse_fixed_joints = True
@@ -131,26 +180,26 @@ def main():
     print(f"Scene ({args.method}): {gym.get_asset_rigid_body_count(scene_asset)} bodies, "
           f"{gym.get_asset_rigid_shape_count(scene_asset)} shapes")
 
-    # --- Part 2 asset (active part) ---
-    p2_options = gymapi.AssetOptions()
-    p2_options.collapse_fixed_joints = True
-    p2_options.replace_cylinder_with_capsule = True
+    # --- Active part asset ---
+    part_options = gymapi.AssetOptions()
+    part_options.collapse_fixed_joints = True
+    part_options.replace_cylinder_with_capsule = True
 
     if args.method == "vhacd":
-        p2_root = "assets/urdf/fabrica/beam/2"
-        p2_file = "beam_2.urdf"
-        p2_options.vhacd_enabled = True
+        part_root = f"assets/urdf/fabrica/{assembly}/{part}"
+        part_file = f"{assembly}_{part}.urdf"
+        part_options.vhacd_enabled = True
     elif args.method == "coacd":
-        p2_root = "assets/urdf/fabrica/beam/2/coacd"
-        p2_file = "beam_2_coacd.urdf"
+        part_root = f"assets/urdf/fabrica/{assembly}/{part}/coacd"
+        part_file = f"{assembly}_{part}_coacd.urdf"
     elif args.method == "sdf":
-        p2_root = "assets/urdf/fabrica/beam/2"
-        p2_file = "beam_2_sdf.urdf"
-        p2_options.thickness = 0.0
+        part_root = f"assets/urdf/fabrica/{assembly}/{part}"
+        part_file = f"{assembly}_{part}_sdf.urdf"
+        part_options.thickness = 0.0
 
-    p2_asset = gym.load_asset(sim, p2_root, p2_file, p2_options)
-    print(f"Part 2 ({args.method}): {gym.get_asset_rigid_body_count(p2_asset)} bodies, "
-          f"{gym.get_asset_rigid_shape_count(p2_asset)} shapes")
+    part_asset = gym.load_asset(sim, part_root, part_file, part_options)
+    print(f"Part {part} ({args.method}): {gym.get_asset_rigid_body_count(part_asset)} bodies, "
+          f"{gym.get_asset_rigid_shape_count(part_asset)} shapes")
 
     # Create env
     env_spacing = 0.5
@@ -164,28 +213,27 @@ def main():
     scene_pose.r = gymapi.Quat(0, 0, 0, 1)
     gym.create_actor(env, scene_asset, scene_pose, "scene", 0, 0)
 
-    # Actor 1: Part 2 (will be teleported)
-    wp0 = INSERTION_WAYPOINTS[0]
-    p2_pose = gymapi.Transform()
-    p2_pose.p = gymapi.Vec3(wp0[0], wp0[1], wp0[2])
-    p2_pose.r = gymapi.Quat(wp0[3], wp0[4], wp0[5], wp0[6])
-    p2_handle = gym.create_actor(env, p2_asset, p2_pose, "part2", 0, 0, 0)
+    # Actor 1: Active part (will be teleported)
+    wp0 = waypoints[0]
+    part_pose = gymapi.Transform()
+    part_pose.p = gymapi.Vec3(wp0[0], wp0[1], wp0[2])
+    part_pose.r = gymapi.Quat(wp0[3], wp0[4], wp0[5], wp0[6])
+    part_handle = gym.create_actor(env, part_asset, part_pose, f"part{part}", 0, 0, 0)
 
-    # Set SDF shape properties for part 2 if needed
+    # Set SDF shape properties if needed
     if args.method == "sdf":
-        shape_props = gym.get_actor_rigid_shape_properties(env, p2_handle)
+        shape_props = gym.get_actor_rigid_shape_properties(env, part_handle)
         for sp in shape_props:
             sp.thickness = 0.0
-        gym.set_actor_rigid_shape_properties(env, p2_handle, shape_props)
+        gym.set_actor_rigid_shape_properties(env, part_handle, shape_props)
 
-    # Camera
+    # Camera — auto-adjusted to frame the trajectory
     cam_props = gymapi.CameraProperties()
     cam_props.width = 1280
     cam_props.height = 960
     cam_props.use_collision_geometry = True
     cam_handle = gym.create_camera_sensor(env, cam_props)
-    cam_pos = gymapi.Vec3(-0.02, -0.15, 0.68)
-    cam_target = gymapi.Vec3(-0.10, 0.04, 0.56)
+    cam_pos, cam_target = compute_camera_for_trajectory(waypoints)
     gym.set_camera_location(cam_handle, env, cam_pos, cam_target)
 
     gym.prepare_sim(sim)
@@ -193,11 +241,11 @@ def main():
     # Get root state tensor for teleportation
     root_tensor = gym.acquire_actor_root_state_tensor(sim)
     root_states = gymtorch.wrap_tensor(root_tensor)
-    # Actors: 0=scene, 1=part2
-    PART2_IDX = 1
+    # Actors: 0=scene, 1=active part
+    PART_IDX = 1
 
     # Generate interpolated trajectory
-    traj_poses = interpolate_waypoints(INSERTION_WAYPOINTS, args.steps_per_waypoint)
+    traj_poses = interpolate_waypoints(waypoints, args.steps_per_waypoint)
     total_teleport_steps = len(traj_poses)
     total_steps = total_teleport_steps + args.settle_frames
     print(f"Trajectory: {total_teleport_steps} teleport steps + {args.settle_frames} settle = {total_steps} total")
@@ -208,15 +256,15 @@ def main():
     frames = []
     deltas = []
 
-    print(f"Running insertion test ({args.method}, training scene)...")
+    print(f"Running insertion test ({assembly} part {part}, {args.method}, training scene)...")
     for step in range(total_steps):
         if step < total_teleport_steps:
-            # Teleport part 2 to next pose
+            # Teleport part to next pose
             desired = traj_poses[step]
-            root_states[PART2_IDX, 0:7] = torch.tensor(desired, dtype=torch.float32, device="cuda")
-            root_states[PART2_IDX, 7:13] = 0.0  # zero velocities
+            root_states[PART_IDX, 0:7] = torch.tensor(desired, dtype=torch.float32, device="cuda")
+            root_states[PART_IDX, 7:13] = 0.0  # zero velocities
 
-            actor_indices = torch.tensor([PART2_IDX], dtype=torch.int32, device="cuda")
+            actor_indices = torch.tensor([PART_IDX], dtype=torch.int32, device="cuda")
             gym.set_actor_root_state_tensor_indexed(
                 sim, gymtorch.unwrap_tensor(root_states),
                 gymtorch.unwrap_tensor(actor_indices), 1
@@ -229,7 +277,7 @@ def main():
 
         # Read back actual pose and log delta
         gym.refresh_actor_root_state_tensor(sim)
-        actual = root_states[PART2_IDX, 0:7].cpu().numpy()
+        actual = root_states[PART_IDX, 0:7].cpu().numpy()
 
         if step < total_teleport_steps:
             desired_np = traj_poses[step]
@@ -256,29 +304,34 @@ def main():
     # Summary
     if deltas:
         deltas = np.array(deltas)
-        print(f"\n--- Collision Delta Summary ({args.method}, training scene) ---")
+        print(f"\n--- Collision Delta Summary ({assembly} part {part}, {args.method}, training scene) ---")
         print(f"  Max delta:  {deltas.max():.6f} m")
         print(f"  Mean delta: {deltas.mean():.6f} m")
         print(f"  Steps with delta > 1mm: {(deltas > 0.001).sum()}/{len(deltas)}")
         print(f"  Steps with delta > 5mm: {(deltas > 0.005).sum()}/{len(deltas)}")
+        if deltas.max() < 0.001:
+            print("  Result: No collisions detected")
+        else:
+            print(f"  Result: COLLISIONS DETECTED (max delta {deltas.max()*1000:.1f}mm)")
 
     # Final poses
     gym.refresh_actor_root_state_tensor(sim)
     scene_final = root_states[0, 0:7].cpu().numpy()
-    p2_final = root_states[PART2_IDX, 0:7].cpu().numpy()
+    part_final = root_states[PART_IDX, 0:7].cpu().numpy()
     print(f"\nFinal scene pose: pos={scene_final[:3]}, quat={scene_final[3:7]}")
-    print(f"Final part 2 pose: pos={p2_final[:3]}, quat={p2_final[3:7]}")
+    print(f"Final part {part} pose: pos={part_final[:3]}, quat={part_final[3:7]}")
 
     # Contact forces
     contact_tensor = gym.acquire_net_contact_force_tensor(sim)
     gym.refresh_net_contact_force_tensor(sim)
     contacts = gymtorch.wrap_tensor(contact_tensor)
     print(f"Final contact force on scene: {contacts[0].cpu().numpy()}")
-    print(f"Final contact force on part 2: {contacts[PART2_IDX].cpu().numpy()}")
+    print(f"Final contact force on part {part}: {contacts[PART_IDX].cpu().numpy()}")
 
     # Save video
     if frames:
-        video_path = output_dir / "insertion_test.mp4"
+        final_delta_mm = deltas[-1] * 1000 if len(deltas) > 0 else 0.0
+        video_path = output_dir / f"insertion_test_{final_delta_mm:.1f}mm.mp4"
         imageio.mimsave(str(video_path), frames, fps=12)
         print(f"\nSaved {len(frames)} frames to {frames_dir}")
         print(f"Video: {video_path}")

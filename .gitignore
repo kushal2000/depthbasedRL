@@ -231,6 +231,7 @@ FoundationPose/
 *.log
 
 debug_output/
+fabrica/debug_output/
 eval_videos
 
 isaacsim_conversion/rollout_videos/
