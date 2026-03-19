@@ -9,3 +9,15 @@ env:
   retractRewardScale: 1.0
   retractDistanceThreshold: 0.1
   retractSuccessBonus: 1000.0
+
+  # ── Multi-part training ──────────────────────────────────────
+  # When multiPart is True, trains all parts simultaneously.
+  # Each env is assigned a part via round-robin (env_idx % num_parts).
+  #
+  # Only objectNames is required. Scene URDFs, start poses, and
+  # goal trajectories are auto-derived from the object name pattern:
+  #   beam_2_coacd → assembly=beam, part=2, method=coacd
+  #   → scene: urdf/fabrica/environments/beam_2/scene_coacd.urdf
+  #   → trajectory: fabrica/trajectories/beam_2/pick_place.json
+  multiPart: False
+  objectNames: null

@@ -72,6 +72,11 @@ class TrainingViserViewer:
         scene_urdf_path: Path,
         num_envs: int,
         num_dofs: int,
+        # Multi-part support (optional)
+        env_part_map: Optional[List[int]] = None,
+        part_object_urdf_paths: Optional[List[Path]] = None,
+        part_scene_urdf_paths: Optional[List[Path]] = None,
+        part_names: Optional[List[str]] = None,
     ):
         self.port = port
         self.dump_dir = Path(dump_dir)
@@ -82,6 +87,13 @@ class TrainingViserViewer:
         self.scene_urdf_path = scene_urdf_path
         self.num_envs = num_envs
         self.num_dofs = num_dofs
+
+        # Multi-part: env_part_map[env_idx] → part index
+        self._env_part_map = env_part_map
+        self._part_object_urdf_paths = part_object_urdf_paths
+        self._part_scene_urdf_paths = part_scene_urdf_paths
+        self._part_names = part_names
+        self._current_displayed_part: int = 0  # track which part's meshes are loaded
 
         # State
         self.recording_env_idx: int = 0
@@ -105,6 +117,7 @@ class TrainingViserViewer:
         self._obj_frame = None
         self._goal_frame = None
         self.robot = None
+        self._scene_mesh_names: List[str] = []  # track scene mesh node names for cleanup
 
         # Create server and build scene
         self.server = viser.ViserServer(host="0.0.0.0", port=port)
@@ -225,24 +238,13 @@ class TrainingViserViewer:
         self._goal_frame = self.server.scene.add_frame(
             "/goal", show_axes=True, axes_length=0.08, axes_radius=0.002,
         )
+        self._load_object_urdf()
 
-        if self.object_urdf_path.exists():
-            ViserUrdf(
-                self.server, self.object_urdf_path,
-                root_node_name="/object",
-                mesh_color_override=(100, 150, 255),
-            )
-            ViserUrdf(
-                self.server, self.object_urdf_path,
-                root_node_name="/goal",
-                mesh_color_override=(0, 255, 0, 0.4),
-            )
-        else:
-            print(f"[ViserViz] Warning: object URDF not found at {self.object_urdf_path}")
-
-    def _load_scene_urdf(self):
+    def _load_scene_urdf(self, scene_urdf_path: Optional[Path] = None):
         """Parse scene URDF and add each visual mesh at correct joint offset."""
-        urdf = yourdfpy.URDF.load(str(self.scene_urdf_path))
+        if scene_urdf_path is None:
+            scene_urdf_path = self.scene_urdf_path
+        urdf = yourdfpy.URDF.load(str(scene_urdf_path))
 
         # Add the base link (box) as a box primitive
         self.server.scene.add_box(
@@ -250,6 +252,7 @@ class TrainingViserViewer:
             dimensions=(0.475, 0.4, 0.3), position=(0, 0, 0),
             side="double", opacity=0.9,
         )
+        self._scene_mesh_names = ["/table/box"]
 
         # Add each child link mesh at its joint origin
         for jname, joint in urdf.joint_map.items():
@@ -262,7 +265,7 @@ class TrainingViserViewer:
                 continue
 
             mesh_file = visual.geometry.mesh.filename
-            mesh_path = self.scene_urdf_path.parent / mesh_file
+            mesh_path = scene_urdf_path.parent / mesh_file
             if not mesh_path.exists():
                 continue
 
@@ -275,12 +278,69 @@ class TrainingViserViewer:
             quat_xyzw = Rotation.from_matrix(rot_matrix).as_quat()
             quat_wxyz = (quat_xyzw[3], quat_xyzw[0], quat_xyzw[1], quat_xyzw[2])
 
+            node_name = f"/table/{child_link}"
             self.server.scene.add_mesh_trimesh(
-                f"/table/{child_link}",
+                node_name,
                 mesh=mesh,
                 position=tuple(pos),
                 wxyz=quat_wxyz,
             )
+            self._scene_mesh_names.append(node_name)
+
+    def _load_object_urdf(self, object_urdf_path: Optional[Path] = None):
+        """Load object URDF into /object and /goal frames."""
+        if object_urdf_path is None:
+            object_urdf_path = self.object_urdf_path
+        if object_urdf_path.exists():
+            self._object_viser_urdf = ViserUrdf(
+                self.server, object_urdf_path,
+                root_node_name="/object",
+                mesh_color_override=(100, 150, 255),
+            )
+            self._goal_viser_urdf = ViserUrdf(
+                self.server, object_urdf_path,
+                root_node_name="/goal",
+                mesh_color_override=(0, 255, 0, 0.4),
+            )
+        else:
+            self._object_viser_urdf = None
+            self._goal_viser_urdf = None
+            print(f"[ViserViz] Warning: object URDF not found at {object_urdf_path}")
+
+    def _maybe_swap_part_meshes(self, env_idx: int):
+        """If multi-part and the env's part differs from displayed part, reload meshes."""
+        if self._env_part_map is None:
+            return
+        env_idx = min(env_idx, self.num_envs - 1)
+        new_part = self._env_part_map[env_idx]
+        if new_part == self._current_displayed_part:
+            return
+
+        self._current_displayed_part = new_part
+        part_name = self._part_names[new_part] if self._part_names else f"part_{new_part}"
+        print(f"[ViserViz] Switching to {part_name} (part {new_part})")
+
+        # Remove old scene meshes
+        for name in self._scene_mesh_names:
+            try:
+                self.server.scene.remove_by_name(name)
+            except Exception:
+                pass
+        self._scene_mesh_names = []
+
+        # Remove old object/goal ViserUrdf instances (properly cleans up all meshes/frames)
+        if hasattr(self, '_object_viser_urdf') and self._object_viser_urdf is not None:
+            self._object_viser_urdf.remove()
+            self._object_viser_urdf = None
+        if hasattr(self, '_goal_viser_urdf') and self._goal_viser_urdf is not None:
+            self._goal_viser_urdf.remove()
+            self._goal_viser_urdf = None
+
+        # Load new meshes
+        if self._part_scene_urdf_paths and self._part_scene_urdf_paths[new_part].exists():
+            self._load_scene_urdf(self._part_scene_urdf_paths[new_part])
+        if self._part_object_urdf_paths:
+            self._load_object_urdf(self._part_object_urdf_paths[new_part])
 
     # ── GUI callbacks ─────────────────────────────────────────
 
@@ -293,6 +353,7 @@ class TrainingViserViewer:
 
     def _on_online_idx_change(self):
         self.online_env_idx = int(self._input_online_idx.value)
+        self._maybe_swap_part_meshes(self.online_env_idx)
 
     def _on_episode_select(self):
         name = self._dd_episode.value
