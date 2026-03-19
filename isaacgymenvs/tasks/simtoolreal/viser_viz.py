@@ -336,6 +336,14 @@ class TrainingViserViewer:
             self._goal_viser_urdf.remove()
             self._goal_viser_urdf = None
 
+        # Re-create parent frames (ViserUrdf.remove() may have invalidated them)
+        self._obj_frame = self.server.scene.add_frame(
+            "/object", show_axes=True, axes_length=0.08, axes_radius=0.002,
+        )
+        self._goal_frame = self.server.scene.add_frame(
+            "/goal", show_axes=True, axes_length=0.08, axes_radius=0.002,
+        )
+
         # Load new meshes
         if self._part_scene_urdf_paths and self._part_scene_urdf_paths[new_part].exists():
             self._load_scene_urdf(self._part_scene_urdf_paths[new_part])

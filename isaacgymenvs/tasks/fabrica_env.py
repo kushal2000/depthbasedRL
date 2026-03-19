@@ -712,6 +712,10 @@ class FabricaEnv(SimToolReal):
                     self.root_state_tensor[self.goal_object_indices[env_ids], 7:13]
                 )
             )
+
+            self.deferred_set_actor_root_state_tensor_indexed(
+                [self.goal_object_indices[env_ids]]
+            )
         if len(env_ids) > 0 and reset_buf_idxs is not None and tensor_reset:
             rs_ofs = self.root_state_resets.shape[1]
             self.root_state_tensor[self.goal_object_indices[env_ids], :] = (
