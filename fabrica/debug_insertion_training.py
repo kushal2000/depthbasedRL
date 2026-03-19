@@ -12,6 +12,7 @@ Usage:
 """
 
 import argparse
+import datetime
 import json
 from pathlib import Path
 
@@ -23,6 +24,43 @@ import torch
 
 
 TABLE_Z = 0.38
+
+# Keypoint metric (matches training env)
+KEYPOINT_SCALE = 1.5
+FIXED_SIZE = np.array([0.141, 0.03025, 0.0271])
+KEYPOINT_DIRS = np.array([
+    [1, 1, 1],
+    [1, 1, -1],
+    [-1, -1, 1],
+    [-1, -1, -1],
+], dtype=np.float64)
+# Keypoint offsets: dir * fixedSize * keypointScale / 2
+KEYPOINT_OFFSETS = KEYPOINT_DIRS * FIXED_SIZE[None, :] * KEYPOINT_SCALE / 2
+
+
+def quat_xyzw_to_matrix(q):
+    """Convert quaternion [x,y,z,w] to 3x3 rotation matrix."""
+    x, y, z, w = q
+    return np.array([
+        [1 - 2*(y*y + z*z), 2*(x*y - w*z),     2*(x*z + w*y)],
+        [2*(x*y + w*z),     1 - 2*(x*x + z*z), 2*(y*z - w*x)],
+        [2*(x*z - w*y),     2*(y*z + w*x),     1 - 2*(x*x + y*y)],
+    ])
+
+
+def compute_keypoints(pose_xyzw):
+    """Compute 4 keypoint positions from a 7-element pose [x,y,z, qx,qy,qz,qw]."""
+    pos = pose_xyzw[:3]
+    R = quat_xyzw_to_matrix(pose_xyzw[3:7])
+    return pos[None, :] + (R @ KEYPOINT_OFFSETS.T).T
+
+
+def keypoints_max_dist(pose_actual, pose_desired):
+    """Max distance across all keypoints between actual and desired poses."""
+    kp_actual = compute_keypoints(pose_actual)
+    kp_desired = compute_keypoints(pose_desired)
+    dists = np.linalg.norm(kp_actual - kp_desired, axis=1)
+    return dists.max()
 
 
 def slerp(q0, q1, t):
@@ -120,12 +158,15 @@ def main():
     parser.add_argument("--settle-frames", type=int, default=100,
                         help="Extra frames after teleport to let physics settle")
     parser.add_argument("--output-dir", type=str, default="fabrica/debug_output/insertion")
+    parser.add_argument("--timestamp", type=str, default=None,
+                        help="Shared timestamp for parallel runs (auto-generated if not set)")
     args = parser.parse_args()
 
     assembly = args.assembly
     part = args.part
 
-    output_dir = Path(args.output_dir) / f"{assembly}_{part}" / args.method
+    timestamp = args.timestamp or datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+    output_dir = Path(args.output_dir) / timestamp / f"{assembly}_{part}" / args.method
     output_dir.mkdir(parents=True, exist_ok=True)
 
     # Load trajectory
@@ -255,6 +296,7 @@ def main():
     frames_dir.mkdir(parents=True, exist_ok=True)
     frames = []
     deltas = []
+    kp_dists = []
 
     print(f"Running insertion test ({assembly} part {part}, {args.method}, training scene)...")
     for step in range(total_steps):
@@ -282,10 +324,13 @@ def main():
         if step < total_teleport_steps:
             desired_np = traj_poses[step]
             delta = np.linalg.norm(desired_np[:3] - actual[:3])
+            kp_dist = keypoints_max_dist(actual, desired_np)
             deltas.append(delta)
+            kp_dists.append(kp_dist)
             if step % 25 == 0:
                 print(f"  Step {step:4d}/{total_steps}: desired_z={desired_np[2]:.4f} "
-                      f"actual_z={actual[2]:.4f} delta={delta:.6f}")
+                      f"actual_z={actual[2]:.4f} pos_delta={delta*1000:.3f}mm "
+                      f"kp_max={kp_dist*1000:.3f}mm")
         else:
             settle_step = step - total_teleport_steps
             if settle_step % 25 == 0:
@@ -304,15 +349,23 @@ def main():
     # Summary
     if deltas:
         deltas = np.array(deltas)
+        kp_dists = np.array(kp_dists)
         print(f"\n--- Collision Delta Summary ({assembly} part {part}, {args.method}, training scene) ---")
-        print(f"  Max delta:  {deltas.max():.6f} m")
-        print(f"  Mean delta: {deltas.mean():.6f} m")
-        print(f"  Steps with delta > 1mm: {(deltas > 0.001).sum()}/{len(deltas)}")
-        print(f"  Steps with delta > 5mm: {(deltas > 0.005).sum()}/{len(deltas)}")
+        print(f"  Position error:")
+        print(f"    Max:  {deltas.max()*1000:.3f} mm")
+        print(f"    Mean: {deltas.mean()*1000:.3f} mm")
+        print(f"    Final: {deltas[-1]*1000:.3f} mm")
+        print(f"  Keypoint max dist (training metric):")
+        print(f"    Max:  {kp_dists.max()*1000:.3f} mm")
+        print(f"    Mean: {kp_dists.mean()*1000:.3f} mm")
+        print(f"    Final: {kp_dists[-1]*1000:.3f} mm")
+        print(f"  Steps with pos_delta > 1mm: {(deltas > 0.001).sum()}/{len(deltas)}")
+        print(f"  Steps with kp_max > 1mm:    {(kp_dists > 0.001).sum()}/{len(kp_dists)}")
+        print(f"  Steps with kp_max > 4mm:    {(kp_dists > 0.004).sum()}/{len(kp_dists)}")
         if deltas.max() < 0.001:
             print("  Result: No collisions detected")
         else:
-            print(f"  Result: COLLISIONS DETECTED (max delta {deltas.max()*1000:.1f}mm)")
+            print(f"  Result: COLLISIONS DETECTED (max pos delta {deltas.max()*1000:.1f}mm, max kp {kp_dists.max()*1000:.1f}mm)")
 
     # Final poses
     gym.refresh_actor_root_state_tensor(sim)
@@ -330,8 +383,9 @@ def main():
 
     # Save video
     if frames:
-        final_delta_mm = deltas[-1] * 1000 if len(deltas) > 0 else 0.0
-        video_path = output_dir / f"insertion_test_{final_delta_mm:.1f}mm.mp4"
+        final_pos_mm = deltas[-1] * 1000 if len(deltas) > 0 else 0.0
+        final_kp_mm = kp_dists[-1] * 1000 if len(kp_dists) > 0 else 0.0
+        video_path = output_dir / f"{assembly}_{part}_{args.method}_pos{final_pos_mm:.1f}mm_kp{final_kp_mm:.1f}mm.mp4"
         imageio.mimsave(str(video_path), frames, fps=12)
         print(f"\nSaved {len(frames)} frames to {frames_dir}")
         print(f"Video: {video_path}")
