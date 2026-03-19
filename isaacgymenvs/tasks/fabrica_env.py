@@ -45,6 +45,7 @@ class FabricaEnv(SimToolReal):
         self.retract_reward_scale = cfg["env"].get("retractRewardScale", 1.0)
         self.retract_distance_threshold = cfg["env"].get("retractDistanceThreshold", 0.1)
         self.retract_success_bonus = cfg["env"].get("retractSuccessBonus", 1000.0)
+        self.retract_success_tolerance = cfg["env"].get("retractSuccessTolerance", 0.005)
 
         # Multi-part config — read before super().__init__ which calls _create_envs
         self.multi_part = cfg["env"].get("multiPart", False)
@@ -890,7 +891,7 @@ class FabricaEnv(SimToolReal):
         # ── Retract reward (for envs already in retract phase) ──
         retract_rew = torch.zeros_like(base_reward)
         if self.retract_phase.any():
-            retract_tol = tight_tol if (final_tol is not None and self.cfg["env"]["useFixedGoalStates"]) else (self.success_tolerance * self.keypoint_scale)
+            retract_tol = self.retract_success_tolerance * self.keypoint_scale
             object_at_goal = (self.keypoints_max_dist <= retract_tol).float()
 
             mean_fingertip_dist = self.curr_fingertip_distances.mean(dim=-1)
@@ -916,6 +917,7 @@ class FabricaEnv(SimToolReal):
         # Log retract metrics BEFORE _compute_resets clears state for resetting envs
         self.extras["retract_phase_ratio"] = self.retract_phase.float().mean().item()
         self.extras["retract_success_ratio"] = self.retract_succeeded.float().mean().item()
+        self.extras["retract_success_tolerance"] = self.retract_success_tolerance
 
         resets = self._compute_resets(is_success)
         self.reset_buf[:] = resets

@@ -9,6 +9,7 @@ env:
   retractRewardScale: 1.0
   retractDistanceThreshold: 0.1
   retractSuccessBonus: 1000.0
+  retractSuccessTolerance: 0.005  # Object must be within 5mm for retract reward (meters)
 
   # ── Multi-part training ──────────────────────────────────────
   # When multiPart is True, trains all parts simultaneously.
