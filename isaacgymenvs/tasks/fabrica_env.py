@@ -131,7 +131,7 @@ class FabricaEnv(SimToolReal):
         else:
             final_tol = self.cfg["env"].get("finalGoalSuccessTolerance", None)
         if final_tol is not None and self.cfg["env"]["useFixedGoalStates"]:
-            is_final_goal = self.successes == (self.max_consecutive_successes - 1)
+            is_final_goal = (self.successes == (self.max_consecutive_successes - 1)) | self.retract_phase
             base_tol = self.success_tolerance * self.keypoint_scale
             tight_tol = final_tol * self.keypoint_scale
             keypoint_success_tolerance = torch.where(is_final_goal, tight_tol, base_tol)
@@ -151,7 +151,14 @@ class FabricaEnv(SimToolReal):
         goal_resets = is_success.clone()
         self.successes += is_success
 
-        # Suppress goal cycling for retract envs (already in retract from prev frame)
+        # ── Detect retract phase entry (before setting reset_goal_buf) ──
+        just_entered_retract = (
+            (self.successes >= self.max_consecutive_successes) & ~self.retract_phase
+        )
+        self.retract_phase |= just_entered_retract
+        self.successes.clamp_(max=self.max_consecutive_successes)
+
+        # Suppress goal cycling for all retract envs (including just-entered)
         goal_resets[self.retract_phase] = False
         self.reset_goal_buf[:] = goal_resets
 
@@ -177,8 +184,8 @@ class FabricaEnv(SimToolReal):
         bonus_rew = near_goal * (self.reach_goal_bonus / self.success_steps)
         if self.cfg["env"]["forceConsecutiveNearGoalSteps"]:
             bonus_rew = is_success * self.reach_goal_bonus
-        # No goal bonus during retract phase
-        bonus_rew[self.retract_phase] = 0.0
+        # No goal bonus during retract (except transition frame — keep final goal bonus)
+        bonus_rew[self.retract_phase & ~just_entered_retract] = 0.0
 
         base_reward = (
             fingertip_delta_rew
@@ -220,18 +227,14 @@ class FabricaEnv(SimToolReal):
 
             retract_rew = (retract_dist_rew + retract_bonus) * self.retract_phase.float()
 
-        # Retract envs: action penalties + retract reward
+        # Retract envs (already in retract): action penalties + retract reward
+        # Transition frame (just entered): full base reward with final goal bonus
         # Non-retract envs: full base reward
+        already_in_retract = self.retract_phase & ~just_entered_retract
         retract_env_reward = kuka_actions_penalty + hand_actions_penalty + retract_rew
-        reward = torch.where(self.retract_phase, retract_env_reward, base_reward)
+        reward = torch.where(already_in_retract, retract_env_reward, base_reward)
 
         self.rew_buf[:] = reward
-
-        # ── Detect retract phase entry + clamp (AFTER reward computation) ──
-        # This ensures the transition frame gets the full base reward with
-        # final goal bonus. Retract reward starts next frame.
-        self.retract_phase |= (self.successes >= self.max_consecutive_successes)
-        self.successes.clamp_(max=self.max_consecutive_successes - 1)
 
         resets = self._compute_resets(is_success)
         self.reset_buf[:] = resets
