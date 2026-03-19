@@ -5108,8 +5108,9 @@ class SimToolReal(VecTask):
                 "successes": int(self.successes[view_idx].item()),
                 "max_successes": self.max_consecutive_successes,
                 "progress_buf": int(self.progress_buf[view_idx].item()),
-                "closest_dist": float(self.closest_keypoint_max_dist[view_idx].item()),
+                "current_dist": float(self.keypoints_max_dist[view_idx].item()),
                 "success_tolerance": float(self.success_tolerance),
+                "episode_reward": float(self.rewards_episode["total_reward"][view_idx].item()),
             }
             self.viser_viewer.update_online(dof_pos, obj_pose, goal_pose, table_pose, info=info)
 

@@ -155,6 +155,7 @@ class TrainingViserViewer:
             self._md_online_obj = self.server.gui.add_markdown("**Obj pos:** –")
             self._md_online_dist = self.server.gui.add_markdown("**Dist:** –")
             self._md_online_tolerance = self.server.gui.add_markdown("**Tolerance:** –")
+            self._md_online_reward = self.server.gui.add_markdown("**Ep Reward:** –")
 
         with self.server.gui.add_folder("Offline", expand_by_default=False):
             self._dd_episode = self.server.gui.add_dropdown(
@@ -375,11 +376,20 @@ class TrainingViserViewer:
             ox, oy, oz = object_pose_xyzw[:3]
             self._md_online_obj.content = f"**Obj pos:** ({ox:.3f}, {oy:.3f}, {oz:.3f})"
 
-            dist = info.get("closest_dist", -1)
-            self._md_online_dist.content = f"**Dist:** {dist:.4f}" if dist >= 0 else "**Dist:** –"
-
+            dist = info.get("current_dist", -1)
             tol = info.get("success_tolerance", -1)
+            if dist >= 0 and tol >= 0:
+                color = "🟢" if dist <= tol else "🔴"
+                self._md_online_dist.content = f"**Dist:** {dist:.4f} {color}"
+            elif dist >= 0:
+                self._md_online_dist.content = f"**Dist:** {dist:.4f}"
+            else:
+                self._md_online_dist.content = "**Dist:** –"
+
             self._md_online_tolerance.content = f"**Tolerance:** {tol:.4f}" if tol >= 0 else "**Tolerance:** –"
+
+            ep_rew = info.get("episode_reward", None)
+            self._md_online_reward.content = f"**Ep Reward:** {ep_rew:.1f}" if ep_rew is not None else "**Ep Reward:** –"
 
     # ── Offline recording ─────────────────────────────────────
 
