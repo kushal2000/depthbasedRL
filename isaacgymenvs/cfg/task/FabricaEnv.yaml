@@ -1,0 +1,11 @@
+defaults:
+  - SimToolReal
+  - _self_
+
+name: FabricaEnv
+
+env:
+  enableRetract: True
+  retractRewardScale: 1.0
+  retractDistanceThreshold: 0.1
+  retractSuccessBonus: 1000.0

@@ -20,11 +20,16 @@ ASSETS_DIR = REPO_ROOT / "assets" / "urdf" / "fabrica"
 TABLE_Z = 0.38
 
 
-def _load_assembly_order(assembly: str) -> List[str]:
+def _load_assembly_config(assembly: str) -> dict:
     path = ASSETS_DIR / assembly / "assembly_order.json"
     if not path.exists():
-        return []
-    return json.loads(path.read_text())["steps"]
+        return {}
+    return json.loads(path.read_text())
+
+
+def _load_assembly_order(assembly: str) -> List[str]:
+    config = _load_assembly_config(assembly)
+    return config.get("steps", [])
 
 
 def _load_trajectory(assembly: str, pid: str):
@@ -156,8 +161,15 @@ def _generate_sdf_table(assembly: str, active_pid: str, completed_pids: List[str
 
 
 def _generate_coacd_table(assembly: str, active_pid: str, completed_pids: List[str],
-                          env_dir: Path):
-    """CoACD table: multiple sub-links per completed part (one per decomp hull)."""
+                          env_dir: Path, coacd_target_pid: str = None):
+    """CoACD table: uses CoACD decomp for the insertion target part, raw mesh for others.
+
+    Args:
+        coacd_target_pid: The part the active part inserts into. Only this part
+            gets full CoACD decomposition. Other completed parts use a single
+            raw mesh (IsaacGym auto-computes convex hull). If None, all parts
+            use CoACD (backward compatible).
+    """
     lines = [
         '<?xml version="1.0"?>',
         f'<robot name="table_{assembly}_{active_pid}_scene_coacd">',
@@ -170,31 +182,56 @@ def _generate_coacd_table(assembly: str, active_pid: str, completed_pids: List[s
             continue
         rx, ry, rz, roll, pitch, yaw = offset
 
-        coacd_dir = ASSETS_DIR / assembly / pid / "coacd"
-        decomp_files = sorted(coacd_dir.glob("decomp_*.obj"))
-        if not decomp_files:
-            print(f"  Warning: no CoACD decomps for {assembly}/{pid}, skipping")
-            continue
+        use_coacd = (coacd_target_pid is None) or (pid == coacd_target_pid)
 
-        for i, decomp_file in enumerate(decomp_files):
-            link_name = f"part_{pid}_hull_{i}"
-            mesh_rel = f"../../{assembly}/{pid}/coacd/{decomp_file.name}"
+        if use_coacd:
+            # Full CoACD decomposition: multiple sub-links per part
+            coacd_dir = ASSETS_DIR / assembly / pid / "coacd"
+            decomp_files = sorted(coacd_dir.glob("decomp_*.obj"))
+            if not decomp_files:
+                print(f"  Warning: no CoACD decomps for {assembly}/{pid}, skipping")
+                continue
 
+            for i, decomp_file in enumerate(decomp_files):
+                link_name = f"part_{pid}_hull_{i}"
+                mesh_rel = f"../../{assembly}/{pid}/coacd/{decomp_file.name}"
+
+                lines.extend([
+                    f'  <link name="{link_name}">',
+                    '    <visual>',
+                    '      <origin xyz="0 0 0" rpy="0 0 0"/>',
+                    f'      <geometry><mesh filename="{mesh_rel}" scale="1 1 1"/></geometry>',
+                    f'      <material name="placed_{pid}_{i}"><color rgba="0.6 0.6 0.6 1.0"/></material>',
+                    '    </visual>',
+                    '    <collision>',
+                    '      <origin xyz="0 0 0" rpy="0 0 0"/>',
+                    f'      <geometry><mesh filename="{mesh_rel}" scale="1 1 1"/></geometry>',
+                    '    </collision>',
+                    '  </link>',
+                    f'  <joint name="{link_name}_joint" type="fixed">',
+                    '    <parent link="box"/>',
+                    f'    <child link="{link_name}"/>',
+                    f'    <origin xyz="{rx} {ry} {rz}" rpy="{roll} {pitch} {yaw}"/>',
+                    '  </joint>',
+                ])
+        else:
+            # Raw mesh: single link (IsaacGym auto-computes convex hull)
+            mesh_rel = f"../../{assembly}/{pid}/{pid}_canonical.obj"
             lines.extend([
-                f'  <link name="{link_name}">',
+                f'  <link name="part_{pid}">',
                 '    <visual>',
                 '      <origin xyz="0 0 0" rpy="0 0 0"/>',
                 f'      <geometry><mesh filename="{mesh_rel}" scale="1 1 1"/></geometry>',
-                f'      <material name="placed_{pid}_{i}"><color rgba="0.6 0.6 0.6 1.0"/></material>',
+                f'      <material name="placed_{pid}"><color rgba="0.6 0.6 0.6 1.0"/></material>',
                 '    </visual>',
                 '    <collision>',
                 '      <origin xyz="0 0 0" rpy="0 0 0"/>',
                 f'      <geometry><mesh filename="{mesh_rel}" scale="1 1 1"/></geometry>',
                 '    </collision>',
                 '  </link>',
-                f'  <joint name="{link_name}_joint" type="fixed">',
+                f'  <joint name="part_{pid}_joint" type="fixed">',
                 '    <parent link="box"/>',
-                f'    <child link="{link_name}"/>',
+                f'    <child link="part_{pid}"/>',
                 f'    <origin xyz="{rx} {ry} {rz}" rpy="{roll} {pitch} {yaw}"/>',
                 '  </joint>',
             ])
@@ -221,7 +258,10 @@ def _generate_empty_table_coacd():
 
 def generate_all_tables(assembly: str):
     """Generate table URDFs for every step in the assembly order."""
-    order = _load_assembly_order(assembly)
+    config = _load_assembly_config(assembly)
+    order = config.get("steps", [])
+    inserts_into = config.get("inserts_into", {})
+
     if not order:
         print(f"No assembly order found for {assembly}")
         return
@@ -239,6 +279,8 @@ def generate_all_tables(assembly: str):
 
     print(f"Assembly: {assembly}")
     print(f"  Available parts (in order): {available}")
+    if inserts_into:
+        print(f"  Adjacency map: {inserts_into}")
 
     # Generate empty table coacd variant
     _generate_empty_table_coacd()
@@ -248,7 +290,9 @@ def generate_all_tables(assembly: str):
         env_dir = ASSETS_DIR / "environments" / f"{assembly}_{active_pid}"
         env_dir.mkdir(parents=True, exist_ok=True)
 
-        print(f"\n  Step {step_idx}: Part {active_pid} (completed: {completed_pids})")
+        coacd_target = inserts_into.get(active_pid, None)
+        print(f"\n  Step {step_idx}: Part {active_pid} (completed: {completed_pids}, "
+              f"CoACD target: {coacd_target or 'all'})")
 
         vhacd_path = _generate_vhacd_table(assembly, active_pid, completed_pids, env_dir)
         print(f"    VHACD: {vhacd_path.name}")
@@ -256,7 +300,8 @@ def generate_all_tables(assembly: str):
         sdf_path = _generate_sdf_table(assembly, active_pid, completed_pids, env_dir)
         print(f"    SDF:   {sdf_path.name}")
 
-        coacd_path = _generate_coacd_table(assembly, active_pid, completed_pids, env_dir)
+        coacd_path = _generate_coacd_table(assembly, active_pid, completed_pids, env_dir,
+                                           coacd_target_pid=coacd_target)
         print(f"    CoACD: {coacd_path.name}")
 
     print(f"\nDone. Generated URDFs for {len(available)} steps.")
