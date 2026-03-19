@@ -148,6 +148,9 @@ class FabricaEnv(SimToolReal):
             self.near_goal_steps += near_goal
 
         is_success = self.near_goal_steps >= self.success_steps
+        # Suppress is_success during retract — prevents progress_buf reset
+        # (which would block episode timeout) and spurious success signals
+        is_success[self.retract_phase] = False
         goal_resets = is_success.clone()
         self.successes += is_success
 
@@ -208,7 +211,7 @@ class FabricaEnv(SimToolReal):
         retract_rew = torch.zeros_like(base_reward)
         if self.retract_phase.any():
             # Object must still be at final goal for retract reward
-            retract_tol = tight_tol if final_tol is not None else (self.success_tolerance * self.keypoint_scale)
+            retract_tol = tight_tol if (final_tol is not None and self.cfg["env"]["useFixedGoalStates"]) else (self.success_tolerance * self.keypoint_scale)
             object_at_goal = (self.keypoints_max_dist <= retract_tol).float()
 
             # Reward proportional to hand-object distance (gated on object at goal)
@@ -236,6 +239,10 @@ class FabricaEnv(SimToolReal):
 
         self.rew_buf[:] = reward
 
+        # Log retract metrics BEFORE _compute_resets clears state for resetting envs
+        self.extras["retract_phase_ratio"] = self.retract_phase.float().mean().item()
+        self.extras["retract_success_ratio"] = self.retract_succeeded.float().mean().item()
+
         resets = self._compute_resets(is_success)
         self.reset_buf[:] = resets
 
@@ -254,9 +261,6 @@ class FabricaEnv(SimToolReal):
         self.extras["final_goal_tolerance"] = self.final_goal_success_tolerance
         self.true_objective = self._true_objective()
         self.extras["true_objective"] = self.true_objective
-        self.extras["retract_phase_ratio"] = self.retract_phase.float().mean().item()
-        self.extras["retract_success_ratio"] = self.retract_succeeded.float().mean().item()
-
         rewards = [
             (fingertip_delta_rew, "fingertip_delta_rew"),
             (hand_delta_penalty, "hand_delta_penalty"),
