@@ -60,8 +60,8 @@ def main():
 
     # --- Locate assets ---
     robot_urdf = str(repo_root / "assets/urdf/kuka_sharpa_description/iiwa14_left_sharpa_adjusted_restricted.urdf")
-    table_urdf = str(repo_root / f"assets/urdf/fabrica/environments/{args.assembly}_{args.part_id}/scene_{args.collision_method}.urdf")
-    traj_path = repo_root / f"fabrica/trajectories/{args.assembly}_{args.part_id}/pick_place.json"
+    table_urdf = str(repo_root / f"assets/urdf/fabrica/{args.assembly}/environments/{args.part_id}/scene_{args.collision_method}.urdf")
+    traj_path = repo_root / f"assets/urdf/fabrica/{args.assembly}/trajectories/{args.part_id}/pick_place.json"
 
     # Object URDF
     object_name = f"{args.assembly}_{args.part_id}_{args.collision_method}"

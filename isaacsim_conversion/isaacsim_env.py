@@ -388,7 +388,7 @@ def run_phase5_test():
     repo_root = Path(__file__).parent.parent
 
     robot_urdf = str(repo_root / "assets/urdf/kuka_sharpa_description/iiwa14_left_sharpa_adjusted_restricted.urdf")
-    table_urdf = str(repo_root / "assets/urdf/fabrica/environments/beam_2/scene_coacd.urdf")
+    table_urdf = str(repo_root / "assets/urdf/fabrica/beam/environments/2/scene_coacd.urdf")
 
     # Find object URDF (these imports are safe — no omni/isaaclab deps)
     sys.path.insert(0, str(repo_root))
@@ -414,7 +414,7 @@ def run_phase5_test():
 
     # Place object on the table before tests
     import json
-    traj_path = repo_root / "fabrica/trajectories/beam_2/pick_place.json"
+    traj_path = repo_root / "assets/urdf/fabrica/beam/trajectories/2/pick_place.json"
     with open(traj_path) as f:
         traj = json.load(f)
     start_pose = traj["start_pose"]  # [x,y,z,qx,qy,qz,qw]

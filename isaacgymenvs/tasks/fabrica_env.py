@@ -122,14 +122,14 @@ class FabricaEnv(SimToolReal):
 
             # Scene URDF
             if method is not None:
-                scene_urdf = f"urdf/fabrica/environments/{assembly}_{part_id}/scene_{method}.urdf"
+                scene_urdf = f"urdf/fabrica/{assembly}/environments/{part_id}/scene_{method}.urdf"
             else:
-                scene_urdf = f"urdf/fabrica/environments/{assembly}_{part_id}/scene.urdf"
+                scene_urdf = f"urdf/fabrica/{assembly}/environments/{part_id}/scene.urdf"
             self._mp_table_urdfs.append(scene_urdf)
 
             # Trajectory JSON → start pose + goals
             traj_path = os.path.join(
-                repo_root, "fabrica", "trajectories", f"{assembly}_{part_id}", "pick_place.json"
+                repo_root, "assets", "urdf", "fabrica", assembly, "trajectories", part_id, "pick_place.json"
             )
             with open(traj_path, "r") as f:
                 traj = json.load(f)

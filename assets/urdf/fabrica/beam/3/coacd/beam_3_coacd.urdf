@@ -12,11 +12,6 @@
   <material name="color_9"><color rgba="0.3 0.9 0.5 1.0"/></material>
   <material name="color_10"><color rgba="0.9 0.3 0.5 1.0"/></material>
   <material name="color_11"><color rgba="0.4 0.6 0.9 1.0"/></material>
-  <material name="color_12"><color rgba="0.7 0.9 0.2 1.0"/></material>
-  <material name="color_13"><color rgba="0.9 0.4 0.7 1.0"/></material>
-  <material name="color_14"><color rgba="0.2 0.5 0.7 1.0"/></material>
-  <material name="color_15"><color rgba="0.8 0.6 0.3 1.0"/></material>
-  <material name="color_16"><color rgba="0.5 0.3 0.9 1.0"/></material>
   <link name="base_link">
     <inertial>
       <density value="1250.0"/>
@@ -308,126 +303,6 @@
   <joint name="hull_joint_11" type="fixed">
     <parent link="base_link"/>
     <child link="hull_11"/>
-    <origin xyz="0 0 0" rpy="0 0 0"/>
-  </joint>
-  <link name="hull_12">
-    <visual>
-      <origin xyz="0 0 0" rpy="0 0 0"/>
-      <geometry>
-        <mesh filename="decomp_12.obj" scale="1 1 1"/>
-      </geometry>
-      <material name="color_12"/>
-    </visual>
-    <collision>
-      <origin xyz="0 0 0" rpy="0 0 0"/>
-      <geometry>
-        <mesh filename="decomp_12.obj" scale="1 1 1"/>
-      </geometry>
-    </collision>
-    <inertial>
-      <mass value="0.001"/>
-      <inertia ixx="1e-6" ixy="0" ixz="0" iyy="1e-6" iyz="0" izz="1e-6"/>
-    </inertial>
-  </link>
-  <joint name="hull_joint_12" type="fixed">
-    <parent link="base_link"/>
-    <child link="hull_12"/>
-    <origin xyz="0 0 0" rpy="0 0 0"/>
-  </joint>
-  <link name="hull_13">
-    <visual>
-      <origin xyz="0 0 0" rpy="0 0 0"/>
-      <geometry>
-        <mesh filename="decomp_13.obj" scale="1 1 1"/>
-      </geometry>
-      <material name="color_13"/>
-    </visual>
-    <collision>
-      <origin xyz="0 0 0" rpy="0 0 0"/>
-      <geometry>
-        <mesh filename="decomp_13.obj" scale="1 1 1"/>
-      </geometry>
-    </collision>
-    <inertial>
-      <mass value="0.001"/>
-      <inertia ixx="1e-6" ixy="0" ixz="0" iyy="1e-6" iyz="0" izz="1e-6"/>
-    </inertial>
-  </link>
-  <joint name="hull_joint_13" type="fixed">
-    <parent link="base_link"/>
-    <child link="hull_13"/>
-    <origin xyz="0 0 0" rpy="0 0 0"/>
-  </joint>
-  <link name="hull_14">
-    <visual>
-      <origin xyz="0 0 0" rpy="0 0 0"/>
-      <geometry>
-        <mesh filename="decomp_14.obj" scale="1 1 1"/>
-      </geometry>
-      <material name="color_14"/>
-    </visual>
-    <collision>
-      <origin xyz="0 0 0" rpy="0 0 0"/>
-      <geometry>
-        <mesh filename="decomp_14.obj" scale="1 1 1"/>
-      </geometry>
-    </collision>
-    <inertial>
-      <mass value="0.001"/>
-      <inertia ixx="1e-6" ixy="0" ixz="0" iyy="1e-6" iyz="0" izz="1e-6"/>
-    </inertial>
-  </link>
-  <joint name="hull_joint_14" type="fixed">
-    <parent link="base_link"/>
-    <child link="hull_14"/>
-    <origin xyz="0 0 0" rpy="0 0 0"/>
-  </joint>
-  <link name="hull_15">
-    <visual>
-      <origin xyz="0 0 0" rpy="0 0 0"/>
-      <geometry>
-        <mesh filename="decomp_15.obj" scale="1 1 1"/>
-      </geometry>
-      <material name="color_15"/>
-    </visual>
-    <collision>
-      <origin xyz="0 0 0" rpy="0 0 0"/>
-      <geometry>
-        <mesh filename="decomp_15.obj" scale="1 1 1"/>
-      </geometry>
-    </collision>
-    <inertial>
-      <mass value="0.001"/>
-      <inertia ixx="1e-6" ixy="0" ixz="0" iyy="1e-6" iyz="0" izz="1e-6"/>
-    </inertial>
-  </link>
-  <joint name="hull_joint_15" type="fixed">
-    <parent link="base_link"/>
-    <child link="hull_15"/>
-    <origin xyz="0 0 0" rpy="0 0 0"/>
-  </joint>
-  <link name="hull_16">
-    <visual>
-      <origin xyz="0 0 0" rpy="0 0 0"/>
-      <geometry>
-        <mesh filename="decomp_16.obj" scale="1 1 1"/>
-      </geometry>
-      <material name="color_16"/>
-    </visual>
-    <collision>
-      <origin xyz="0 0 0" rpy="0 0 0"/>
-      <geometry>
-        <mesh filename="decomp_16.obj" scale="1 1 1"/>
-      </geometry>
-    </collision>
-    <inertial>
-      <mass value="0.001"/>
-      <inertia ixx="1e-6" ixy="0" ixz="0" iyy="1e-6" iyz="0" izz="1e-6"/>
-    </inertial>
-  </link>
-  <joint name="hull_joint_16" type="fixed">
-    <parent link="base_link"/>
-    <child link="hull_16"/>
     <origin xyz="0 0 0" rpy="0 0 0"/>
   </joint>
 </robot>

@@ -113,15 +113,15 @@ def _get_available_parts(assembly: str) -> List[str]:
     available = []
     for pid in order:
         name = f"{assembly}_{pid}"
-        traj = REPO_ROOT / "fabrica" / "trajectories" / name / "pick_place.json"
-        urdf = ASSETS_DIR / "environments" / name / "scene.urdf"
+        traj = ASSETS_DIR / assembly / "trajectories" / pid / "pick_place.json"
+        urdf = ASSETS_DIR / assembly / "environments" / pid / "scene.urdf"
         if traj.exists() and urdf.exists():
             available.append(pid)
     return available
 
 
 def _load_trajectory(assembly: str, pid: str) -> Optional[dict]:
-    path = REPO_ROOT / "fabrica" / "trajectories" / f"{assembly}_{pid}" / "pick_place.json"
+    path = ASSETS_DIR / assembly / "trajectories" / pid / "pick_place.json"
     if not path.exists():
         return None
     with open(path) as f:
@@ -150,7 +150,7 @@ def _table_urdf_rel(assembly: str, active_pid: str, collision_method: str) -> st
     """Return the relative URDF path for the precomputed table scene."""
     suffix_map = {"vhacd": "", "sdf": "_sdf", "coacd": "_coacd"}
     suffix = suffix_map[collision_method]
-    return f"urdf/fabrica/environments/{assembly}_{active_pid}/scene{suffix}.urdf"
+    return f"urdf/fabrica/{assembly}/environments/{active_pid}/scene{suffix}.urdf"
 
 
 # ===================================================================
@@ -341,7 +341,7 @@ def sim_worker(conn, assembly, part_id, config_path, checkpoint_path, table_urdf
         base_name = f"{assembly}_{part_id}"
         obj_suffix = {"vhacd": "", "sdf": "_sdf", "coacd": "_coacd"}[collision_method]
         object_name = base_name + obj_suffix
-        traj_path = REPO_ROOT / "fabrica" / "trajectories" / base_name / "pick_place.json"
+        traj_path = ASSETS_DIR / assembly / "trajectories" / part_id / "pick_place.json"
 
         with open(traj_path) as f:
             traj = json.load(f)
