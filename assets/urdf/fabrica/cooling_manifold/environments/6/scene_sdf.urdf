@@ -1,0 +1,70 @@
+<?xml version="1.0"?>
+<robot name="table_cooling_manifold_6_scene_sdf">
+  <link name="box">
+    <visual>
+      <material name="wood"><color rgba="0.82 0.56 0.35 1.0"/></material>
+      <origin xyz="0 0 0"/>
+      <geometry><box size="0.475 0.4 0.3"/></geometry>
+    </visual>
+    <collision>
+      <origin xyz="0 0 0"/>
+      <geometry><box size="0.475 0.4 0.3"/></geometry>
+    </collision>
+    <inertial>
+      <mass value="500"/>
+      <friction value="1.0"/>
+      <inertia ixx="1000.0" ixy="0.0" ixz="0.0" iyy="1000.0" iyz="0.0" izz="1000.0"/>
+    </inertial>
+  </link>
+  <link name="part_1">
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry><mesh filename="../../1/1_canonical.obj" scale="1 1 1"/></geometry>
+      <material name="placed_1"><color rgba="0.6 0.6 0.6 1.0"/></material>
+    </visual>
+    <collision>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry><mesh filename="../../1/1_canonical.obj" scale="1 1 1"/></geometry>
+      <sdf resolution="512"/>
+    </collision>
+  </link>
+  <joint name="part_1_joint" type="fixed">
+    <parent link="box"/>
+    <child link="part_1"/>
+    <origin xyz="-0.08 0.04 0.16749999999999998" rpy="3.141592653589793 0.0 1.5707963267948966"/>
+  </joint>
+  <link name="part_0">
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry><mesh filename="../../0/0_canonical.obj" scale="1 1 1"/></geometry>
+      <material name="placed_0"><color rgba="0.6 0.6 0.6 1.0"/></material>
+    </visual>
+    <collision>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry><mesh filename="../../0/0_canonical.obj" scale="1 1 1"/></geometry>
+      <sdf resolution="512"/>
+    </collision>
+  </link>
+  <joint name="part_0_joint" type="fixed">
+    <parent link="box"/>
+    <child link="part_0"/>
+    <origin xyz="-0.111173 0.04 0.18825000000000003" rpy="1.5707963267948966 1.5707963267948966 0.0"/>
+  </joint>
+  <link name="part_4">
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry><mesh filename="../../4/4_canonical.obj" scale="1 1 1"/></geometry>
+      <material name="placed_4"><color rgba="0.6 0.6 0.6 1.0"/></material>
+    </visual>
+    <collision>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry><mesh filename="../../4/4_canonical.obj" scale="1 1 1"/></geometry>
+      <sdf resolution="512"/>
+    </collision>
+  </link>
+  <joint name="part_4_joint" type="fixed">
+    <parent link="box"/>
+    <child link="part_4"/>
+    <origin xyz="-0.048827 0.04 0.18825000000000003" rpy="1.5707963267948966 1.5707963267948966 0.0"/>
+  </joint>
+</robot>
