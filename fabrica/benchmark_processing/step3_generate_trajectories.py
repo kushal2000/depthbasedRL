@@ -66,7 +66,7 @@ def load_assembly_config(assembly):
 
 def compute_start_poses(canonical_meshes, assembly_order, assembled_y):
     """Bin-pack parts into rows, center each row in X, center all rows in Y around assembled_y."""
-    gap_x, gap_y = 0.015, 0.025
+    gap_x, gap_y = 0.03, 0.025
     max_row_width = 0.20
 
     extents = {pid: canonical_meshes[pid].bounding_box.extents for pid in assembly_order}
@@ -111,30 +111,46 @@ def compute_start_poses(canonical_meshes, assembly_order, assembled_y):
 
 # --- Trajectory generation ---
 
-def compute_table_offset(transforms):
+def compute_table_offset(assembly, transforms):
+    """Compute offset to place assembled parts on table surface.
+
+    Uses actual assembled OBJ bounds to find the true min Z, rather than
+    canonical extents (which may not correspond to the Z axis).
+    """
     centroids = np.array([transforms[pid]["original_centroid"] for pid in transforms])
-    min_z = min(
-        transforms[pid]["original_centroid"][2] - min(transforms[pid]["canonical_extents"]) / 2.0
-        for pid in transforms
-    )
+
+    # Find the actual min Z across all parts in assembled frame
+    min_z = float("inf")
+    for pid in transforms:
+        mesh_path = ASSETS_DIR / assembly / pid / f"{pid}.obj"
+        mesh = trimesh.load_mesh(str(mesh_path), process=False)
+        min_z = min(min_z, mesh.bounds[0][2])
+
     xy_offset = ASSEMBLY_XY - centroids[:, :2].mean(axis=0)
     return np.array([xy_offset[0], xy_offset[1], TABLE_SURFACE_Z - min_z])
 
 
 def generate_trajectory(start_pos, start_quat, end_pos, end_quat, insertion_dir=None):
-    """Generate crane-style trajectory: lift → transit → approach."""
+    """Generate crane-style trajectory: lift → transit → approach.
+
+    For horizontal insertions (insertion_dir nearly perpendicular to Z),
+    adds a descent phase so transit stays at clearance height:
+      lift → transit (at clearance) → descent → horizontal approach
+    """
     if insertion_dir is None:
         insertion_dir = np.array([0.0, 0.0, -1.0])
     else:
         insertion_dir = np.array(insertion_dir, dtype=float)
         insertion_dir /= np.linalg.norm(insertion_dir)
 
+    horizontal_insertion = abs(insertion_dir[2]) <= 0.01
+
     n_lift = max(1, int(NUM_WAYPOINTS * LIFT_FRAC))
     n_transit = max(1, int(NUM_WAYPOINTS * TRANSIT_FRAC))
     n_approach = NUM_WAYPOINTS - n_lift - n_transit
 
-    # Approach start: back along insertion dir from end to clearance
-    if abs(insertion_dir[2]) > 0.01:
+    # Approach start: back along insertion dir from end
+    if not horizontal_insertion:
         approach_dist = abs((CLEARANCE_Z - end_pos[2]) / insertion_dir[2])
     else:
         approach_dist = CLEARANCE_Z - end_pos[2]
@@ -148,17 +164,39 @@ def generate_trajectory(start_pos, start_quat, end_pos, end_quat, insertion_dir=
         t = i / n_lift
         waypoints.append((start_pos + t * (lift_target - start_pos), start_quat))
 
-    # Transit
-    for i in range(1, n_transit + 1):
-        t = i / n_transit
-        pos = lift_target + t * (approach_start - lift_target)
-        quat = slerp_wxyz(start_quat, end_quat, t)
-        waypoints.append((pos, quat))
+    if horizontal_insertion:
+        # Transit stays at clearance height
+        transit_target = np.array([approach_start[0], approach_start[1], CLEARANCE_Z])
+        for i in range(1, n_transit + 1):
+            t = i / n_transit
+            pos = lift_target + t * (transit_target - lift_target)
+            quat = slerp_wxyz(start_quat, end_quat, t)
+            waypoints.append((pos, quat))
 
-    # Approach
-    for i in range(1, n_approach + 1):
-        t = i / n_approach
-        waypoints.append((approach_start + t * (end_pos - approach_start), end_quat))
+        # Descent from clearance to approach start Z
+        n_descent = max(1, n_approach // 2)
+        n_horiz = n_approach - n_descent
+        for i in range(1, n_descent + 1):
+            t = i / n_descent
+            pos = transit_target + t * (approach_start - transit_target)
+            waypoints.append((pos, end_quat))
+
+        # Horizontal approach along insertion dir
+        for i in range(1, n_horiz + 1):
+            t = i / n_horiz
+            waypoints.append((approach_start + t * (end_pos - approach_start), end_quat))
+    else:
+        # Transit (may descend for angled/vertical insertions)
+        for i in range(1, n_transit + 1):
+            t = i / n_transit
+            pos = lift_target + t * (approach_start - lift_target)
+            quat = slerp_wxyz(start_quat, end_quat, t)
+            waypoints.append((pos, quat))
+
+        # Approach
+        for i in range(1, n_approach + 1):
+            t = i / n_approach
+            waypoints.append((approach_start + t * (end_pos - approach_start), end_quat))
 
     # Format as pick_place.json
     start_pose = list(start_pos) + quat_wxyz_to_xyzw(start_quat)
@@ -381,7 +419,7 @@ def main():
     assembly_order = order_config["steps"]
     insertion_directions = order_config.get("insertion_directions", {})
 
-    offset = compute_table_offset(transforms)
+    offset = compute_table_offset(args.assembly, transforms)
     print(f"Assembly: {args.assembly}")
     print(f"Table offset: [{offset[0]:.4f}, {offset[1]:.4f}, {offset[2]:.4f}]\n")
 

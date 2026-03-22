@@ -22,7 +22,6 @@ from scipy.spatial.transform import Rotation
 
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 ASSETS_DIR = REPO_ROOT / "assets" / "urdf" / "fabrica"
-SOURCE_DIR = REPO_ROOT / "assets" / "urdf" / "fabrica_copied"
 
 URDF_TEMPLATE = """\
 <?xml version="1.0"?>
@@ -47,9 +46,11 @@ def compute_canonical_transform(mesh):
 
     Returns (centroid, canonical_extents, assembled_to_canonical_wxyz).
     """
-    centroid = mesh.centroid.copy()
+    centroid = (mesh.bounds[0] + mesh.bounds[1]) / 2  # bbox center, not mass centroid
     bbox = mesh.bounding_box.extents.copy()
-    order = np.argsort(-bbox)
+    # Tiebreaker: when extents are equal, prefer Y > X > Z as longest axis
+    tiebreaker = np.array([0, 1e-10, 2e-10])
+    order = np.argsort(-(bbox + tiebreaker))
     canonical_extents = bbox[order]
 
     if list(order) == [0, 1, 2]:
@@ -90,7 +91,7 @@ def run_viz(assembly, part_filter, port):
     import viser
     from fabrica.viser_utils import COLORS
 
-    source_dir = SOURCE_DIR / assembly
+    source_dir = ASSETS_DIR / assembly
     part_ids = find_parts(source_dir, part_filter)
     if not part_ids:
         print(f"No parts found in {source_dir}")
@@ -172,7 +173,7 @@ def main():
         run_viz(args.assembly, args.part, args.port)
         return
 
-    source_dir = SOURCE_DIR / args.assembly
+    source_dir = ASSETS_DIR / args.assembly
     output_dir = ASSETS_DIR / args.assembly
     part_ids = find_parts(source_dir, args.part)
 

@@ -89,10 +89,14 @@ def run_coacd(
     max_convex_hull: int = -1,
     threshold: float = 0.03,
     preprocess_resolution: int = 50,
+    preprocess_mode: str = "auto",
+    pca: bool = False,
+    merge: bool = True,
     resolution: int = 3000,
     mcts_nodes: int = 25,
     mcts_iterations: int = 250,
     mcts_max_depth: int = 4,
+    seed: int = 0,
     mode: Literal["subprocess", "python"] = "python",
 ) -> List[trimesh.Trimesh]:
     """Run COACD on a mesh and return the list of convex hulls."""
@@ -135,11 +139,15 @@ def run_coacd(
             coacd_mesh,
             threshold=threshold,
             max_convex_hull=max_convex_hull,
+            preprocess_mode=preprocess_mode,
             preprocess_resolution=preprocess_resolution,
+            pca=pca,
+            merge=merge,
             resolution=resolution,
             mcts_nodes=mcts_nodes,
             mcts_iterations=mcts_iterations,
             mcts_max_depth=mcts_max_depth,
+            seed=seed,
         )
         parts = []
         for vs, fs in convex_vs_fs_parts:
@@ -221,6 +229,15 @@ class RunCoacdArgs:
     preprocess_resolution: int = 50
     """Voxel resolution for manifold preprocessing."""
 
+    preprocess_mode: str = "auto"
+    """Preprocess mode: 'auto', 'on', or 'off'. Use 'off' if mesh is already manifold."""
+
+    pca: bool = False
+    """PCA preprocessing — helps with elongated parts."""
+
+    no_merge: bool = False
+    """Disable merge postprocessing — preserves more detail around cavities."""
+
     resolution: int = 3000
     """Sampling resolution for Hausdorff distance calculation."""
 
@@ -238,6 +255,12 @@ class RunCoacdArgs:
 
     assets_dir: Path = ASSETS_DIR
     """Root assets directory."""
+
+    seed: int = 0
+    """Random seed for reproducible decomposition."""
+
+    shrink: float = 0.0
+    """Post-process: shrink each hull toward its centroid by this fraction (e.g., 0.02 = 2%)."""
 
     viz: bool = False
     """Launch a viser viewer to visualize existing CoACD decomposition instead of running it."""
@@ -425,12 +448,26 @@ def main():
         max_convex_hull=args.max_convex_hull,
         threshold=args.threshold,
         preprocess_resolution=args.preprocess_resolution,
+        preprocess_mode=args.preprocess_mode,
+        pca=args.pca,
+        merge=not args.no_merge,
         resolution=args.resolution,
         mcts_nodes=args.mcts_nodes,
         mcts_iterations=args.mcts_iterations,
         mcts_max_depth=args.mcts_max_depth,
+        seed=args.seed,
         mode=args.mode,
     )
+
+    if args.shrink > 0:
+        import numpy as np
+        decomp_files = sorted(output_dir.glob("decomp_*.obj"))
+        for f in decomp_files:
+            h = trimesh.load_mesh(str(f), process=False)
+            centroid = h.vertices.mean(axis=0)
+            h.vertices = centroid + (1.0 - args.shrink) * (h.vertices - centroid)
+            h.export(str(f))
+        print(f"Shrunk {len(decomp_files)} hulls by {args.shrink * 100:.1f}%")
 
     generate_coacd_urdf(args.assembly, args.part, output_dir)
 

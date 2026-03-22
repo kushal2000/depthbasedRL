@@ -112,8 +112,8 @@ def main():
             color=COLORS[i % len(COLORS)],
         )
 
-    # Parts shelf: individual copies laid out in a row 1m behind the table
-    shelf_y = -1.0
+    # Parts shelf: individual copies laid out in a row behind the table
+    shelf_y = -0.2
     shelf_spacing = 0.15
     shelf_start_x = -(len(part_ids) - 1) * shelf_spacing / 2
     for i, (pid, mesh) in enumerate(parts):

@@ -24,14 +24,29 @@ REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 TABLE_Z = 0.38
 
 KEYPOINT_SCALE = 1.5
-FIXED_SIZE = np.array([0.141, 0.03025, 0.0271])
 KEYPOINT_DIRS = np.array([
     [1, 1, 1],
     [1, 1, -1],
     [-1, -1, 1],
     [-1, -1, -1],
 ], dtype=np.float64)
-KEYPOINT_OFFSETS = KEYPOINT_DIRS * FIXED_SIZE[None, :] * KEYPOINT_SCALE / 2
+
+
+def load_canonical_extents(assembly: str, part: str) -> np.ndarray:
+    """Load per-part canonical extents from canonical_transforms.json."""
+    path = REPO_ROOT / f"assets/urdf/fabrica/{assembly}/canonical_transforms.json"
+    if not path.exists():
+        raise FileNotFoundError(f"No canonical_transforms.json for {assembly}: {path}")
+    with open(path) as f:
+        data = json.load(f)
+    if part not in data:
+        raise KeyError(f"Part {part} not in canonical_transforms.json for {assembly}")
+    return np.array(data[part]["canonical_extents"])
+
+
+def compute_keypoint_offsets(extents: np.ndarray) -> np.ndarray:
+    """Compute keypoint offsets from part extents."""
+    return KEYPOINT_DIRS * extents[None, :] * KEYPOINT_SCALE / 2
 
 
 def quat_xyzw_to_matrix(q):
@@ -43,15 +58,15 @@ def quat_xyzw_to_matrix(q):
     ])
 
 
-def compute_keypoints(pose_xyzw):
+def compute_keypoints(pose_xyzw, keypoint_offsets):
     pos = pose_xyzw[:3]
     R = quat_xyzw_to_matrix(pose_xyzw[3:7])
-    return pos[None, :] + (R @ KEYPOINT_OFFSETS.T).T
+    return pos[None, :] + (R @ keypoint_offsets.T).T
 
 
-def keypoints_max_dist(pose_actual, pose_desired):
-    kp_actual = compute_keypoints(pose_actual)
-    kp_desired = compute_keypoints(pose_desired)
+def keypoints_max_dist(pose_actual, pose_desired, keypoint_offsets):
+    kp_actual = compute_keypoints(pose_actual, keypoint_offsets)
+    kp_desired = compute_keypoints(pose_desired, keypoint_offsets)
     dists = np.linalg.norm(kp_actual - kp_desired, axis=1)
     return dists.max()
 
@@ -147,8 +162,13 @@ def main():
     assembly = args.assembly
     part = args.part
 
+    # Load per-part extents for keypoint computation
+    extents = load_canonical_extents(assembly, part)
+    keypoint_offsets = compute_keypoint_offsets(extents)
+    print(f"Part {part} canonical extents: {extents} (keypoint scale: {KEYPOINT_SCALE})")
+
     timestamp = args.timestamp or datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-    output_dir = Path(args.output_dir) / timestamp / f"{assembly}_{part}" / args.method
+    output_dir = Path(args.output_dir) / assembly / timestamp / f"{assembly}_{part}" / args.method
     output_dir.mkdir(parents=True, exist_ok=True)
 
     waypoints = load_trajectory(assembly, part, args.start_waypoint, args.end_waypoint)
@@ -290,7 +310,7 @@ def main():
         if step < total_teleport_steps:
             desired_np = traj_poses[step]
             delta = np.linalg.norm(desired_np[:3] - actual[:3])
-            kp_dist = keypoints_max_dist(actual, desired_np)
+            kp_dist = keypoints_max_dist(actual, desired_np, keypoint_offsets)
             deltas.append(delta)
             kp_dists.append(kp_dist)
             if step % 25 == 0:
