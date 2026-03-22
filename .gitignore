@@ -218,7 +218,7 @@ runs/
 wandb/
 
 # Isaac Gym (proprietary, not redistributable)
-isaacgym/
+isaacgym
 
 # FoundationPose (separate repo)
 FoundationPose/

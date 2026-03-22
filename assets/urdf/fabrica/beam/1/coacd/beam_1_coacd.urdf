@@ -7,6 +7,7 @@
   <material name="color_4"><color rgba="0.8 0.3 0.8 1.0"/></material>
   <material name="color_5"><color rgba="0.1 0.8 0.8 1.0"/></material>
   <material name="color_6"><color rgba="0.9 0.5 0.1 1.0"/></material>
+  <material name="color_7"><color rgba="0.5 0.5 0.5 1.0"/></material>
   <link name="base_link">
     <inertial>
       <density value="1250.0"/>
@@ -178,6 +179,30 @@
   <joint name="hull_joint_6" type="fixed">
     <parent link="base_link"/>
     <child link="hull_6"/>
+    <origin xyz="0 0 0" rpy="0 0 0"/>
+  </joint>
+  <link name="hull_7">
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry>
+        <mesh filename="decomp_7.obj" scale="1 1 1"/>
+      </geometry>
+      <material name="color_7"/>
+    </visual>
+    <collision>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry>
+        <mesh filename="decomp_7.obj" scale="1 1 1"/>
+      </geometry>
+    </collision>
+    <inertial>
+      <mass value="0.001"/>
+      <inertia ixx="1e-6" ixy="0" ixz="0" iyy="1e-6" iyz="0" izz="1e-6"/>
+    </inertial>
+  </link>
+  <joint name="hull_joint_7" type="fixed">
+    <parent link="base_link"/>
+    <child link="hull_7"/>
     <origin xyz="0 0 0" rpy="0 0 0"/>
   </joint>
 </robot>
