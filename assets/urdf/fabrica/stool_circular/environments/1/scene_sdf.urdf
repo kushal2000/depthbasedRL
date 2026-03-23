@@ -1,0 +1,36 @@
+<?xml version="1.0"?>
+<robot name="table_stool_circular_1_scene_sdf">
+  <link name="box">
+    <visual>
+      <material name="wood"><color rgba="0.82 0.56 0.35 1.0"/></material>
+      <origin xyz="0 0 0"/>
+      <geometry><box size="0.475 0.4 0.3"/></geometry>
+    </visual>
+    <collision>
+      <origin xyz="0 0 0"/>
+      <geometry><box size="0.475 0.4 0.3"/></geometry>
+    </collision>
+    <inertial>
+      <mass value="500"/>
+      <friction value="1.0"/>
+      <inertia ixx="1000.0" ixy="0.0" ixz="0.0" iyy="1000.0" iyz="0.0" izz="1000.0"/>
+    </inertial>
+  </link>
+  <link name="part_2">
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry><mesh filename="../../2/2_canonical.obj" scale="1 1 1"/></geometry>
+      <material name="placed_2"><color rgba="0.6 0.6 0.6 1.0"/></material>
+    </visual>
+    <collision>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry><mesh filename="../../2/2_canonical.obj" scale="1 1 1"/></geometry>
+      <sdf resolution="512"/>
+    </collision>
+  </link>
+  <joint name="part_2_joint" type="fixed">
+    <parent link="box"/>
+    <child link="part_2"/>
+    <origin xyz="-0.08 0.04 0.15825" rpy="3.141592653589793 0.0 1.5707963267948966"/>
+  </joint>
+</robot>
