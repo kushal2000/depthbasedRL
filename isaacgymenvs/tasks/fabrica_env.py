@@ -210,13 +210,13 @@ class FabricaEnv(SimToolReal):
         return all_files, all_scales, all_need_vhacds
 
     def _load_main_object_asset(self):
-        """Override to return max shape/body counts across all part assets."""
+        """Override to return per-part shape/body counts and assets."""
         if not self.multi_part:
             return super()._load_main_object_asset()
 
         object_assets = []
-        max_rb_count = 0
-        max_shapes_count = 0
+        per_part_rb = []
+        per_part_shapes = []
         for object_asset_file, need_vhacd in zip(
             self.object_asset_files, self.object_need_vhacds
         ):
@@ -236,15 +236,17 @@ class FabricaEnv(SimToolReal):
 
             rb = self.gym.get_asset_rigid_body_count(asset)
             shapes = self.gym.get_asset_rigid_shape_count(asset)
-            max_rb_count = max(max_rb_count, rb)
-            max_shapes_count = max(max_shapes_count, shapes)
+            per_part_rb.append(rb)
+            per_part_shapes.append(shapes)
             print(f"[FabricaEnv] Object asset {object_asset_fname}: {rb} bodies, {shapes} shapes")
 
+        max_rb_count = max(per_part_rb)
+        max_shapes_count = max(per_part_shapes)
         print(f"[FabricaEnv] Max object: {max_rb_count} bodies, {max_shapes_count} shapes")
-        return object_assets, max_rb_count, max_shapes_count
+        return object_assets, max_rb_count, max_shapes_count, per_part_rb, per_part_shapes
 
     def _load_additional_assets(self, object_asset_root, arm_pose):
-        """Override to load goal assets for each part and return max counts."""
+        """Override to load goal assets for each part and return per-part counts."""
         if not self.multi_part:
             return super()._load_additional_assets(object_asset_root, arm_pose)
 
@@ -254,8 +256,8 @@ class FabricaEnv(SimToolReal):
         object_asset_options.replace_cylinder_with_capsule = True
 
         self.goal_assets = []
-        max_goal_rb = 0
-        max_goal_shapes = 0
+        per_part_goal_rb = []
+        per_part_goal_shapes = []
         for object_asset_file in self.object_asset_files:
             object_asset_dir = os.path.dirname(object_asset_file)
             object_asset_fname = os.path.basename(object_asset_file)
@@ -265,10 +267,12 @@ class FabricaEnv(SimToolReal):
             self.goal_assets.append(goal_asset_)
             rb = self.gym.get_asset_rigid_body_count(goal_asset_)
             shapes = self.gym.get_asset_rigid_shape_count(goal_asset_)
-            max_goal_rb = max(max_goal_rb, rb)
-            max_goal_shapes = max(max_goal_shapes, shapes)
+            per_part_goal_rb.append(rb)
+            per_part_goal_shapes.append(shapes)
 
-        return max_goal_rb, max_goal_shapes
+        max_goal_rb = max(per_part_goal_rb)
+        max_goal_shapes = max(per_part_goal_shapes)
+        return max_goal_rb, max_goal_shapes, per_part_goal_rb, per_part_goal_shapes
 
     # ── Override _create_envs for multi-part ──────────────────────
 
@@ -317,8 +321,8 @@ class FabricaEnv(SimToolReal):
         num_hand_arm_dofs = self.gym.get_asset_dof_count(robot_asset)
         assert self.num_hand_arm_dofs == num_hand_arm_dofs
 
-        max_agg_bodies = self.num_hand_arm_bodies
-        max_agg_shapes = self.num_hand_arm_shapes
+        max_agg_bodies = 0
+        max_agg_shapes = 0
 
         robot_rigid_body_names = [
             self.gym.get_asset_rigid_body_name(robot_asset, i)
@@ -341,9 +345,7 @@ class FabricaEnv(SimToolReal):
         robot_pose.r = gymapi.Quat(0, 0, 0, 1)
 
         # ── Object assets (multiple parts) ──
-        object_assets, object_rb_count, object_shapes_count = self._load_main_object_asset()
-        max_agg_bodies += object_rb_count
-        max_agg_shapes += object_shapes_count
+        object_assets, object_rb_count, object_shapes_count, per_part_obj_rb, per_part_obj_shapes = self._load_main_object_asset()
 
         # ── Table assets (one per part, with collapse_fixed_joints) ──
         table_asset_options = gymapi.AssetOptions()
@@ -354,6 +356,8 @@ class FabricaEnv(SimToolReal):
             table_asset_options.thickness = 0.0
 
         table_assets = []
+        per_part_table_rb = []
+        per_part_table_shapes = []
         max_table_rb = 0
         max_table_shapes = 0
         for table_urdf in self._mp_table_urdfs:
@@ -363,6 +367,8 @@ class FabricaEnv(SimToolReal):
             table_assets.append(table_asset)
             rb = self.gym.get_asset_rigid_body_count(table_asset)
             shapes = self.gym.get_asset_rigid_shape_count(table_asset)
+            per_part_table_rb.append(rb)
+            per_part_table_shapes.append(shapes)
             max_table_rb = max(max_table_rb, rb)
             max_table_shapes = max(max_table_shapes, shapes)
             print(f"[FabricaEnv] Table asset {table_urdf}: {rb} bodies, {shapes} shapes")
@@ -388,8 +394,6 @@ class FabricaEnv(SimToolReal):
                 )
 
         print(f"[FabricaEnv] Max table: {max_table_rb} bodies, {max_table_shapes} shapes")
-        max_agg_bodies += max_table_rb
-        max_agg_shapes += max_table_shapes
 
         table_pose = gymapi.Transform()
         table_pose.p = gymapi.Vec3()
@@ -399,11 +403,21 @@ class FabricaEnv(SimToolReal):
         table_pose.p.z = robot_pose.p.z + table_pose_dz
 
         # ── Goal (additional) assets ──
-        additional_rb, additional_shapes = self._load_additional_assets(
+        additional_rb, additional_shapes, per_part_goal_rb, per_part_goal_shapes = self._load_additional_assets(
             object_asset_root, robot_pose
         )
-        max_agg_bodies += additional_rb
-        max_agg_shapes += additional_shapes
+
+        # ── Compute max_agg as max-of-per-part-sums (not sum-of-maxes) ──
+        # Each env only has one (object, table, goal) combination, so we compute
+        # the actual worst-case per environment instead of over-allocating.
+        for i in range(self._mp_num_parts):
+            env_bodies = self.num_hand_arm_bodies + per_part_obj_rb[i] + per_part_table_rb[i] + per_part_goal_rb[i]
+            env_shapes = self.num_hand_arm_shapes + per_part_obj_shapes[i] + per_part_table_shapes[i] + per_part_goal_shapes[i]
+            max_agg_bodies = max(max_agg_bodies, env_bodies)
+            max_agg_shapes = max(max_agg_shapes, env_shapes)
+
+        old_max_shapes = self.num_hand_arm_shapes + object_shapes_count + max_table_shapes + additional_shapes
+        print(f"[FabricaEnv] max_agg_shapes: {max_agg_shapes} (was {old_max_shapes} with sum-of-maxes)")
 
         # ── Per-part start poses ──
         object_start_poses = []
