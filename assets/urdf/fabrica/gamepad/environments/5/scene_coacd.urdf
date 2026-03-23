@@ -1312,404 +1312,52 @@
     <child link="part_3_hull_80"/>
     <origin xyz="-0.079973 0.027378 0.16249999999999998" rpy="0.0 0.0 0.0"/>
   </joint>
-  <link name="part_4_hull_0">
+  <link name="part_4">
     <visual>
       <origin xyz="0 0 0" rpy="0 0 0"/>
-      <geometry><mesh filename="../../4/coacd/decomp_0.obj" scale="1 1 1"/></geometry>
-      <material name="placed_4_0"><color rgba="0.6 0.6 0.6 1.0"/></material>
+      <geometry><mesh filename="../../4/4_canonical.obj" scale="1 1 1"/></geometry>
+      <material name="placed_4"><color rgba="0.6 0.6 0.6 1.0"/></material>
     </visual>
     <collision>
       <origin xyz="0 0 0" rpy="0 0 0"/>
-      <geometry><mesh filename="../../4/coacd/decomp_0.obj" scale="1 1 1"/></geometry>
+      <geometry><mesh filename="../../4/4_canonical.obj" scale="1 1 1"/></geometry>
     </collision>
   </link>
-  <joint name="part_4_hull_0_joint" type="fixed">
+  <joint name="part_4_joint" type="fixed">
     <parent link="box"/>
-    <child link="part_4_hull_0"/>
+    <child link="part_4"/>
     <origin xyz="-0.079973 0.066058 0.16249999999999998" rpy="3.141592653589793 0.0 1.5707963267948966"/>
   </joint>
-  <link name="part_4_hull_1">
+  <link name="part_1">
     <visual>
       <origin xyz="0 0 0" rpy="0 0 0"/>
-      <geometry><mesh filename="../../4/coacd/decomp_1.obj" scale="1 1 1"/></geometry>
-      <material name="placed_4_1"><color rgba="0.6 0.6 0.6 1.0"/></material>
+      <geometry><mesh filename="../../1/1_canonical.obj" scale="1 1 1"/></geometry>
+      <material name="placed_1"><color rgba="0.6 0.6 0.6 1.0"/></material>
     </visual>
     <collision>
       <origin xyz="0 0 0" rpy="0 0 0"/>
-      <geometry><mesh filename="../../4/coacd/decomp_1.obj" scale="1 1 1"/></geometry>
+      <geometry><mesh filename="../../1/1_canonical.obj" scale="1 1 1"/></geometry>
     </collision>
   </link>
-  <joint name="part_4_hull_1_joint" type="fixed">
+  <joint name="part_1_joint" type="fixed">
     <parent link="box"/>
-    <child link="part_4_hull_1"/>
-    <origin xyz="-0.079973 0.066058 0.16249999999999998" rpy="3.141592653589793 0.0 1.5707963267948966"/>
-  </joint>
-  <link name="part_4_hull_2">
-    <visual>
-      <origin xyz="0 0 0" rpy="0 0 0"/>
-      <geometry><mesh filename="../../4/coacd/decomp_2.obj" scale="1 1 1"/></geometry>
-      <material name="placed_4_2"><color rgba="0.6 0.6 0.6 1.0"/></material>
-    </visual>
-    <collision>
-      <origin xyz="0 0 0" rpy="0 0 0"/>
-      <geometry><mesh filename="../../4/coacd/decomp_2.obj" scale="1 1 1"/></geometry>
-    </collision>
-  </link>
-  <joint name="part_4_hull_2_joint" type="fixed">
-    <parent link="box"/>
-    <child link="part_4_hull_2"/>
-    <origin xyz="-0.079973 0.066058 0.16249999999999998" rpy="3.141592653589793 0.0 1.5707963267948966"/>
-  </joint>
-  <link name="part_4_hull_3">
-    <visual>
-      <origin xyz="0 0 0" rpy="0 0 0"/>
-      <geometry><mesh filename="../../4/coacd/decomp_3.obj" scale="1 1 1"/></geometry>
-      <material name="placed_4_3"><color rgba="0.6 0.6 0.6 1.0"/></material>
-    </visual>
-    <collision>
-      <origin xyz="0 0 0" rpy="0 0 0"/>
-      <geometry><mesh filename="../../4/coacd/decomp_3.obj" scale="1 1 1"/></geometry>
-    </collision>
-  </link>
-  <joint name="part_4_hull_3_joint" type="fixed">
-    <parent link="box"/>
-    <child link="part_4_hull_3"/>
-    <origin xyz="-0.079973 0.066058 0.16249999999999998" rpy="3.141592653589793 0.0 1.5707963267948966"/>
-  </joint>
-  <link name="part_4_hull_4">
-    <visual>
-      <origin xyz="0 0 0" rpy="0 0 0"/>
-      <geometry><mesh filename="../../4/coacd/decomp_4.obj" scale="1 1 1"/></geometry>
-      <material name="placed_4_4"><color rgba="0.6 0.6 0.6 1.0"/></material>
-    </visual>
-    <collision>
-      <origin xyz="0 0 0" rpy="0 0 0"/>
-      <geometry><mesh filename="../../4/coacd/decomp_4.obj" scale="1 1 1"/></geometry>
-    </collision>
-  </link>
-  <joint name="part_4_hull_4_joint" type="fixed">
-    <parent link="box"/>
-    <child link="part_4_hull_4"/>
-    <origin xyz="-0.079973 0.066058 0.16249999999999998" rpy="3.141592653589793 0.0 1.5707963267948966"/>
-  </joint>
-  <link name="part_4_hull_5">
-    <visual>
-      <origin xyz="0 0 0" rpy="0 0 0"/>
-      <geometry><mesh filename="../../4/coacd/decomp_5.obj" scale="1 1 1"/></geometry>
-      <material name="placed_4_5"><color rgba="0.6 0.6 0.6 1.0"/></material>
-    </visual>
-    <collision>
-      <origin xyz="0 0 0" rpy="0 0 0"/>
-      <geometry><mesh filename="../../4/coacd/decomp_5.obj" scale="1 1 1"/></geometry>
-    </collision>
-  </link>
-  <joint name="part_4_hull_5_joint" type="fixed">
-    <parent link="box"/>
-    <child link="part_4_hull_5"/>
-    <origin xyz="-0.079973 0.066058 0.16249999999999998" rpy="3.141592653589793 0.0 1.5707963267948966"/>
-  </joint>
-  <link name="part_1_hull_0">
-    <visual>
-      <origin xyz="0 0 0" rpy="0 0 0"/>
-      <geometry><mesh filename="../../1/coacd/decomp_0.obj" scale="1 1 1"/></geometry>
-      <material name="placed_1_0"><color rgba="0.6 0.6 0.6 1.0"/></material>
-    </visual>
-    <collision>
-      <origin xyz="0 0 0" rpy="0 0 0"/>
-      <geometry><mesh filename="../../1/coacd/decomp_0.obj" scale="1 1 1"/></geometry>
-    </collision>
-  </link>
-  <joint name="part_1_hull_0_joint" type="fixed">
-    <parent link="box"/>
-    <child link="part_1_hull_0"/>
+    <child link="part_1"/>
     <origin xyz="-0.123681 0.044275 0.1725" rpy="0.0 -1.5707963057214722 0.0"/>
   </joint>
-  <link name="part_1_hull_1">
+  <link name="part_0">
     <visual>
       <origin xyz="0 0 0" rpy="0 0 0"/>
-      <geometry><mesh filename="../../1/coacd/decomp_1.obj" scale="1 1 1"/></geometry>
-      <material name="placed_1_1"><color rgba="0.6 0.6 0.6 1.0"/></material>
+      <geometry><mesh filename="../../0/0_canonical.obj" scale="1 1 1"/></geometry>
+      <material name="placed_0"><color rgba="0.6 0.6 0.6 1.0"/></material>
     </visual>
     <collision>
       <origin xyz="0 0 0" rpy="0 0 0"/>
-      <geometry><mesh filename="../../1/coacd/decomp_1.obj" scale="1 1 1"/></geometry>
+      <geometry><mesh filename="../../0/0_canonical.obj" scale="1 1 1"/></geometry>
     </collision>
   </link>
-  <joint name="part_1_hull_1_joint" type="fixed">
+  <joint name="part_0_joint" type="fixed">
     <parent link="box"/>
-    <child link="part_1_hull_1"/>
-    <origin xyz="-0.123681 0.044275 0.1725" rpy="0.0 -1.5707963057214722 0.0"/>
-  </joint>
-  <link name="part_1_hull_2">
-    <visual>
-      <origin xyz="0 0 0" rpy="0 0 0"/>
-      <geometry><mesh filename="../../1/coacd/decomp_10.obj" scale="1 1 1"/></geometry>
-      <material name="placed_1_2"><color rgba="0.6 0.6 0.6 1.0"/></material>
-    </visual>
-    <collision>
-      <origin xyz="0 0 0" rpy="0 0 0"/>
-      <geometry><mesh filename="../../1/coacd/decomp_10.obj" scale="1 1 1"/></geometry>
-    </collision>
-  </link>
-  <joint name="part_1_hull_2_joint" type="fixed">
-    <parent link="box"/>
-    <child link="part_1_hull_2"/>
-    <origin xyz="-0.123681 0.044275 0.1725" rpy="0.0 -1.5707963057214722 0.0"/>
-  </joint>
-  <link name="part_1_hull_3">
-    <visual>
-      <origin xyz="0 0 0" rpy="0 0 0"/>
-      <geometry><mesh filename="../../1/coacd/decomp_11.obj" scale="1 1 1"/></geometry>
-      <material name="placed_1_3"><color rgba="0.6 0.6 0.6 1.0"/></material>
-    </visual>
-    <collision>
-      <origin xyz="0 0 0" rpy="0 0 0"/>
-      <geometry><mesh filename="../../1/coacd/decomp_11.obj" scale="1 1 1"/></geometry>
-    </collision>
-  </link>
-  <joint name="part_1_hull_3_joint" type="fixed">
-    <parent link="box"/>
-    <child link="part_1_hull_3"/>
-    <origin xyz="-0.123681 0.044275 0.1725" rpy="0.0 -1.5707963057214722 0.0"/>
-  </joint>
-  <link name="part_1_hull_4">
-    <visual>
-      <origin xyz="0 0 0" rpy="0 0 0"/>
-      <geometry><mesh filename="../../1/coacd/decomp_12.obj" scale="1 1 1"/></geometry>
-      <material name="placed_1_4"><color rgba="0.6 0.6 0.6 1.0"/></material>
-    </visual>
-    <collision>
-      <origin xyz="0 0 0" rpy="0 0 0"/>
-      <geometry><mesh filename="../../1/coacd/decomp_12.obj" scale="1 1 1"/></geometry>
-    </collision>
-  </link>
-  <joint name="part_1_hull_4_joint" type="fixed">
-    <parent link="box"/>
-    <child link="part_1_hull_4"/>
-    <origin xyz="-0.123681 0.044275 0.1725" rpy="0.0 -1.5707963057214722 0.0"/>
-  </joint>
-  <link name="part_1_hull_5">
-    <visual>
-      <origin xyz="0 0 0" rpy="0 0 0"/>
-      <geometry><mesh filename="../../1/coacd/decomp_13.obj" scale="1 1 1"/></geometry>
-      <material name="placed_1_5"><color rgba="0.6 0.6 0.6 1.0"/></material>
-    </visual>
-    <collision>
-      <origin xyz="0 0 0" rpy="0 0 0"/>
-      <geometry><mesh filename="../../1/coacd/decomp_13.obj" scale="1 1 1"/></geometry>
-    </collision>
-  </link>
-  <joint name="part_1_hull_5_joint" type="fixed">
-    <parent link="box"/>
-    <child link="part_1_hull_5"/>
-    <origin xyz="-0.123681 0.044275 0.1725" rpy="0.0 -1.5707963057214722 0.0"/>
-  </joint>
-  <link name="part_1_hull_6">
-    <visual>
-      <origin xyz="0 0 0" rpy="0 0 0"/>
-      <geometry><mesh filename="../../1/coacd/decomp_14.obj" scale="1 1 1"/></geometry>
-      <material name="placed_1_6"><color rgba="0.6 0.6 0.6 1.0"/></material>
-    </visual>
-    <collision>
-      <origin xyz="0 0 0" rpy="0 0 0"/>
-      <geometry><mesh filename="../../1/coacd/decomp_14.obj" scale="1 1 1"/></geometry>
-    </collision>
-  </link>
-  <joint name="part_1_hull_6_joint" type="fixed">
-    <parent link="box"/>
-    <child link="part_1_hull_6"/>
-    <origin xyz="-0.123681 0.044275 0.1725" rpy="0.0 -1.5707963057214722 0.0"/>
-  </joint>
-  <link name="part_1_hull_7">
-    <visual>
-      <origin xyz="0 0 0" rpy="0 0 0"/>
-      <geometry><mesh filename="../../1/coacd/decomp_15.obj" scale="1 1 1"/></geometry>
-      <material name="placed_1_7"><color rgba="0.6 0.6 0.6 1.0"/></material>
-    </visual>
-    <collision>
-      <origin xyz="0 0 0" rpy="0 0 0"/>
-      <geometry><mesh filename="../../1/coacd/decomp_15.obj" scale="1 1 1"/></geometry>
-    </collision>
-  </link>
-  <joint name="part_1_hull_7_joint" type="fixed">
-    <parent link="box"/>
-    <child link="part_1_hull_7"/>
-    <origin xyz="-0.123681 0.044275 0.1725" rpy="0.0 -1.5707963057214722 0.0"/>
-  </joint>
-  <link name="part_1_hull_8">
-    <visual>
-      <origin xyz="0 0 0" rpy="0 0 0"/>
-      <geometry><mesh filename="../../1/coacd/decomp_2.obj" scale="1 1 1"/></geometry>
-      <material name="placed_1_8"><color rgba="0.6 0.6 0.6 1.0"/></material>
-    </visual>
-    <collision>
-      <origin xyz="0 0 0" rpy="0 0 0"/>
-      <geometry><mesh filename="../../1/coacd/decomp_2.obj" scale="1 1 1"/></geometry>
-    </collision>
-  </link>
-  <joint name="part_1_hull_8_joint" type="fixed">
-    <parent link="box"/>
-    <child link="part_1_hull_8"/>
-    <origin xyz="-0.123681 0.044275 0.1725" rpy="0.0 -1.5707963057214722 0.0"/>
-  </joint>
-  <link name="part_1_hull_9">
-    <visual>
-      <origin xyz="0 0 0" rpy="0 0 0"/>
-      <geometry><mesh filename="../../1/coacd/decomp_3.obj" scale="1 1 1"/></geometry>
-      <material name="placed_1_9"><color rgba="0.6 0.6 0.6 1.0"/></material>
-    </visual>
-    <collision>
-      <origin xyz="0 0 0" rpy="0 0 0"/>
-      <geometry><mesh filename="../../1/coacd/decomp_3.obj" scale="1 1 1"/></geometry>
-    </collision>
-  </link>
-  <joint name="part_1_hull_9_joint" type="fixed">
-    <parent link="box"/>
-    <child link="part_1_hull_9"/>
-    <origin xyz="-0.123681 0.044275 0.1725" rpy="0.0 -1.5707963057214722 0.0"/>
-  </joint>
-  <link name="part_1_hull_10">
-    <visual>
-      <origin xyz="0 0 0" rpy="0 0 0"/>
-      <geometry><mesh filename="../../1/coacd/decomp_4.obj" scale="1 1 1"/></geometry>
-      <material name="placed_1_10"><color rgba="0.6 0.6 0.6 1.0"/></material>
-    </visual>
-    <collision>
-      <origin xyz="0 0 0" rpy="0 0 0"/>
-      <geometry><mesh filename="../../1/coacd/decomp_4.obj" scale="1 1 1"/></geometry>
-    </collision>
-  </link>
-  <joint name="part_1_hull_10_joint" type="fixed">
-    <parent link="box"/>
-    <child link="part_1_hull_10"/>
-    <origin xyz="-0.123681 0.044275 0.1725" rpy="0.0 -1.5707963057214722 0.0"/>
-  </joint>
-  <link name="part_1_hull_11">
-    <visual>
-      <origin xyz="0 0 0" rpy="0 0 0"/>
-      <geometry><mesh filename="../../1/coacd/decomp_5.obj" scale="1 1 1"/></geometry>
-      <material name="placed_1_11"><color rgba="0.6 0.6 0.6 1.0"/></material>
-    </visual>
-    <collision>
-      <origin xyz="0 0 0" rpy="0 0 0"/>
-      <geometry><mesh filename="../../1/coacd/decomp_5.obj" scale="1 1 1"/></geometry>
-    </collision>
-  </link>
-  <joint name="part_1_hull_11_joint" type="fixed">
-    <parent link="box"/>
-    <child link="part_1_hull_11"/>
-    <origin xyz="-0.123681 0.044275 0.1725" rpy="0.0 -1.5707963057214722 0.0"/>
-  </joint>
-  <link name="part_1_hull_12">
-    <visual>
-      <origin xyz="0 0 0" rpy="0 0 0"/>
-      <geometry><mesh filename="../../1/coacd/decomp_6.obj" scale="1 1 1"/></geometry>
-      <material name="placed_1_12"><color rgba="0.6 0.6 0.6 1.0"/></material>
-    </visual>
-    <collision>
-      <origin xyz="0 0 0" rpy="0 0 0"/>
-      <geometry><mesh filename="../../1/coacd/decomp_6.obj" scale="1 1 1"/></geometry>
-    </collision>
-  </link>
-  <joint name="part_1_hull_12_joint" type="fixed">
-    <parent link="box"/>
-    <child link="part_1_hull_12"/>
-    <origin xyz="-0.123681 0.044275 0.1725" rpy="0.0 -1.5707963057214722 0.0"/>
-  </joint>
-  <link name="part_1_hull_13">
-    <visual>
-      <origin xyz="0 0 0" rpy="0 0 0"/>
-      <geometry><mesh filename="../../1/coacd/decomp_7.obj" scale="1 1 1"/></geometry>
-      <material name="placed_1_13"><color rgba="0.6 0.6 0.6 1.0"/></material>
-    </visual>
-    <collision>
-      <origin xyz="0 0 0" rpy="0 0 0"/>
-      <geometry><mesh filename="../../1/coacd/decomp_7.obj" scale="1 1 1"/></geometry>
-    </collision>
-  </link>
-  <joint name="part_1_hull_13_joint" type="fixed">
-    <parent link="box"/>
-    <child link="part_1_hull_13"/>
-    <origin xyz="-0.123681 0.044275 0.1725" rpy="0.0 -1.5707963057214722 0.0"/>
-  </joint>
-  <link name="part_1_hull_14">
-    <visual>
-      <origin xyz="0 0 0" rpy="0 0 0"/>
-      <geometry><mesh filename="../../1/coacd/decomp_8.obj" scale="1 1 1"/></geometry>
-      <material name="placed_1_14"><color rgba="0.6 0.6 0.6 1.0"/></material>
-    </visual>
-    <collision>
-      <origin xyz="0 0 0" rpy="0 0 0"/>
-      <geometry><mesh filename="../../1/coacd/decomp_8.obj" scale="1 1 1"/></geometry>
-    </collision>
-  </link>
-  <joint name="part_1_hull_14_joint" type="fixed">
-    <parent link="box"/>
-    <child link="part_1_hull_14"/>
-    <origin xyz="-0.123681 0.044275 0.1725" rpy="0.0 -1.5707963057214722 0.0"/>
-  </joint>
-  <link name="part_1_hull_15">
-    <visual>
-      <origin xyz="0 0 0" rpy="0 0 0"/>
-      <geometry><mesh filename="../../1/coacd/decomp_9.obj" scale="1 1 1"/></geometry>
-      <material name="placed_1_15"><color rgba="0.6 0.6 0.6 1.0"/></material>
-    </visual>
-    <collision>
-      <origin xyz="0 0 0" rpy="0 0 0"/>
-      <geometry><mesh filename="../../1/coacd/decomp_9.obj" scale="1 1 1"/></geometry>
-    </collision>
-  </link>
-  <joint name="part_1_hull_15_joint" type="fixed">
-    <parent link="box"/>
-    <child link="part_1_hull_15"/>
-    <origin xyz="-0.123681 0.044275 0.1725" rpy="0.0 -1.5707963057214722 0.0"/>
-  </joint>
-  <link name="part_0_hull_0">
-    <visual>
-      <origin xyz="0 0 0" rpy="0 0 0"/>
-      <geometry><mesh filename="../../0/coacd/decomp_0.obj" scale="1 1 1"/></geometry>
-      <material name="placed_0_0"><color rgba="0.6 0.6 0.6 1.0"/></material>
-    </visual>
-    <collision>
-      <origin xyz="0 0 0" rpy="0 0 0"/>
-      <geometry><mesh filename="../../0/coacd/decomp_0.obj" scale="1 1 1"/></geometry>
-    </collision>
-  </link>
-  <joint name="part_0_hull_0_joint" type="fixed">
-    <parent link="box"/>
-    <child link="part_0_hull_0"/>
-    <origin xyz="-0.099738 0.028972 0.17926699999999995" rpy="0.0 -1.5707963057214722 0.0"/>
-  </joint>
-  <link name="part_0_hull_1">
-    <visual>
-      <origin xyz="0 0 0" rpy="0 0 0"/>
-      <geometry><mesh filename="../../0/coacd/decomp_1.obj" scale="1 1 1"/></geometry>
-      <material name="placed_0_1"><color rgba="0.6 0.6 0.6 1.0"/></material>
-    </visual>
-    <collision>
-      <origin xyz="0 0 0" rpy="0 0 0"/>
-      <geometry><mesh filename="../../0/coacd/decomp_1.obj" scale="1 1 1"/></geometry>
-    </collision>
-  </link>
-  <joint name="part_0_hull_1_joint" type="fixed">
-    <parent link="box"/>
-    <child link="part_0_hull_1"/>
-    <origin xyz="-0.099738 0.028972 0.17926699999999995" rpy="0.0 -1.5707963057214722 0.0"/>
-  </joint>
-  <link name="part_0_hull_2">
-    <visual>
-      <origin xyz="0 0 0" rpy="0 0 0"/>
-      <geometry><mesh filename="../../0/coacd/decomp_2.obj" scale="1 1 1"/></geometry>
-      <material name="placed_0_2"><color rgba="0.6 0.6 0.6 1.0"/></material>
-    </visual>
-    <collision>
-      <origin xyz="0 0 0" rpy="0 0 0"/>
-      <geometry><mesh filename="../../0/coacd/decomp_2.obj" scale="1 1 1"/></geometry>
-    </collision>
-  </link>
-  <joint name="part_0_hull_2_joint" type="fixed">
-    <parent link="box"/>
-    <child link="part_0_hull_2"/>
+    <child link="part_0"/>
     <origin xyz="-0.099738 0.028972 0.17926699999999995" rpy="0.0 -1.5707963057214722 0.0"/>
   </joint>
 </robot>

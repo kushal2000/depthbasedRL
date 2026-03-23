@@ -185,15 +185,24 @@ def _generate_sdf_table(assembly: str, active_pid: str, completed_pids: List[str
 
 
 def _generate_coacd_table(assembly: str, active_pid: str, completed_pids: List[str],
-                          env_dir: Path, coacd_target_pid: str = None):
-    """CoACD table: uses CoACD decomp for the insertion target part, raw mesh for others.
+                          env_dir: Path, coacd_target_pids=None):
+    """CoACD table: uses CoACD decomp for the insertion target part(s), raw mesh for others.
 
     Args:
-        coacd_target_pid: The part the active part inserts into. Only this part
-            gets full CoACD decomposition. Other completed parts use a single
-            raw mesh (IsaacGym auto-computes convex hull). If None, all parts
-            use CoACD (backward compatible).
+        coacd_target_pids: The part(s) the active part inserts into. Can be a
+            single string or a list of strings. Only these parts get full CoACD
+            decomposition. Other completed parts use a single raw mesh
+            (IsaacGym auto-computes convex hull). If None, all parts use CoACD
+            (backward compatible).
     """
+    # Normalize to a set for fast lookup
+    if coacd_target_pids is None:
+        target_set = None  # means "all"
+    elif isinstance(coacd_target_pids, str):
+        target_set = {coacd_target_pids}
+    else:
+        target_set = set(coacd_target_pids)
+
     lines = [
         '<?xml version="1.0"?>',
         f'<robot name="table_{assembly}_{active_pid}_scene_coacd">',
@@ -206,7 +215,7 @@ def _generate_coacd_table(assembly: str, active_pid: str, completed_pids: List[s
             continue
         rx, ry, rz, roll, pitch, yaw = offset
 
-        use_coacd = (coacd_target_pid is None) or (pid == coacd_target_pid)
+        use_coacd = (target_set is None) or (pid in target_set)
 
         if use_coacd:
             # Full CoACD decomposition: multiple sub-links per part
@@ -316,8 +325,12 @@ def generate_all_tables(assembly: str):
         env_dir.mkdir(parents=True, exist_ok=True)
 
         coacd_target = inserts_into.get(active_pid, None)
+        if isinstance(coacd_target, list):
+            target_label = ", ".join(coacd_target)
+        else:
+            target_label = coacd_target or "all"
         print(f"\n  Step {step_idx}: Part {active_pid} (completed: {completed_pids}, "
-              f"CoACD target: {coacd_target or 'all'})")
+              f"CoACD target: {target_label})")
 
         vhacd_path = _generate_vhacd_table(assembly, active_pid, completed_pids, env_dir)
         print(f"    VHACD: {vhacd_path.name}")
@@ -326,7 +339,7 @@ def generate_all_tables(assembly: str):
         print(f"    SDF:   {sdf_path.name}")
 
         coacd_path = _generate_coacd_table(assembly, active_pid, completed_pids, env_dir,
-                                           coacd_target_pid=coacd_target)
+                                           coacd_target_pids=coacd_target)
         print(f"    CoACD: {coacd_path.name}")
 
     print(f"\nDone. Generated URDFs for {len(available)} steps.")
