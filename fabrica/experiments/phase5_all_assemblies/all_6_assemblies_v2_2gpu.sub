@@ -7,22 +7,26 @@
 #SBATCH -t 7-00:00:00
 #SBATCH --partition=portal
 #SBATCH --exclude=portal-compute-01
-#SBATCH --gres=gpu:1
+#SBATCH --gres=gpu:2
 #SBATCH -o /dev/null
 #SBATCH -e /dev/null
 
 # ╔══════════════════════════════════════════════════════════════╗
-# ║  Phase 5 — 5 Assemblies (28 parts, no plumbers_block)      ║
-# ║  beam, car, cooling_manifold, gamepad, stool_circular       ║
+# ║  Phase 5 v2 — All 6 Assemblies (38 parts incl. base parts) ║
+# ║  beam, car, cooling_manifold, gamepad,                      ║
+# ║  plumbers_block, stool_circular                             ║
+# ║  With inserts_into mappings for reduced scene complexity    ║
 # ╚══════════════════════════════════════════════════════════════╝
 
 # ── Multi-Part Object Names ────────────────────────────────────
-# 28 insertion parts across 5 assemblies (base parts excluded)
-OBJECT_NAMES='["beam_2_coacd","beam_0_coacd","beam_3_coacd","beam_1_coacd","car_1_coacd","car_0_coacd","car_4_coacd","car_5_coacd","car_3_coacd","cooling_manifold_0_coacd","cooling_manifold_4_coacd","cooling_manifold_6_coacd","cooling_manifold_2_coacd","cooling_manifold_3_coacd","cooling_manifold_5_coacd","gamepad_4_coacd","gamepad_1_coacd","gamepad_0_coacd","gamepad_5_coacd","gamepad_2_coacd","stool_circular_1_coacd","stool_circular_0_coacd","stool_circular_5_coacd","stool_circular_8_coacd","stool_circular_7_coacd","stool_circular_4_coacd","stool_circular_3_coacd","stool_circular_6_coacd"]'
+# 38 parts across 6 assemblies (including base parts)
+OBJECT_NAMES='["beam_6_coacd","beam_2_coacd","beam_0_coacd","beam_3_coacd","beam_1_coacd","car_2_coacd","car_1_coacd","car_0_coacd","car_4_coacd","car_5_coacd","car_3_coacd","cooling_manifold_1_coacd","cooling_manifold_0_coacd","cooling_manifold_4_coacd","cooling_manifold_6_coacd","cooling_manifold_2_coacd","cooling_manifold_3_coacd","cooling_manifold_5_coacd","gamepad_3_coacd","gamepad_4_coacd","gamepad_1_coacd","gamepad_0_coacd","gamepad_5_coacd","gamepad_2_coacd","plumbers_block_2_coacd","plumbers_block_0_coacd","plumbers_block_3_coacd","plumbers_block_1_coacd","plumbers_block_4_coacd","stool_circular_2_coacd","stool_circular_1_coacd","stool_circular_0_coacd","stool_circular_5_coacd","stool_circular_8_coacd","stool_circular_7_coacd","stool_circular_4_coacd","stool_circular_3_coacd","stool_circular_6_coacd"]'
 
 # ── Training Details ──────────────────────────────────────────
+# With multi_gpu, each GPU runs NUM_ENVS independently and syncs gradients.
+# Halve envs per GPU so each fits in VRAM (effective total: 12288 × 2 = 24576).
 CHECKPOINT="/share/portal/kk837/depthbasedRL/pretrained_policy/model.pth"
-NUM_ENVS=24576
+NUM_ENVS=12288
 MINIBATCH_SIZE=98304
 SEED=0
 
@@ -52,7 +56,7 @@ RETRACT_SUCCESS_TOLERANCE=0.005
 # ── Weights & Biases ─────────────────────────────────────────
 WANDB_PROJECT="FABRICA_TRAINING"
 WANDB_GROUP="fabrica_phase5_all_assemblies"
-EXPERIMENT_TAG="5_assemblies_no_plumbers"
+EXPERIMENT_TAG="all_6_assemblies_v2_2gpu"
 
 # ╔══════════════════════════════════════════════════════════════╗
 # ║         END CONFIG — generally don't edit below here        ║
@@ -80,6 +84,7 @@ if [ -n "$CHECKPOINT" ]; then
 fi
 
 # ── GPU monitoring (background) ─────────────────────────────
+# Log initial GPU state
 echo "=== Initial GPU State ==="
 nvidia-smi
 echo ""
@@ -100,20 +105,20 @@ trap "kill $GPU_MONITOR_PID 2>/dev/null" EXIT
 cd "$REPO_ROOT"
 source .venv/bin/activate
 
-python -u -m isaacgymenvs.train \
+torchrun --standalone --nnodes=1 --nproc_per_node=2 -m isaacgymenvs.train \
     task=FabricaEnvLSTMAsymmetric \
     ++task.env.useSparseReward=False \
     headless=True \
     task.env.numEnvs=$NUM_ENVS \
     train.params.config.minibatch_size=$MINIBATCH_SIZE \
-    multi_gpu=False \
+    multi_gpu=True \
     train.params.config.good_reset_boundary=0 \
     task.env.goodResetBoundary=0 \
     train.params.config.use_others_experience=lf \
     train.params.config.off_policy_ratio=1.0 \
     train.params.config.expl_type=mixed_expl_learn_param \
     train.params.config.expl_reward_type=entropy \
-    train.params.config.expl_coef_block_size=4096 \
+    train.params.config.expl_coef_block_size=2048 \
     train.params.config.expl_reward_coef_scale=0.005 \
     train.params.network.space.continuous.fixed_sigma=coef_cond \
     task.env.forceScale=$FORCE_SCALE \

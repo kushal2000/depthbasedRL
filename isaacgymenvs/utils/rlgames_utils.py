@@ -103,8 +103,8 @@ def get_rlgames_env_creator(
 
             print(f"global_rank = {global_rank} local_rank = {local_rank} world_size = {world_size}")
 
-            _sim_device = f'cuda:0'
-            _rl_device = f'cuda:0'
+            _sim_device = f'cuda:{local_rank}'
+            _rl_device = f'cuda:{local_rank}'
 
             task_config['rank'] = local_rank
             task_config['rl_device'] = _rl_device
@@ -113,11 +113,12 @@ def get_rlgames_env_creator(
             _rl_device = rl_device
 
         # create native task and pass custom config
+        _graphics_device_id = local_rank if multi_gpu else graphics_device_id
         env = isaacgym_task_map[task_name](
             cfg=task_config,
             rl_device=_rl_device,
             sim_device=_sim_device,
-            graphics_device_id=graphics_device_id,
+            graphics_device_id=_graphics_device_id,
             headless=headless,
             virtual_screen_capture=virtual_screen_capture,
             force_render=force_render,

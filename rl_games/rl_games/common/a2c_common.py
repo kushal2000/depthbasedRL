@@ -108,7 +108,7 @@ class A2CBase(BaseAlgorithm):
             import hashlib
             dist.init_process_group("gloo", rank=self.global_rank, world_size=self.world_size, init_method=f'tcp://127.0.0.1:{23400 + int(hashlib.md5(self.experiment_name[3:].encode("utf-8")).hexdigest(), 16) % 500}')
 
-            self.device_name = 'cuda:0' # DEBUG
+            self.device_name = f'cuda:{self.local_rank}'
             config['device'] = self.device_name
             if self.global_rank != 0:
                 config['print_stats'] = False
