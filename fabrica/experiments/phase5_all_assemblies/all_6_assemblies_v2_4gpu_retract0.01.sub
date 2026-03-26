@@ -105,7 +105,7 @@ trap "kill $GPU_MONITOR_PID 2>/dev/null" EXIT
 cd "$REPO_ROOT"
 source .venv/bin/activate
 
-export GLOO_TIMEOUT_MS=7200000  # 2 hour timeout for gloo operations
+export OMP_NUM_THREADS=6  # 24 CPUs / 4 ranks = 6 threads per rank
 torchrun --standalone --nnodes=1 --nproc_per_node=4 -m isaacgymenvs.train \
     task=FabricaEnvLSTMAsymmetric \
     ++task.env.useSparseReward=False \
