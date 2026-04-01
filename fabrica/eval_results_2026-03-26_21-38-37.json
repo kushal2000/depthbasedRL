@@ -1,0 +1,1119 @@
+{
+  "metadata": {
+    "timestamp": "2026-03-26_21-38-37",
+    "collision_method": "coacd",
+    "num_tasks": 38,
+    "total_wall_time_s": 5908.6,
+    "policies": {
+      "pretrained": {
+        "config": "/share/portal/kk837/depthbasedRL/pretrained_policy/config.yaml",
+        "checkpoint": "/share/portal/kk837/depthbasedRL/pretrained_policy/model.pth"
+      },
+      "beam_policy": {
+        "config": "/share/portal/kk837/depthbasedRL/train_dir/FABRICA_TRAINING/fabrica_phase4_unified/all_beam_parts_no_curriculum_retracttol0.005_2026-03-19_19-02-32/runs/00_all_beam_parts_no_curriculum_retracttol0.005_2026-03-19_19-02-32/config.yaml",
+        "checkpoint": "/share/portal/kk837/depthbasedRL/train_dir/FABRICA_TRAINING/fabrica_phase4_unified/all_beam_parts_no_curriculum_retracttol0.005_2026-03-19_19-02-32/runs/00_all_beam_parts_no_curriculum_retracttol0.005_2026-03-19_19-02-32/nn/last_00_all_beam_parts_no_curriculum_retracttol0.005_2026-03-19_19-02-32_ep_243000_rew_13263.113.pth"
+      },
+      "all_assemblies_policy": {
+        "config": "/share/portal/kk837/depthbasedRL/train_dir/FABRICA_TRAINING/fabrica_phase5_all_assemblies/all_6_assemblies_v2_2gpu_2026-03-23_21-10-45/runs/00_all_6_assemblies_v2_2gpu_2026-03-23_21-10-45/config.yaml",
+        "checkpoint": "/share/portal/kk837/depthbasedRL/train_dir/FABRICA_TRAINING/fabrica_phase5_all_assemblies/all_6_assemblies_v2_2gpu_2026-03-23_21-10-45/runs/00_all_6_assemblies_v2_2gpu_2026-03-23_21-10-45/nn/last_00_all_6_assemblies_v2_2gpu_2026-03-23_21-10-45_ep_243000_rew_12387.344.pth"
+      }
+    },
+    "tasks": [
+      {
+        "assembly": "beam",
+        "part_id": "6"
+      },
+      {
+        "assembly": "beam",
+        "part_id": "2"
+      },
+      {
+        "assembly": "beam",
+        "part_id": "0"
+      },
+      {
+        "assembly": "beam",
+        "part_id": "3"
+      },
+      {
+        "assembly": "beam",
+        "part_id": "1"
+      },
+      {
+        "assembly": "car",
+        "part_id": "2"
+      },
+      {
+        "assembly": "car",
+        "part_id": "1"
+      },
+      {
+        "assembly": "car",
+        "part_id": "0"
+      },
+      {
+        "assembly": "car",
+        "part_id": "4"
+      },
+      {
+        "assembly": "car",
+        "part_id": "5"
+      },
+      {
+        "assembly": "car",
+        "part_id": "3"
+      },
+      {
+        "assembly": "cooling_manifold",
+        "part_id": "1"
+      },
+      {
+        "assembly": "cooling_manifold",
+        "part_id": "0"
+      },
+      {
+        "assembly": "cooling_manifold",
+        "part_id": "4"
+      },
+      {
+        "assembly": "cooling_manifold",
+        "part_id": "6"
+      },
+      {
+        "assembly": "cooling_manifold",
+        "part_id": "2"
+      },
+      {
+        "assembly": "cooling_manifold",
+        "part_id": "3"
+      },
+      {
+        "assembly": "cooling_manifold",
+        "part_id": "5"
+      },
+      {
+        "assembly": "gamepad",
+        "part_id": "3"
+      },
+      {
+        "assembly": "gamepad",
+        "part_id": "4"
+      },
+      {
+        "assembly": "gamepad",
+        "part_id": "1"
+      },
+      {
+        "assembly": "gamepad",
+        "part_id": "0"
+      },
+      {
+        "assembly": "gamepad",
+        "part_id": "5"
+      },
+      {
+        "assembly": "gamepad",
+        "part_id": "2"
+      },
+      {
+        "assembly": "plumbers_block",
+        "part_id": "2"
+      },
+      {
+        "assembly": "plumbers_block",
+        "part_id": "0"
+      },
+      {
+        "assembly": "plumbers_block",
+        "part_id": "3"
+      },
+      {
+        "assembly": "plumbers_block",
+        "part_id": "1"
+      },
+      {
+        "assembly": "plumbers_block",
+        "part_id": "4"
+      },
+      {
+        "assembly": "stool_circular",
+        "part_id": "2"
+      },
+      {
+        "assembly": "stool_circular",
+        "part_id": "1"
+      },
+      {
+        "assembly": "stool_circular",
+        "part_id": "0"
+      },
+      {
+        "assembly": "stool_circular",
+        "part_id": "5"
+      },
+      {
+        "assembly": "stool_circular",
+        "part_id": "8"
+      },
+      {
+        "assembly": "stool_circular",
+        "part_id": "7"
+      },
+      {
+        "assembly": "stool_circular",
+        "part_id": "4"
+      },
+      {
+        "assembly": "stool_circular",
+        "part_id": "3"
+      },
+      {
+        "assembly": "stool_circular",
+        "part_id": "6"
+      }
+    ]
+  },
+  "results": {
+    "pretrained": {
+      "beam": {
+        "6": {
+          "goal_pct": 91.66666666666667,
+          "steps": 1386,
+          "retract_ok": false,
+          "error": null,
+          "wall_time_s": 77.5
+        },
+        "2": {
+          "goal_pct": 41.666666666666664,
+          "steps": 1014,
+          "retract_ok": false,
+          "error": null,
+          "wall_time_s": 46.3
+        },
+        "0": {
+          "goal_pct": 91.66666666666667,
+          "steps": 1381,
+          "retract_ok": false,
+          "error": null,
+          "wall_time_s": 61.1
+        },
+        "3": {
+          "goal_pct": 0.0,
+          "steps": 598,
+          "retract_ok": false,
+          "error": null,
+          "wall_time_s": 37.9
+        },
+        "1": {
+          "goal_pct": 0.0,
+          "steps": 598,
+          "retract_ok": false,
+          "error": null,
+          "wall_time_s": 34.3
+        }
+      },
+      "car": {
+        "2": {
+          "goal_pct": 16.666666666666668,
+          "steps": 434,
+          "retract_ok": false,
+          "error": null,
+          "wall_time_s": 25.1
+        },
+        "1": {
+          "goal_pct": 50.0,
+          "steps": 842,
+          "retract_ok": false,
+          "error": null,
+          "wall_time_s": 37.3
+        },
+        "0": {
+          "goal_pct": 0.0,
+          "steps": 598,
+          "retract_ok": false,
+          "error": null,
+          "wall_time_s": 35.8
+        },
+        "4": {
+          "goal_pct": 50.0,
+          "steps": 1779,
+          "retract_ok": false,
+          "error": null,
+          "wall_time_s": 74.0
+        },
+        "5": {
+          "goal_pct": 8.333333333333334,
+          "steps": 1194,
+          "retract_ok": false,
+          "error": null,
+          "wall_time_s": 57.2
+        },
+        "3": {
+          "goal_pct": 16.666666666666668,
+          "steps": 898,
+          "retract_ok": false,
+          "error": null,
+          "wall_time_s": 47.2
+        }
+      },
+      "cooling_manifold": {
+        "1": {
+          "goal_pct": 50.0,
+          "steps": 933,
+          "retract_ok": false,
+          "error": null,
+          "wall_time_s": 49.5
+        },
+        "0": {
+          "goal_pct": 0.0,
+          "steps": 450,
+          "retract_ok": false,
+          "error": null,
+          "wall_time_s": 36.7
+        },
+        "4": {
+          "goal_pct": 83.33333333333333,
+          "steps": 1536,
+          "retract_ok": false,
+          "error": null,
+          "wall_time_s": 83.9
+        },
+        "6": {
+          "goal_pct": 8.333333333333334,
+          "steps": 1037,
+          "retract_ok": false,
+          "error": null,
+          "wall_time_s": 61.7
+        },
+        "2": {
+          "goal_pct": 0.0,
+          "steps": 330,
+          "retract_ok": false,
+          "error": null,
+          "wall_time_s": 32.4
+        },
+        "3": {
+          "goal_pct": 0.0,
+          "steps": 598,
+          "retract_ok": false,
+          "error": null,
+          "wall_time_s": 43.9
+        },
+        "5": {
+          "goal_pct": 0.0,
+          "steps": 598,
+          "retract_ok": false,
+          "error": null,
+          "wall_time_s": 43.2
+        }
+      },
+      "gamepad": {
+        "3": {
+          "goal_pct": 83.33333333333333,
+          "steps": 1137,
+          "retract_ok": false,
+          "error": null,
+          "wall_time_s": 51.2
+        },
+        "4": {
+          "goal_pct": 0.0,
+          "steps": 598,
+          "retract_ok": false,
+          "error": null,
+          "wall_time_s": 41.7
+        },
+        "1": {
+          "goal_pct": 0.0,
+          "steps": 598,
+          "retract_ok": false,
+          "error": null,
+          "wall_time_s": 41.9
+        },
+        "0": {
+          "goal_pct": 0.0,
+          "steps": 598,
+          "retract_ok": false,
+          "error": null,
+          "wall_time_s": 42.7
+        },
+        "5": {
+          "goal_pct": 0.0,
+          "steps": 598,
+          "retract_ok": false,
+          "error": null,
+          "wall_time_s": 42.4
+        },
+        "2": {
+          "goal_pct": 0.0,
+          "steps": 598,
+          "retract_ok": false,
+          "error": null,
+          "wall_time_s": 44.0
+        }
+      },
+      "plumbers_block": {
+        "2": {
+          "goal_pct": 66.66666666666667,
+          "steps": 898,
+          "retract_ok": false,
+          "error": null,
+          "wall_time_s": 40.9
+        },
+        "0": {
+          "goal_pct": 50.0,
+          "steps": 972,
+          "retract_ok": false,
+          "error": null,
+          "wall_time_s": 49.2
+        },
+        "3": {
+          "goal_pct": 91.66666666666667,
+          "steps": 1080,
+          "retract_ok": false,
+          "error": null,
+          "wall_time_s": 51.4
+        },
+        "1": {
+          "goal_pct": 25.0,
+          "steps": 843,
+          "retract_ok": false,
+          "error": null,
+          "wall_time_s": 48.1
+        },
+        "4": {
+          "goal_pct": 66.66666666666667,
+          "steps": 1025,
+          "retract_ok": false,
+          "error": null,
+          "wall_time_s": 51.5
+        }
+      },
+      "stool_circular": {
+        "2": {
+          "goal_pct": 58.333333333333336,
+          "steps": 1888,
+          "retract_ok": false,
+          "error": null,
+          "wall_time_s": 75.5
+        },
+        "1": {
+          "goal_pct": 91.66666666666667,
+          "steps": 1912,
+          "retract_ok": false,
+          "error": null,
+          "wall_time_s": 101.4
+        },
+        "0": {
+          "goal_pct": 0.0,
+          "steps": 598,
+          "retract_ok": false,
+          "error": null,
+          "wall_time_s": 34.5
+        },
+        "5": {
+          "goal_pct": 83.33333333333333,
+          "steps": 1174,
+          "retract_ok": false,
+          "error": null,
+          "wall_time_s": 68.3
+        },
+        "8": {
+          "goal_pct": 0.0,
+          "steps": 598,
+          "retract_ok": false,
+          "error": null,
+          "wall_time_s": 35.6
+        },
+        "7": {
+          "goal_pct": 83.33333333333333,
+          "steps": 1572,
+          "retract_ok": false,
+          "error": null,
+          "wall_time_s": 86.1
+        },
+        "4": {
+          "goal_pct": 75.0,
+          "steps": 951,
+          "retract_ok": false,
+          "error": null,
+          "wall_time_s": 44.5
+        },
+        "3": {
+          "goal_pct": 83.33333333333333,
+          "steps": 1193,
+          "retract_ok": false,
+          "error": null,
+          "wall_time_s": 71.0
+        },
+        "6": {
+          "goal_pct": 0.0,
+          "steps": 598,
+          "retract_ok": false,
+          "error": null,
+          "wall_time_s": 34.8
+        }
+      }
+    },
+    "beam_policy": {
+      "beam": {
+        "6": {
+          "goal_pct": 100.0,
+          "steps": 269,
+          "retract_ok": true,
+          "error": null,
+          "wall_time_s": 27.5
+        },
+        "2": {
+          "goal_pct": 100.0,
+          "steps": 288,
+          "retract_ok": true,
+          "error": null,
+          "wall_time_s": 26.6
+        },
+        "0": {
+          "goal_pct": 100.0,
+          "steps": 383,
+          "retract_ok": true,
+          "error": null,
+          "wall_time_s": 28.7
+        },
+        "3": {
+          "goal_pct": 100.0,
+          "steps": 287,
+          "retract_ok": true,
+          "error": null,
+          "wall_time_s": 25.7
+        },
+        "1": {
+          "goal_pct": 100.0,
+          "steps": 333,
+          "retract_ok": true,
+          "error": null,
+          "wall_time_s": 28.0
+        }
+      },
+      "car": {
+        "2": {
+          "goal_pct": 0.0,
+          "steps": 598,
+          "retract_ok": false,
+          "error": null,
+          "wall_time_s": 31.0
+        },
+        "1": {
+          "goal_pct": 50.0,
+          "steps": 1179,
+          "retract_ok": false,
+          "error": null,
+          "wall_time_s": 51.0
+        },
+        "0": {
+          "goal_pct": 0.0,
+          "steps": 598,
+          "retract_ok": false,
+          "error": null,
+          "wall_time_s": 36.2
+        },
+        "4": {
+          "goal_pct": 0.0,
+          "steps": 598,
+          "retract_ok": false,
+          "error": null,
+          "wall_time_s": 36.7
+        },
+        "5": {
+          "goal_pct": 0.0,
+          "steps": 184,
+          "retract_ok": false,
+          "error": null,
+          "wall_time_s": 25.7
+        },
+        "3": {
+          "goal_pct": 0.0,
+          "steps": 598,
+          "retract_ok": false,
+          "error": null,
+          "wall_time_s": 48.4
+        }
+      },
+      "cooling_manifold": {
+        "1": {
+          "goal_pct": 0.0,
+          "steps": 598,
+          "retract_ok": false,
+          "error": null,
+          "wall_time_s": 38.7
+        },
+        "0": {
+          "goal_pct": 41.666666666666664,
+          "steps": 1260,
+          "retract_ok": false,
+          "error": null,
+          "wall_time_s": 72.6
+        },
+        "4": {
+          "goal_pct": 58.333333333333336,
+          "steps": 1315,
+          "retract_ok": false,
+          "error": null,
+          "wall_time_s": 77.4
+        },
+        "6": {
+          "goal_pct": 58.333333333333336,
+          "steps": 951,
+          "retract_ok": false,
+          "error": null,
+          "wall_time_s": 60.9
+        },
+        "2": {
+          "goal_pct": 0.0,
+          "steps": 598,
+          "retract_ok": false,
+          "error": null,
+          "wall_time_s": 43.1
+        },
+        "3": {
+          "goal_pct": 0.0,
+          "steps": 598,
+          "retract_ok": false,
+          "error": null,
+          "wall_time_s": 44.0
+        },
+        "5": {
+          "goal_pct": 0.0,
+          "steps": 598,
+          "retract_ok": false,
+          "error": null,
+          "wall_time_s": 46.8
+        }
+      },
+      "gamepad": {
+        "3": {
+          "goal_pct": 100.0,
+          "steps": 1411,
+          "retract_ok": false,
+          "error": null,
+          "wall_time_s": 63.0
+        },
+        "4": {
+          "goal_pct": 33.333333333333336,
+          "steps": 797,
+          "retract_ok": false,
+          "error": null,
+          "wall_time_s": 51.1
+        },
+        "1": {
+          "goal_pct": 58.333333333333336,
+          "steps": 1449,
+          "retract_ok": false,
+          "error": null,
+          "wall_time_s": 77.6
+        },
+        "0": {
+          "goal_pct": 0.0,
+          "steps": 598,
+          "retract_ok": false,
+          "error": null,
+          "wall_time_s": 52.0
+        },
+        "5": {
+          "goal_pct": 0.0,
+          "steps": 598,
+          "retract_ok": false,
+          "error": null,
+          "wall_time_s": 44.9
+        },
+        "2": {
+          "goal_pct": 25.0,
+          "steps": 1046,
+          "retract_ok": false,
+          "error": null,
+          "wall_time_s": 68.7
+        }
+      },
+      "plumbers_block": {
+        "2": {
+          "goal_pct": 66.66666666666667,
+          "steps": 1179,
+          "retract_ok": false,
+          "error": null,
+          "wall_time_s": 50.6
+        },
+        "0": {
+          "goal_pct": 50.0,
+          "steps": 925,
+          "retract_ok": false,
+          "error": null,
+          "wall_time_s": 48.5
+        },
+        "3": {
+          "goal_pct": 0.0,
+          "steps": 598,
+          "retract_ok": false,
+          "error": null,
+          "wall_time_s": 38.7
+        },
+        "1": {
+          "goal_pct": 41.666666666666664,
+          "steps": 828,
+          "retract_ok": false,
+          "error": null,
+          "wall_time_s": 49.2
+        },
+        "4": {
+          "goal_pct": 0.0,
+          "steps": 598,
+          "retract_ok": false,
+          "error": null,
+          "wall_time_s": 42.4
+        }
+      },
+      "stool_circular": {
+        "2": {
+          "goal_pct": 0.0,
+          "steps": 598,
+          "retract_ok": false,
+          "error": null,
+          "wall_time_s": 42.7
+        },
+        "1": {
+          "goal_pct": 66.66666666666667,
+          "steps": 1028,
+          "retract_ok": false,
+          "error": null,
+          "wall_time_s": 63.8
+        },
+        "0": {
+          "goal_pct": 91.66666666666667,
+          "steps": 1122,
+          "retract_ok": false,
+          "error": null,
+          "wall_time_s": 52.2
+        },
+        "5": {
+          "goal_pct": 75.0,
+          "steps": 1118,
+          "retract_ok": false,
+          "error": null,
+          "wall_time_s": 66.4
+        },
+        "8": {
+          "goal_pct": 83.33333333333333,
+          "steps": 1681,
+          "retract_ok": false,
+          "error": null,
+          "wall_time_s": 66.6
+        },
+        "7": {
+          "goal_pct": 66.66666666666667,
+          "steps": 886,
+          "retract_ok": false,
+          "error": null,
+          "wall_time_s": 57.3
+        },
+        "4": {
+          "goal_pct": 0.0,
+          "steps": 598,
+          "retract_ok": false,
+          "error": null,
+          "wall_time_s": 36.7
+        },
+        "3": {
+          "goal_pct": 75.0,
+          "steps": 1391,
+          "retract_ok": false,
+          "error": null,
+          "wall_time_s": 80.0
+        },
+        "6": {
+          "goal_pct": 16.666666666666668,
+          "steps": 1283,
+          "retract_ok": false,
+          "error": null,
+          "wall_time_s": 55.2
+        }
+      }
+    },
+    "all_assemblies_policy": {
+      "beam": {
+        "6": {
+          "goal_pct": 100.0,
+          "steps": 332,
+          "retract_ok": true,
+          "error": null,
+          "wall_time_s": 24.3
+        },
+        "2": {
+          "goal_pct": 100.0,
+          "steps": 416,
+          "retract_ok": true,
+          "error": null,
+          "wall_time_s": 28.0
+        },
+        "0": {
+          "goal_pct": 91.66666666666667,
+          "steps": 1004,
+          "retract_ok": false,
+          "error": null,
+          "wall_time_s": 48.7
+        },
+        "3": {
+          "goal_pct": 100.0,
+          "steps": 735,
+          "retract_ok": true,
+          "error": null,
+          "wall_time_s": 40.7
+        },
+        "1": {
+          "goal_pct": 91.66666666666667,
+          "steps": 1027,
+          "retract_ok": false,
+          "error": null,
+          "wall_time_s": 52.0
+        }
+      },
+      "car": {
+        "2": {
+          "goal_pct": 100.0,
+          "steps": 501,
+          "retract_ok": true,
+          "error": null,
+          "wall_time_s": 30.7
+        },
+        "1": {
+          "goal_pct": 100.0,
+          "steps": 449,
+          "retract_ok": true,
+          "error": null,
+          "wall_time_s": 27.3
+        },
+        "0": {
+          "goal_pct": 91.66666666666667,
+          "steps": 997,
+          "retract_ok": false,
+          "error": null,
+          "wall_time_s": 49.4
+        },
+        "4": {
+          "goal_pct": 91.66666666666667,
+          "steps": 1085,
+          "retract_ok": false,
+          "error": null,
+          "wall_time_s": 53.2
+        },
+        "5": {
+          "goal_pct": 75.0,
+          "steps": 1032,
+          "retract_ok": false,
+          "error": null,
+          "wall_time_s": 51.5
+        },
+        "3": {
+          "goal_pct": 91.66666666666667,
+          "steps": 1024,
+          "retract_ok": false,
+          "error": null,
+          "wall_time_s": 53.3
+        }
+      },
+      "cooling_manifold": {
+        "1": {
+          "goal_pct": 100.0,
+          "steps": 867,
+          "retract_ok": true,
+          "error": null,
+          "wall_time_s": 45.9
+        },
+        "0": {
+          "goal_pct": 91.66666666666667,
+          "steps": 915,
+          "retract_ok": false,
+          "error": null,
+          "wall_time_s": 57.8
+        },
+        "4": {
+          "goal_pct": 91.66666666666667,
+          "steps": 1047,
+          "retract_ok": false,
+          "error": null,
+          "wall_time_s": 61.1
+        },
+        "6": {
+          "goal_pct": 91.66666666666667,
+          "steps": 991,
+          "retract_ok": false,
+          "error": null,
+          "wall_time_s": 59.3
+        },
+        "2": {
+          "goal_pct": 91.66666666666667,
+          "steps": 945,
+          "retract_ok": false,
+          "error": null,
+          "wall_time_s": 63.8
+        },
+        "3": {
+          "goal_pct": 91.66666666666667,
+          "steps": 953,
+          "retract_ok": false,
+          "error": null,
+          "wall_time_s": 61.0
+        },
+        "5": {
+          "goal_pct": 91.66666666666667,
+          "steps": 1247,
+          "retract_ok": false,
+          "error": null,
+          "wall_time_s": 72.9
+        }
+      },
+      "gamepad": {
+        "3": {
+          "goal_pct": 100.0,
+          "steps": 301,
+          "retract_ok": true,
+          "error": null,
+          "wall_time_s": 27.7
+        },
+        "4": {
+          "goal_pct": 75.0,
+          "steps": 1211,
+          "retract_ok": false,
+          "error": null,
+          "wall_time_s": 68.2
+        },
+        "1": {
+          "goal_pct": 91.66666666666667,
+          "steps": 571,
+          "retract_ok": false,
+          "error": null,
+          "wall_time_s": 42.2
+        },
+        "0": {
+          "goal_pct": 66.66666666666667,
+          "steps": 1099,
+          "retract_ok": false,
+          "error": null,
+          "wall_time_s": 64.9
+        },
+        "5": {
+          "goal_pct": 66.66666666666667,
+          "steps": 1278,
+          "retract_ok": false,
+          "error": null,
+          "wall_time_s": 76.1
+        },
+        "2": {
+          "goal_pct": 91.66666666666667,
+          "steps": 504,
+          "retract_ok": false,
+          "error": null,
+          "wall_time_s": 41.0
+        }
+      },
+      "plumbers_block": {
+        "2": {
+          "goal_pct": 100.0,
+          "steps": 372,
+          "retract_ok": true,
+          "error": null,
+          "wall_time_s": 27.6
+        },
+        "0": {
+          "goal_pct": 91.66666666666667,
+          "steps": 781,
+          "retract_ok": false,
+          "error": null,
+          "wall_time_s": 46.5
+        },
+        "3": {
+          "goal_pct": 100.0,
+          "steps": 366,
+          "retract_ok": true,
+          "error": null,
+          "wall_time_s": 30.4
+        },
+        "1": {
+          "goal_pct": 83.33333333333333,
+          "steps": 929,
+          "retract_ok": false,
+          "error": null,
+          "wall_time_s": 49.4
+        },
+        "4": {
+          "goal_pct": 83.33333333333333,
+          "steps": 935,
+          "retract_ok": false,
+          "error": null,
+          "wall_time_s": 50.1
+        }
+      },
+      "stool_circular": {
+        "2": {
+          "goal_pct": 100.0,
+          "steps": 602,
+          "retract_ok": true,
+          "error": null,
+          "wall_time_s": 42.3
+        },
+        "1": {
+          "goal_pct": 91.66666666666667,
+          "steps": 396,
+          "retract_ok": false,
+          "error": null,
+          "wall_time_s": 37.0
+        },
+        "0": {
+          "goal_pct": 100.0,
+          "steps": 316,
+          "retract_ok": true,
+          "error": null,
+          "wall_time_s": 26.0
+        },
+        "5": {
+          "goal_pct": 83.33333333333333,
+          "steps": 905,
+          "retract_ok": false,
+          "error": null,
+          "wall_time_s": 59.0
+        },
+        "8": {
+          "goal_pct": 91.66666666666667,
+          "steps": 874,
+          "retract_ok": false,
+          "error": null,
+          "wall_time_s": 42.5
+        },
+        "7": {
+          "goal_pct": 91.66666666666667,
+          "steps": 917,
+          "retract_ok": false,
+          "error": null,
+          "wall_time_s": 60.4
+        },
+        "4": {
+          "goal_pct": 100.0,
+          "steps": 342,
+          "retract_ok": true,
+          "error": null,
+          "wall_time_s": 26.0
+        },
+        "3": {
+          "goal_pct": 91.66666666666667,
+          "steps": 919,
+          "retract_ok": false,
+          "error": null,
+          "wall_time_s": 59.3
+        },
+        "6": {
+          "goal_pct": 100.0,
+          "steps": 359,
+          "retract_ok": true,
+          "error": null,
+          "wall_time_s": 29.7
+        }
+      }
+    }
+  },
+  "summary": {
+    "pretrained": {
+      "avg_goal_pct": 36.0,
+      "retract_rate": 0.0,
+      "num_full_success": 0,
+      "num_tasks": 38,
+      "num_errors": 0,
+      "per_assembly": {
+        "beam": {
+          "avg_goal_pct": 45.0,
+          "num_parts": 5
+        },
+        "car": {
+          "avg_goal_pct": 23.6,
+          "num_parts": 6
+        },
+        "cooling_manifold": {
+          "avg_goal_pct": 20.2,
+          "num_parts": 7
+        },
+        "gamepad": {
+          "avg_goal_pct": 13.9,
+          "num_parts": 6
+        },
+        "plumbers_block": {
+          "avg_goal_pct": 60.0,
+          "num_parts": 5
+        },
+        "stool_circular": {
+          "avg_goal_pct": 52.8,
+          "num_parts": 9
+        }
+      }
+    },
+    "beam_policy": {
+      "avg_goal_pct": 41.0,
+      "retract_rate": 13.2,
+      "num_full_success": 5,
+      "num_tasks": 38,
+      "num_errors": 0,
+      "per_assembly": {
+        "beam": {
+          "avg_goal_pct": 100.0,
+          "num_parts": 5
+        },
+        "car": {
+          "avg_goal_pct": 8.3,
+          "num_parts": 6
+        },
+        "cooling_manifold": {
+          "avg_goal_pct": 22.6,
+          "num_parts": 7
+        },
+        "gamepad": {
+          "avg_goal_pct": 36.1,
+          "num_parts": 6
+        },
+        "plumbers_block": {
+          "avg_goal_pct": 31.7,
+          "num_parts": 5
+        },
+        "stool_circular": {
+          "avg_goal_pct": 52.8,
+          "num_parts": 9
+        }
+      }
+    },
+    "all_assemblies_policy": {
+      "avg_goal_pct": 91.7,
+      "retract_rate": 34.2,
+      "num_full_success": 13,
+      "num_tasks": 38,
+      "num_errors": 0,
+      "per_assembly": {
+        "beam": {
+          "avg_goal_pct": 96.7,
+          "num_parts": 5
+        },
+        "car": {
+          "avg_goal_pct": 91.7,
+          "num_parts": 6
+        },
+        "cooling_manifold": {
+          "avg_goal_pct": 92.9,
+          "num_parts": 7
+        },
+        "gamepad": {
+          "avg_goal_pct": 81.9,
+          "num_parts": 6
+        },
+        "plumbers_block": {
+          "avg_goal_pct": 91.7,
+          "num_parts": 5
+        },
+        "stool_circular": {
+          "avg_goal_pct": 94.4,
+          "num_parts": 9
+        }
+      }
+    }
+  }
+}
