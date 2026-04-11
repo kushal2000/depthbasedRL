@@ -93,6 +93,23 @@ if [ -n "$CHECKPOINT" ]; then
     CHECKPOINT_ARG="checkpoint=$CHECKPOINT"
 fi
 
+# ── GPU monitoring (background) ─────────────────────────────
+echo "=== Initial GPU State ==="
+nvidia-smi
+echo ""
+
+GPU_LOG="${HYDRA_RUN_DIR}/gpu_usage.log"
+(
+    while true; do
+        echo "=== $(date '+%Y-%m-%d %H:%M:%S') ===" >> "$GPU_LOG"
+        nvidia-smi --query-gpu=memory.used,memory.total,memory.free,utilization.gpu,temperature.gpu \
+            --format=csv,noheader >> "$GPU_LOG" 2>&1
+        sleep 30
+    done
+) &
+GPU_MONITOR_PID=$!
+trap "kill $GPU_MONITOR_PID 2>/dev/null" EXIT
+
 # ── Launch training ──────────────────────────────────────────
 cd "$REPO_ROOT"
 source .venv/bin/activate
