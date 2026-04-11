@@ -154,7 +154,7 @@ def main():
     parser.add_argument("--start-waypoint", type=int, default=0)
     parser.add_argument("--end-waypoint", type=int, default=None)
     parser.add_argument("--steps-per-waypoint", type=int, default=50)
-    parser.add_argument("--settle-frames", type=int, default=100)
+    parser.add_argument("--settle-frames", type=int, default=120)
     parser.add_argument("--output-dir", type=str, default="fabrica/debug_output/insertion")
     parser.add_argument("--timestamp", type=str, default=None)
     args = parser.parse_args()
@@ -285,6 +285,10 @@ def main():
     frames = []
     deltas = []
     kp_dists = []
+    settle_pose_start = None
+    settle_drift_pos = []
+    settle_drift_kp = []
+    final_desired_pose = np.array(traj_poses[-1])
 
     print(f"Running insertion test ({assembly} part {part}, {args.method}, training scene)...")
     for step in range(total_steps):
@@ -319,9 +323,19 @@ def main():
                       f"kp_max={kp_dist*1000:.3f}mm")
         else:
             settle_step = step - total_teleport_steps
+            if settle_pose_start is None:
+                settle_pose_start = actual.copy()
+            drift_from_start = np.linalg.norm(actual[:3] - settle_pose_start[:3])
+            drift_from_desired = np.linalg.norm(actual[:3] - final_desired_pose[:3])
+            kp_drift = keypoints_max_dist(actual, final_desired_pose, keypoint_offsets)
+            settle_drift_pos.append(drift_from_start)
+            settle_drift_kp.append(kp_drift)
             if settle_step % 25 == 0:
                 print(f"  Settle {settle_step:4d}/{args.settle_frames}: "
-                      f"pos=({actual[0]:.4f}, {actual[1]:.4f}, {actual[2]:.4f})")
+                      f"pos=({actual[0]:.4f}, {actual[1]:.4f}, {actual[2]:.4f}) "
+                      f"drift_from_start={drift_from_start*1000:.3f}mm "
+                      f"pos_err_vs_desired={drift_from_desired*1000:.3f}mm "
+                      f"kp_err_vs_desired={kp_drift*1000:.3f}mm")
 
         if step % 5 == 0:
             color_image = gym.get_camera_image(sim, env, cam_handle, gymapi.IMAGE_COLOR)
@@ -350,6 +364,23 @@ def main():
             print("  Result: No collisions detected")
         else:
             print(f"  Result: COLLISIONS DETECTED (max pos delta {deltas.max()*1000:.1f}mm, max kp {kp_dists.max()*1000:.1f}mm)")
+
+    if settle_drift_pos:
+        sd_pos = np.array(settle_drift_pos)
+        sd_kp = np.array(settle_drift_kp)
+        print(f"\n--- Settle Stability Summary ({assembly} part {part}, {args.method}, {args.settle_frames} free-physics frames) ---")
+        print(f"  Drift from start of settle (no teleport applied):")
+        print(f"    Max:  {sd_pos.max()*1000:.3f} mm")
+        print(f"    Final: {sd_pos[-1]*1000:.3f} mm")
+        print(f"  Pose error vs trajectory final desired (after settle):")
+        print(f"    Final pos: {np.linalg.norm(root_states[PART_IDX, 0:3].cpu().numpy() - final_desired_pose[:3])*1000:.3f} mm")
+        print(f"    Final kp_max: {sd_kp[-1]*1000:.3f} mm")
+        if sd_pos.max() < 0.001:
+            print("  Result: STABLE — part holds position with no teleport")
+        elif sd_pos.max() < 0.005:
+            print(f"  Result: minor drift {sd_pos.max()*1000:.1f}mm (likely settling into contact)")
+        else:
+            print(f"  Result: UNSTABLE — part drifts {sd_pos.max()*1000:.1f}mm without teleport")
 
     gym.refresh_actor_root_state_tensor(sim)
     scene_final = root_states[0, 0:7].cpu().numpy()

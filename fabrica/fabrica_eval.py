@@ -265,6 +265,8 @@ def _sim_episode(conn, env, policy, joint_lower, joint_upper, device,
     step, done, paused = 0, False, False
     retract_ok = False  # Track across the episode (reset clears the tensor)
     last_arm_pos = None
+    cum_total = 0.0
+    cum_breakdown: dict = {}
 
     while not done:
         while conn.poll(0):
@@ -297,6 +299,19 @@ def _sim_episode(conn, env, policy, joint_lower, joint_upper, device,
         if env.extras.get("retract_success_ratio", 0) > 0.5:
             retract_ok = True
 
+        # Accumulate per-step reward + per-term breakdown from env.extras
+        cum_total += float(env.rew_buf[0].item())
+        step_ec = env.extras.get("episode_cumulative", {}) or {}
+        for _k, _v in step_ec.items():
+            try:
+                _val = float(_v[0].item()) if hasattr(_v, "__len__") else float(_v.item())
+            except Exception:
+                try:
+                    _val = float(_v)
+                except Exception:
+                    continue
+            cum_breakdown[_k] = cum_breakdown.get(_k, 0.0) + _val
+
         if record_video:
             frame = _capture_frame(env)
             if frame is not None:
@@ -311,6 +326,8 @@ def _sim_episode(conn, env, policy, joint_lower, joint_upper, device,
             env.max_consecutive_successes,
             step,
             float(env.keypoints_max_dist[0].item()),
+            cum_total,
+            dict(cum_breakdown),
         ))
 
         elapsed = time.time() - t0
@@ -508,6 +525,7 @@ class AssemblyDemo:
             self._md_stats = self.server.gui.add_markdown("**Stats:** No episodes yet")
             self._md_obj = self.server.gui.add_markdown("**Object Pos:** --")
             self._md_dist = self.server.gui.add_markdown("**Dist to Goal:** --")
+            self._md_reward = self.server.gui.add_markdown("**Cum Reward:** --")
 
     def _on_assembly_change(self):
         assembly = self._dd_assembly.value
@@ -894,6 +912,8 @@ class AssemblyDemo:
         elif tag == "state":
             state, successes, max_succ, step = msg[1], msg[2], msg[3], msg[4]
             dist_to_goal = msg[5] if len(msg) > 5 else None
+            cum_total = msg[6] if len(msg) > 6 else None
+            cum_breakdown = msg[7] if len(msg) > 7 else None
             self._update_viz(state)
             pct = 100 * successes / max_succ if max_succ > 0 else 0
             self._md_prog.content = (
@@ -906,6 +926,20 @@ class AssemblyDemo:
             )
             if dist_to_goal is not None:
                 self._md_dist.content = f"**Dist to Goal:** {dist_to_goal:.4f}"
+            if cum_total is not None:
+                lines = [f"**Cum Reward:** {cum_total:.1f}"]
+                if cum_breakdown:
+                    order = [
+                        "lifting_rew", "lift_bonus_rew",
+                        "keypoint_rew", "bonus_rew",
+                        "fingertip_delta_rew",
+                        "kuka_actions_penalty", "hand_actions_penalty",
+                        "retract_rew",
+                    ]
+                    for _k in order:
+                        if _k in cum_breakdown:
+                            lines.append(f"&nbsp;&nbsp;{_k}: {cum_breakdown[_k]:.1f}")
+                self._md_reward.content = "\n\n".join(lines)
 
             # Retract status from state tuple
             if len(state) >= 8:

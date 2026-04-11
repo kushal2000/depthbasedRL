@@ -103,6 +103,26 @@ POLICIES = {
         / "runs" / "00_all_6_assemblies_v2_2gpu_2026-03-23_21-10-45"
         / "nn" / "last_00_all_6_assemblies_v2_2gpu_2026-03-23_21-10-45_ep_243000_rew_12387.344.pth",
     ),
+    "beam_with_dr": (
+        REPO_ROOT / "train_dir" / "FABRICA_TRAINING" / "fabrica_beam_dr_ablation"
+        / "beam_with_dr_2026-04-08_17-22-46"
+        / "runs" / "00_beam_with_dr_2026-04-08_17-22-46"
+        / "config.yaml",
+        REPO_ROOT / "train_dir" / "FABRICA_TRAINING" / "fabrica_beam_dr_ablation"
+        / "beam_with_dr_2026-04-08_17-22-46"
+        / "runs" / "00_beam_with_dr_2026-04-08_17-22-46"
+        / "nn" / "last_00_beam_with_dr_2026-04-08_17-22-46_ep_243000_rew_11727.92.pth",
+    ),
+    "beam_no_dr": (
+        REPO_ROOT / "train_dir" / "FABRICA_TRAINING" / "fabrica_beam_dr_ablation"
+        / "beam_no_dr_2026-04-08_17-22-21"
+        / "runs" / "00_beam_no_dr_2026-04-08_17-22-21"
+        / "config.yaml",
+        REPO_ROOT / "train_dir" / "FABRICA_TRAINING" / "fabrica_beam_dr_ablation"
+        / "beam_no_dr_2026-04-08_17-22-21"
+        / "runs" / "00_beam_no_dr_2026-04-08_17-22-21"
+        / "nn" / "last_00_beam_no_dr_2026-04-08_17-22-21_ep_243000_rew_12916.671.pth",
+    ),
 }
 
 
