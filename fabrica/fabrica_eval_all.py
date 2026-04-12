@@ -123,6 +123,26 @@ POLICIES = {
         / "runs" / "00_beam_no_dr_2026-04-08_17-22-21"
         / "nn" / "last_00_beam_no_dr_2026-04-08_17-22-21_ep_243000_rew_12916.671.pth",
     ),
+    "beam_with_dr_no_lift": (
+        REPO_ROOT / "train_dir" / "FABRICA_TRAINING" / "fabrica_beam_dr_ablation_no_lift_reward"
+        / "beam_with_dr_no_lift_2026-04-11_04-05-58"
+        / "runs" / "00_beam_with_dr_no_lift_2026-04-11_04-05-58"
+        / "config.yaml",
+        REPO_ROOT / "train_dir" / "FABRICA_TRAINING" / "fabrica_beam_dr_ablation_no_lift_reward"
+        / "beam_with_dr_no_lift_2026-04-11_04-05-58"
+        / "runs" / "00_beam_with_dr_no_lift_2026-04-11_04-05-58"
+        / "last" / "model.pth",
+    ),
+    "beam_no_dr_no_lift": (
+        REPO_ROOT / "train_dir" / "FABRICA_TRAINING" / "fabrica_beam_dr_ablation_no_lift_reward"
+        / "beam_no_dr_no_lift_2026-04-11_04-05-58"
+        / "runs" / "00_beam_no_dr_no_lift_2026-04-11_04-05-58"
+        / "config.yaml",
+        REPO_ROOT / "train_dir" / "FABRICA_TRAINING" / "fabrica_beam_dr_ablation_no_lift_reward"
+        / "beam_no_dr_no_lift_2026-04-11_04-05-58"
+        / "runs" / "00_beam_no_dr_no_lift_2026-04-11_04-05-58"
+        / "last" / "model.pth",
+    ),
 }
 
 
@@ -570,7 +590,7 @@ def main():
 
     # Save results
     timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-    output_path = args.output or str(REPO_ROOT / "fabrica" / f"eval_results_{timestamp}.json")
+    output_path = args.output or str(REPO_ROOT / "fabrica" / "eval_outputs" / f"eval_results_{timestamp}.json")
 
     output_data = {
         "metadata": {
