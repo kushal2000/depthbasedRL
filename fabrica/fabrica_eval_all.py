@@ -143,6 +143,26 @@ POLICIES = {
         / "runs" / "00_beam_no_dr_no_lift_2026-04-11_04-05-58"
         / "last" / "model.pth",
     ),
+    "beam_multi_init_dr": (
+        REPO_ROOT / "train_dir" / "FABRICA_TRAINING" / "fabrica_beam_multi_init_states"
+        / "beam_multi_init_dr_2026-04-12_18-22-09"
+        / "runs" / "00_beam_multi_init_dr_2026-04-12_18-22-09"
+        / "config.yaml",
+        REPO_ROOT / "train_dir" / "FABRICA_TRAINING" / "fabrica_beam_multi_init_states"
+        / "beam_multi_init_dr_2026-04-12_18-22-09"
+        / "runs" / "00_beam_multi_init_dr_2026-04-12_18-22-09"
+        / "last" / "model.pth",
+    ),
+    "beam_multi_init_no_dr": (
+        REPO_ROOT / "train_dir" / "FABRICA_TRAINING" / "fabrica_beam_multi_init_states"
+        / "beam_multi_init_no_dr_2026-04-12_18-28-33"
+        / "runs" / "00_beam_multi_init_no_dr_2026-04-12_18-28-33"
+        / "config.yaml",
+        REPO_ROOT / "train_dir" / "FABRICA_TRAINING" / "fabrica_beam_multi_init_states"
+        / "beam_multi_init_no_dr_2026-04-12_18-28-33"
+        / "runs" / "00_beam_multi_init_no_dr_2026-04-12_18-28-33"
+        / "last" / "model.pth",
+    ),
 }
 
 
@@ -206,6 +226,7 @@ def _create_fabrica_env(config_path, headless, device, overrides):
         "retractRewardScale": 1.0,
         "retractSuccessBonus": 0.0,
         "multiPart": False,
+        "multiInitStates": False,
         "objectNames": None,
     }
     for k, v in fabrica_defaults.items():

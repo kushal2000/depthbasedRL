@@ -22,3 +22,10 @@ env:
   #   → trajectory: fabrica/trajectories/beam_2/pick_place.json
   multiPart: False
   objectNames: null
+
+  # ── Multi-init-states training ──────────────────────────────
+  # When True (requires multiPart=True and enableRetract=True),
+  # loads scenes.npz for the assembly and samples a random
+  # (start_pose, trajectory) per env on each reset.
+  # All parts must belong to the same assembly.
+  multiInitStates: False

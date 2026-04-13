@@ -49,6 +49,10 @@ class FabricaEnv(SimToolReal):
 
         # Multi-part config — read before super().__init__ which calls _create_envs
         self.multi_part = cfg["env"].get("multiPart", False)
+        self.multi_init_states = cfg["env"].get("multiInitStates", False)
+        if self.multi_init_states:
+            assert self.multi_part, "multiInitStates requires multiPart=True"
+            assert self.enable_retract, "multiInitStates requires enableRetract=True"
         if self.multi_part:
             self._init_multi_part_config(cfg)
             # Set objectName to first part so parent code that references it works
@@ -68,6 +72,19 @@ class FabricaEnv(SimToolReal):
         # Upgrade viser viewer with multi-part mesh swapping
         if self.multi_part and self.viser_viz_enabled:
             self._upgrade_viser_for_multi_part()
+
+        # Per-env multi-init-states tracking
+        if self.multi_init_states:
+            self.env_scene_idx = torch.randint(
+                0, self._ms_num_scenes, (self.num_envs,), device=self.device
+            )
+            self.env_max_goals = torch.zeros(self.num_envs, dtype=torch.long, device=self.device)
+            for part_idx in range(self._mp_num_parts):
+                mask = self.env_part_idx == part_idx
+                if mask.any():
+                    self.env_max_goals[mask] = self._ms_traj_lengths[
+                        part_idx, self.env_scene_idx[mask]
+                    ]
 
         # Per-env retract state
         self.retract_phase = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
@@ -147,6 +164,75 @@ class FabricaEnv(SimToolReal):
             print(f"  Part {i}: {name} → scene={self._mp_table_urdfs[i]}, "
                   f"start={self._mp_start_poses[i][:3]}, goals={traj_lens[i]}")
 
+        if self.multi_init_states:
+            self._load_multi_init_states(cfg, repo_root)
+
+    def _load_multi_init_states(self, cfg, repo_root):
+        """Load scenes.npz for multi-init-states training."""
+        import numpy as np
+
+        # All parts must share the same assembly
+        assemblies = set()
+        config_part_ids = []
+        for obj_name in self._mp_object_names:
+            assembly, part_id, _ = self._parse_object_name(obj_name)
+            assemblies.add(assembly)
+            config_part_ids.append(part_id)
+        assert len(assemblies) == 1, (
+            f"multiInitStates requires all parts from the same assembly, got {assemblies}"
+        )
+        assembly = assemblies.pop()
+
+        # Load scenes.npz
+        scenes_path = os.path.join(
+            repo_root, "assets", "urdf", "fabrica", assembly, "scenes.npz"
+        )
+        scenes = np.load(scenes_path)
+        start_poses = scenes["start_poses"]    # [num_scenes, num_parts_in_order, 7]
+        goals = scenes["goals"]                # [num_scenes, num_parts_in_order, max_traj_len, 7]
+        traj_lengths = scenes["traj_lengths"]  # [num_scenes, num_parts_in_order]
+
+        # Load assembly_order to map scenes.npz part indices → config part indices
+        order_path = os.path.join(
+            repo_root, "assets", "urdf", "fabrica", assembly, "assembly_order.json"
+        )
+        with open(order_path, "r") as f:
+            assembly_order = json.load(f)["steps"]  # e.g., ["6", "2", "0", "3", "1"]
+
+        # Build reorder mapping: config_part_idx → scenes.npz part index
+        order_to_npz_idx = {pid: i for i, pid in enumerate(assembly_order)}
+        reorder = []
+        for pid in config_part_ids:
+            assert pid in order_to_npz_idx, (
+                f"Part {pid} not found in assembly_order {assembly_order}"
+            )
+            reorder.append(order_to_npz_idx[pid])
+
+        # Reorder to match config ordering and transpose to [num_parts, num_scenes, ...]
+        # start_poses: [num_scenes, num_parts, 7] → index by reorder → transpose
+        start_poses = start_poses[:, reorder, :]           # [S, P_config, 7]
+        goals = goals[:, reorder, :, :]                    # [S, P_config, max_traj, 7]
+        traj_lengths = traj_lengths[:, reorder]             # [S, P_config]
+
+        self._ms_num_scenes = start_poses.shape[0]
+        self._ms_max_traj_len = int(goals.shape[2])
+
+        # Store as tensors [num_parts, num_scenes, ...] for efficient per-part indexing
+        self._ms_start_poses = torch.tensor(
+            start_poses.transpose(1, 0, 2), dtype=torch.float32
+        )  # [P, S, 7]
+        self._ms_goals = torch.tensor(
+            goals.transpose(1, 0, 2, 3), dtype=torch.float32
+        )  # [P, S, max_traj, 7]
+        self._ms_traj_lengths = torch.tensor(
+            traj_lengths.T, dtype=torch.long
+        )  # [P, S]
+
+        print(f"[FabricaEnv] Multi-init-states: {self._ms_num_scenes} scenes, "
+              f"max_traj_len={self._ms_max_traj_len}, "
+              f"traj_lengths range={traj_lengths.min()}-{traj_lengths.max()}")
+        print(f"  Part order mapping (config→npz): {list(zip(config_part_ids, reorder))}")
+
     def _upgrade_viser_for_multi_part(self):
         """Inject multi-part mesh swapping into the existing viser viewer."""
         from pathlib import Path
@@ -201,6 +287,13 @@ class FabricaEnv(SimToolReal):
         # that reads len(self.trajectory_states) for max_consecutive_successes works.
         self.trajectory_states = self._mp_trajectory_states[0]
         self.max_consecutive_successes = len(self.trajectory_states)
+
+        if self.multi_init_states:
+            self.max_consecutive_successes = self._ms_max_traj_len
+            # Move scene tensors to device now that self.device is available
+            self._ms_start_poses = self._ms_start_poses.to(self.device)
+            self._ms_goals = self._ms_goals.to(self.device)
+            self._ms_traj_lengths = self._ms_traj_lengths.to(self.device)
 
         # Store per-part file/scale/vhacd info for _load_main_object_asset
         self.object_asset_files = all_files
@@ -690,6 +783,25 @@ class FabricaEnv(SimToolReal):
                 self.gym.find_actor_rigid_body_index(env_ptr, goal_handle, name, gymapi.DOMAIN_ENV)
             )
 
+    # ── Override reset_object_pose for multi-init-states ────────
+
+    def reset_object_pose(self, env_ids, reset_buf_idxs=None, tensor_reset=True):
+        """Override to sample new scenes and update start poses."""
+        if self.multi_init_states and tensor_reset and len(env_ids) > 0 and reset_buf_idxs is None:
+            self.env_scene_idx[env_ids] = torch.randint(
+                0, self._ms_num_scenes, (len(env_ids),), device=self.device
+            )
+            for part_idx in range(self._mp_num_parts):
+                mask = self.env_part_idx[env_ids] == part_idx
+                if mask.any():
+                    scene_ids = self.env_scene_idx[env_ids[mask]]
+                    self.env_max_goals[env_ids[mask]] = self._ms_traj_lengths[part_idx, scene_ids]
+                    poses = self._ms_start_poses[part_idx, scene_ids]
+                    self.object_init_state[env_ids[mask], 0:2] = poses[:, 0:2]
+                    self.object_init_state[env_ids[mask], 3:7] = poses[:, 3:7]
+
+        super().reset_object_pose(env_ids, reset_buf_idxs, tensor_reset)
+
     # ── Override _reset_target for per-env trajectories ───────────
 
     def _reset_target(self, env_ids, reset_buf_idxs=None, tensor_reset=True, is_first_goal=True):
@@ -700,18 +812,25 @@ class FabricaEnv(SimToolReal):
         if len(env_ids) > 0 and reset_buf_idxs is None and tensor_reset:
             USE_FIXED_GOAL_STATES = self.cfg["env"]["useFixedGoalStates"]
             if USE_FIXED_GOAL_STATES:
-                # Per-env trajectory lookup
-                num_goals = len(self._mp_trajectory_states[0])
-                current_subgoal_idx = (self.successes[env_ids] % num_goals).long()
-
-                # Build goal tensor by looking up each env's part trajectory
-                goals = torch.zeros(len(env_ids), 7, device=self.device)
-                for part_idx in range(self._mp_num_parts):
-                    mask = self.env_part_idx[env_ids] == part_idx
-                    if mask.any():
-                        traj = self._mp_trajectory_states[part_idx]  # [num_goals, 7]
-                        sub_ids = current_subgoal_idx[mask]
-                        goals[mask] = traj[sub_ids]
+                if self.multi_init_states:
+                    current_subgoal_idx = (self.successes[env_ids] % self.env_max_goals[env_ids]).long()
+                    goals = torch.zeros(len(env_ids), 7, device=self.device)
+                    for part_idx in range(self._mp_num_parts):
+                        mask = self.env_part_idx[env_ids] == part_idx
+                        if mask.any():
+                            scene_ids = self.env_scene_idx[env_ids[mask]]
+                            sub_ids = current_subgoal_idx[mask]
+                            goals[mask] = self._ms_goals[part_idx, scene_ids, sub_ids]
+                else:
+                    num_goals = len(self._mp_trajectory_states[0])
+                    current_subgoal_idx = (self.successes[env_ids] % num_goals).long()
+                    goals = torch.zeros(len(env_ids), 7, device=self.device)
+                    for part_idx in range(self._mp_num_parts):
+                        mask = self.env_part_idx[env_ids] == part_idx
+                        if mask.any():
+                            traj = self._mp_trajectory_states[part_idx]
+                            sub_ids = current_subgoal_idx[mask]
+                            goals[mask] = traj[sub_ids]
 
                 self.goal_states[env_ids, 0:7] = goals
             else:
@@ -830,7 +949,8 @@ class FabricaEnv(SimToolReal):
         else:
             final_tol = self.cfg["env"].get("finalGoalSuccessTolerance", None)
         if final_tol is not None and self.cfg["env"]["useFixedGoalStates"]:
-            is_final_goal = (self.successes == (self.max_consecutive_successes - 1)) | self.retract_phase
+            max_goals = self.env_max_goals if self.multi_init_states else self.max_consecutive_successes
+            is_final_goal = (self.successes == (max_goals - 1)) | self.retract_phase
             base_tol = self.success_tolerance * self.keypoint_scale
             tight_tol = final_tol * self.keypoint_scale
             keypoint_success_tolerance = torch.where(is_final_goal, tight_tol, base_tol)
@@ -854,8 +974,9 @@ class FabricaEnv(SimToolReal):
         self.successes += is_success
 
         # ── Detect retract phase entry (before setting reset_goal_buf) ──
+        max_goals = self.env_max_goals if self.multi_init_states else self.max_consecutive_successes
         just_entered_retract = (
-            (self.successes >= self.max_consecutive_successes) & ~self.retract_phase
+            (self.successes >= max_goals) & ~self.retract_phase
         )
         self.retract_phase |= just_entered_retract
         self.successes.clamp_(max=self.max_consecutive_successes)
@@ -941,13 +1062,21 @@ class FabricaEnv(SimToolReal):
 
         # ── Logging ──
         self.extras["successes"] = self.prev_episode_successes
-        self.extras["success_ratio"] = (
-            self.prev_episode_successes.mean().item() / self.max_consecutive_successes
-        )
+        if self.multi_init_states:
+            self.extras["success_ratio"] = (
+                self.prev_episode_successes / self.env_max_goals.float()
+            ).mean().item()
+            self.extras["all_goals_hit_ratio"] = (
+                self.prev_episode_successes >= self.env_max_goals
+            ).float().mean().item()
+        else:
+            self.extras["success_ratio"] = (
+                self.prev_episode_successes.mean().item() / self.max_consecutive_successes
+            )
+            self.extras["all_goals_hit_ratio"] = (
+                self.prev_episode_successes >= self.max_consecutive_successes
+            ).float().mean().item()
         self.extras["closest_keypoint_max_dist"] = self.prev_episode_closest_keypoint_max_dist
-        self.extras["all_goals_hit_ratio"] = (
-            self.prev_episode_successes >= self.max_consecutive_successes
-        ).float().mean().item()
         self.extras["final_goal_tolerance"] = self.final_goal_success_tolerance
         self.true_objective = self._true_objective()
         self.extras["true_objective"] = self.true_objective
@@ -958,13 +1087,22 @@ class FabricaEnv(SimToolReal):
                 part_mask = self.env_part_idx == part_idx
                 part_name = self._mp_object_names[part_idx]
                 if part_mask.any():
-                    self.extras[f"success_ratio/{part_name}"] = (
-                        self.prev_episode_successes[part_mask].mean().item()
-                        / self.max_consecutive_successes
-                    )
-                    self.extras[f"all_goals_hit_ratio/{part_name}"] = (
-                        self.prev_episode_successes[part_mask] >= self.max_consecutive_successes
-                    ).float().mean().item()
+                    if self.multi_init_states:
+                        self.extras[f"success_ratio/{part_name}"] = (
+                            self.prev_episode_successes[part_mask]
+                            / self.env_max_goals[part_mask].float()
+                        ).mean().item()
+                        self.extras[f"all_goals_hit_ratio/{part_name}"] = (
+                            self.prev_episode_successes[part_mask] >= self.env_max_goals[part_mask]
+                        ).float().mean().item()
+                    else:
+                        self.extras[f"success_ratio/{part_name}"] = (
+                            self.prev_episode_successes[part_mask].mean().item()
+                            / self.max_consecutive_successes
+                        )
+                        self.extras[f"all_goals_hit_ratio/{part_name}"] = (
+                            self.prev_episode_successes[part_mask] >= self.max_consecutive_successes
+                        ).float().mean().item()
                     self.extras[f"retract_success_ratio/{part_name}"] = (
                         self.retract_succeeded[part_mask].float().mean().item()
                     )
