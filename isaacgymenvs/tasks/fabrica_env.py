@@ -833,6 +833,11 @@ class FabricaEnv(SimToolReal):
                             goals[mask] = traj[sub_ids]
 
                 self.goal_states[env_ids, 0:7] = goals
+
+                # Adjust goal z for table height randomization
+                table_base_z = self.cfg["env"]["tableResetZ"]
+                delta_z = self.table_init_state[env_ids, 2:3] - table_base_z
+                self.goal_states[env_ids, 2:3] += delta_z
             else:
                 # Fall back to parent's non-fixed goal logic
                 super()._reset_target(env_ids, reset_buf_idxs, tensor_reset, is_first_goal)
