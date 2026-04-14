@@ -17,16 +17,21 @@ that:
   raised iteratively if any lift+transit waypoint comes within 5 cm of any
   placed part.
 
-Output: ``assets/urdf/fabrica/{assembly}/scenes.npz`` with arrays
+Output: ``assets/urdf/fabrica/{assembly}/{output_name}`` with arrays
   - ``start_poses``  : float32 [num_scenes, num_parts, 7] (xyz + xyzw quat)
   - ``goals``        : float32 [num_scenes, num_parts, max_traj_len, 7]
                        (zero-padded past the per-(scene, part) length)
   - ``traj_lengths`` : int32   [num_scenes, num_parts]
 
 Usage:
+    # Training scenes (default filename scenes.npz)
     python fabrica/scene_generation/generate_scenes.py --assembly beam
     python fabrica/scene_generation/generate_scenes.py --assembly beam \\
         --num-scenes 10 --seed 0 --force
+
+    # Validation scenes (disjoint from training via different seed)
+    python fabrica/scene_generation/generate_scenes.py --assembly beam \\
+        --num-scenes 20 --seed 42 --output-name scenes_val.npz
 """
 
 import argparse
@@ -421,11 +426,14 @@ def main():
     parser.add_argument("--assembly", type=str, required=True)
     parser.add_argument("--num-scenes", type=int, default=10)
     parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument("--output-name", type=str, default="scenes.npz",
+                        help="Output filename within the assembly dir "
+                             "(e.g., scenes.npz or scenes_val.npz).")
     parser.add_argument("--force", action="store_true",
-                        help="Overwrite existing scenes.npz.")
+                        help="Overwrite existing output file.")
     args = parser.parse_args()
 
-    out_path = ASSETS_DIR / args.assembly / "scenes.npz"
+    out_path = ASSETS_DIR / args.assembly / args.output_name
     if out_path.exists() and not args.force:
         print(f"{out_path} exists. Use --force to overwrite.")
         return
