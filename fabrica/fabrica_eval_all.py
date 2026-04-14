@@ -163,6 +163,26 @@ POLICIES = {
         / "runs" / "00_beam_multi_init_no_dr_2026-04-12_18-28-33"
         / "last" / "model.pth",
     ),
+    "beam_table_rand_dr": (
+        REPO_ROOT / "train_dir" / "FABRICA_TRAINING" / "fabrica_beam_multi_init_table_rand"
+        / "beam_multi_init_table_rand_dr_2026-04-13_15-35-49"
+        / "runs" / "00_beam_multi_init_table_rand_dr_2026-04-13_15-35-49"
+        / "config.yaml",
+        REPO_ROOT / "train_dir" / "FABRICA_TRAINING" / "fabrica_beam_multi_init_table_rand"
+        / "beam_multi_init_table_rand_dr_2026-04-13_15-35-49"
+        / "runs" / "00_beam_multi_init_table_rand_dr_2026-04-13_15-35-49"
+        / "last" / "model.pth",
+    ),
+    "beam_table_rand_no_dr": (
+        REPO_ROOT / "train_dir" / "FABRICA_TRAINING" / "fabrica_beam_multi_init_table_rand"
+        / "beam_multi_init_table_rand_no_dr_2026-04-13_15-35-49"
+        / "runs" / "00_beam_multi_init_table_rand_no_dr_2026-04-13_15-35-49"
+        / "config.yaml",
+        REPO_ROOT / "train_dir" / "FABRICA_TRAINING" / "fabrica_beam_multi_init_table_rand"
+        / "beam_multi_init_table_rand_no_dr_2026-04-13_15-35-49"
+        / "runs" / "00_beam_multi_init_table_rand_no_dr_2026-04-13_15-35-49"
+        / "last" / "model.pth",
+    ),
 }
 
 

@@ -180,6 +180,7 @@ def _create_fabrica_env(config_path, headless, device, overrides):
         "retractRewardScale": 1.0,
         "retractSuccessBonus": 0.0,
         "multiPart": False,
+        "multiInitStates": False,
         "objectNames": None,
     }
     for k, v in fabrica_defaults.items():
