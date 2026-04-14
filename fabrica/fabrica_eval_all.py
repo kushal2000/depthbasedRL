@@ -247,6 +247,7 @@ def _create_fabrica_env(config_path, headless, device, overrides):
         "retractSuccessBonus": 0.0,
         "multiPart": False,
         "multiInitStates": False,
+        "finalGoalOnly": False,
         "objectNames": None,
     }
     for k, v in fabrica_defaults.items():

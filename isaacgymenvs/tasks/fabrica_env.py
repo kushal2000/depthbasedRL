@@ -50,6 +50,7 @@ class FabricaEnv(SimToolReal):
         # Multi-part config — read before super().__init__ which calls _create_envs
         self.multi_part = cfg["env"].get("multiPart", False)
         self.multi_init_states = cfg["env"].get("multiInitStates", False)
+        self.final_goal_only = cfg["env"].get("finalGoalOnly", False)
         if self.multi_init_states:
             assert self.multi_part, "multiInitStates requires multiPart=True"
             assert self.enable_retract, "multiInitStates requires enableRetract=True"
@@ -65,6 +66,21 @@ class FabricaEnv(SimToolReal):
             cfg["env"]["objectStartPose"] = self._mp_start_poses[0]
             cfg["env"]["fixedGoalStates"] = self._mp_goal_states[0]
             cfg["env"]["asset"]["table"] = self._mp_table_urdfs[0]
+        else:
+            # Single-part: truncate subgoal list in-place so parent SimToolReal
+            # builds trajectory_states and max_consecutive_successes from just
+            # the final waypoint. Start pose is untouched.
+            if (
+                self.final_goal_only
+                and cfg["env"].get("useFixedGoalStates", False)
+                and cfg["env"].get("fixedGoalStates")
+            ):
+                fgs = cfg["env"]["fixedGoalStates"]
+                cfg["env"]["fixedGoalStates"] = [fgs[-1]]
+                print(
+                    f"[FabricaEnv] finalGoalOnly=True (single-part): "
+                    f"truncated fixedGoalStates from {len(fgs)} → 1"
+                )
 
         super().__init__(cfg, rl_device, sim_device, graphics_device_id,
                          headless, virtual_screen_capture, force_render)
@@ -159,10 +175,21 @@ class FabricaEnv(SimToolReal):
             f"All parts must have the same number of goals, got {traj_lens}"
         )
 
+        # Truncate to the final waypoint per part before downstream code
+        # builds tensors and derives max_consecutive_successes from
+        # len(_mp_goal_states[0]). Start poses are untouched.
+        if self.final_goal_only:
+            orig_len = traj_lens[0]
+            self._mp_goal_states = [[goals[-1]] for goals in self._mp_goal_states]
+            print(
+                f"[FabricaEnv] finalGoalOnly=True (multi-part): "
+                f"truncated per-part goals from {orig_len} → 1"
+            )
+
         print(f"[FabricaEnv] Multi-part training with {self._mp_num_parts} parts: {self._mp_object_names}")
         for i, name in enumerate(self._mp_object_names):
             print(f"  Part {i}: {name} → scene={self._mp_table_urdfs[i]}, "
-                  f"start={self._mp_start_poses[i][:3]}, goals={traj_lens[i]}")
+                  f"start={self._mp_start_poses[i][:3]}, goals={len(self._mp_goal_states[i])}")
 
         if self.multi_init_states:
             self._load_multi_init_states(cfg, repo_root)
@@ -228,9 +255,26 @@ class FabricaEnv(SimToolReal):
             traj_lengths.T, dtype=torch.long
         )  # [P, S]
 
+        # finalGoalOnly: gather per-(part, scene) final goal — scenes.npz
+        # zero-pads past per-(scene, part) traj_length so index -1 is unsafe;
+        # index by (traj_length - 1) instead. Start poses untouched.
+        if self.final_goal_only:
+            P, S, _, _ = self._ms_goals.shape
+            final_idx = self._ms_traj_lengths - 1  # [P, S], already long
+            p_ar = torch.arange(P).unsqueeze(1).expand(P, S)
+            s_ar = torch.arange(S).unsqueeze(0).expand(P, S)
+            final_goals = self._ms_goals[p_ar, s_ar, final_idx]  # [P, S, 7]
+            self._ms_goals = final_goals.unsqueeze(2)  # [P, S, 1, 7]
+            self._ms_max_traj_len = 1
+            self._ms_traj_lengths = torch.ones_like(self._ms_traj_lengths)
+            print(
+                f"[FabricaEnv] finalGoalOnly=True (multi-init): "
+                f"truncated _ms_goals to shape {tuple(self._ms_goals.shape)}"
+            )
+
         print(f"[FabricaEnv] Multi-init-states: {self._ms_num_scenes} scenes, "
               f"max_traj_len={self._ms_max_traj_len}, "
-              f"traj_lengths range={traj_lengths.min()}-{traj_lengths.max()}")
+              f"traj_lengths range={int(self._ms_traj_lengths.min())}-{int(self._ms_traj_lengths.max())}")
         print(f"  Part order mapping (config→npz): {list(zip(config_part_ids, reorder))}")
 
     def _upgrade_viser_for_multi_part(self):

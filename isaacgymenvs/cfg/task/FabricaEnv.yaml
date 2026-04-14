@@ -29,3 +29,9 @@ env:
   # (start_pose, trajectory) per env on each reset.
   # All parts must belong to the same assembly.
   multiInitStates: False
+
+  # ── Sparse-goal ablation ────────────────────────────────────
+  # When True, truncate the subgoal sequence (from pick_place.json /
+  # scenes.npz) to just the final waypoint. Start pose is unchanged.
+  # Downstream: max_consecutive_successes = 1.
+  finalGoalOnly: False
