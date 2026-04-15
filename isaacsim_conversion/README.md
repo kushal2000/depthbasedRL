@@ -13,16 +13,42 @@ Roll out pretrained Isaac Gym policies in Isaac Sim (via Isaac Lab) for visualiz
 
 ## Installation
 
-All commands assume you're in the repo root: `/share/portal/kk837/depthbasedRL`
+All commands assume you're in the repo root.
+
+This setup intentionally uses a separate environment from the Isaac Gym
+training environment in [docs/installation.md](../docs/installation.md).
+
+- Isaac Gym / training env: Python 3.8, usually `.venv`
+- Isaac Sim conversion env: Python 3.11, `.venv-isaacsim-py311`
+
+Do not delete or repurpose your Isaac Gym environment for this flow.
+
+To suppress the Omniverse EULA prompt in non-interactive runs:
+
+```bash
+export OMNI_KIT_ACCEPT_EULA=YES
+```
+
+The helper script `./scripts/run_in_isaacsim_env.sh` sets this automatically if
+you have not already set it.
+
+It also adds Isaac Lab's bundled source tree to `PYTHONPATH`, which is needed
+for imports such as `isaaclab.sim` in this pip-installed layout.
 
 ### 1. Create Python 3.11 venv
 
 ```bash
-uv venv .venv_isaacsim --python 3.11
-source .venv_isaacsim/bin/activate
+uv venv .venv-isaacsim-py311 --python 3.11
+source .venv-isaacsim-py311/bin/activate
 ```
 
 If Python 3.11 is not available: `uv python install 3.11`
+
+Or use the repo helper:
+
+```bash
+./scripts/setup_isaacsim_uv_env.sh
+```
 
 ### 2. Install PyTorch (CUDA 12.1)
 
@@ -36,7 +62,7 @@ Verify: `python -c "import torch; print(torch.__version__, torch.cuda.is_availab
 
 ```bash
 uv pip install -e ./rl_games/
-uv pip install omegaconf hydra-core "gym==0.23.1" scipy numpy yourdfpy
+uv pip install omegaconf hydra-core "gym==0.23.1" scipy numpy yourdfpy requests tqdm tyro
 ```
 
 **Do NOT** run `uv pip install -e .` — the project's pyproject.toml pins `numpy==1.23.0`, `isaacgym-stubs`, and `warp-lang==0.10.1` which conflict with Python 3.11 / Isaac Sim.
@@ -84,28 +110,62 @@ app.close()
 ## Quick reference: full install from scratch
 
 ```bash
-cd /share/portal/kk837/depthbasedRL
-uv venv .venv_isaacsim --python 3.11
-source .venv_isaacsim/bin/activate
+uv venv .venv-isaacsim-py311 --python 3.11
+source .venv-isaacsim-py311/bin/activate
 uv pip install torch --index-url https://download.pytorch.org/whl/cu121
 uv pip install -e ./rl_games/
-uv pip install omegaconf hydra-core "gym==0.23.1" scipy numpy yourdfpy
+uv pip install omegaconf hydra-core "gym==0.23.1" scipy numpy yourdfpy requests tqdm tyro
 uv pip install "isaaclab[isaacsim,all]==2.3.2.post1" --extra-index-url https://pypi.nvidia.com
 ```
+
+Helper-script equivalent:
+
+```bash
+./scripts/setup_isaacsim_uv_env.sh
+```
+
+## Policy checkpoints and data
+
+The environment setup does not automatically download policy or dataset assets.
+
+- If you want the repo's released pretrained policy, run:
+
+```bash
+./scripts/run_in_isaacsim_env.sh python download_pretrained_policy.py
+```
+
+This creates:
+
+```text
+pretrained_policy/config.yaml
+pretrained_policy/model.pth
+```
+
+- If you want to run a trained Fabrica policy, point `--checkpoint` at
+  `last/model.pth` or `best/model.pth` from your training run and `--config` at
+  the corresponding `config.yaml`.
+- DexToolBench data is documented in the main [README.md](../README.md), but it
+  is not required for the base Fabrica Isaac Sim rollout flow shown below.
 
 ## Usage
 
 ### Smoke test (inference only, no simulator)
 
 ```bash
-source .venv_isaacsim/bin/activate
+source .venv-isaacsim-py311/bin/activate
 PYTHONPATH=. python isaacsim_conversion/test_inference.py
+```
+
+Or without activating:
+
+```bash
+./scripts/run_in_isaacsim_env.sh python isaacsim_conversion/test_inference.py
 ```
 
 ### Full rollout (without video)
 
 ```bash
-source .venv_isaacsim/bin/activate
+source .venv-isaacsim-py311/bin/activate
 PYTHONPATH=. python isaacsim_conversion/rollout.py --headless --max_steps 700 \
     --checkpoint path/to/last/model.pth \
     --config path/to/config.yaml
@@ -114,7 +174,7 @@ PYTHONPATH=. python isaacsim_conversion/rollout.py --headless --max_steps 700 \
 ### Full rollout with video recording
 
 ```bash
-source .venv_isaacsim/bin/activate
+source .venv-isaacsim-py311/bin/activate
 # Kill any lingering Isaac Sim processes first!
 ps aux | grep "python.*isaacsim\|python.*rollout" | grep -v grep | awk '{print $2}' | xargs kill 2>/dev/null
 
