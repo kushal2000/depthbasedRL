@@ -33,9 +33,18 @@ def launch_app():
     """Create AppLauncher FIRST, before any isaaclab/omni imports."""
     from isaaclab.app import AppLauncher
     parser = argparse.ArgumentParser()
+    parser.add_argument(
+        "--task_source",
+        choices=["fabrica", "dextoolbench"],
+        default="fabrica",
+        help="Which asset/trajectory layout to use.",
+    )
     parser.add_argument("--assembly", default="beam")
     parser.add_argument("--part_id", default="2")
     parser.add_argument("--collision_method", default="coacd")
+    parser.add_argument("--object_category", default="hammer")
+    parser.add_argument("--object_name", default="claw_hammer")
+    parser.add_argument("--task_name", default="swing_down")
     parser.add_argument("--max_steps", type=int, default=6000, help="Max sim steps (100s at 60Hz)")
     parser.add_argument("--video_dir", default="rollout_videos", help="Directory to save video")
     parser.add_argument("--video_fps", type=int, default=30, help="Video FPS")
@@ -60,13 +69,26 @@ def main():
 
     # --- Locate assets ---
     robot_urdf = str(repo_root / "assets/urdf/kuka_sharpa_description/iiwa14_left_sharpa_adjusted_restricted.urdf")
-    table_urdf = str(repo_root / f"assets/urdf/fabrica/{args.assembly}/environments/{args.part_id}/scene_{args.collision_method}.urdf")
-    traj_path = repo_root / f"assets/urdf/fabrica/{args.assembly}/trajectories/{args.part_id}/pick_place.json"
 
-    # Object URDF
-    object_name = f"{args.assembly}_{args.part_id}_{args.collision_method}"
-    import fabrica.objects  # noqa: registers fabrica parts
+    # Object/table/task selection
     from dextoolbench.objects import NAME_TO_OBJECT
+
+    if args.task_source == "fabrica":
+        table_urdf = str(
+            repo_root
+            / f"assets/urdf/fabrica/{args.assembly}/environments/{args.part_id}/scene_{args.collision_method}.urdf"
+        )
+        traj_path = repo_root / f"assets/urdf/fabrica/{args.assembly}/trajectories/{args.part_id}/pick_place.json"
+        object_name = f"{args.assembly}_{args.part_id}_{args.collision_method}"
+        import fabrica.objects  # noqa: registers fabrica parts
+    else:
+        table_urdf = str(
+            repo_root
+            / f"assets/urdf/dextoolbench/environments/{args.object_category}/{args.object_name}/{args.task_name}.urdf"
+        )
+        traj_path = repo_root / f"dextoolbench/trajectories/{args.object_category}/{args.object_name}/{args.task_name}.json"
+        object_name = args.object_name
+
     obj_info = NAME_TO_OBJECT.get(object_name)
     assert obj_info is not None, f"Object '{object_name}' not found in NAME_TO_OBJECT"
     object_urdf = obj_info.urdf_path
@@ -119,14 +141,18 @@ def main():
         "palm_rot", "object_rot", "fingertip_pos_rel_palm",
         "keypoints_rel_palm", "keypoints_rel_goal", "object_scales",
     ]
-    # Object scales for keypoint computation — use fixedSize from training config
-    # This is the bounding box dimensions in meters, NOT the mesh scale factor from Object.scale
     import yaml
     with open(config_path) as f:
         policy_cfg = yaml.safe_load(f)
-    fixed_size = policy_cfg.get("task", {}).get("env", {}).get("fixedSize", [0.141, 0.03025, 0.0271])
-    object_scales = np.array([fixed_size], dtype=np.float32)
-    _log(f"Object scales (fixedSize): {object_scales[0]}")
+    if args.task_source == "fabrica":
+        # Fabrica transfer uses fixedSize from the training config.
+        fixed_size = policy_cfg.get("task", {}).get("env", {}).get("fixedSize", [0.141, 0.03025, 0.0271])
+        object_scales = np.array([fixed_size], dtype=np.float32)
+        _log(f"Object scales (fixedSize): {object_scales[0]}")
+    else:
+        # DexToolBench deployment/eval uses the object grasp bounding box scale from NAME_TO_OBJECT.
+        object_scales = np.array([obj_info.scale], dtype=np.float32)
+        _log(f"Object scales (NAME_TO_OBJECT.scale): {object_scales[0]}")
     hand_moving_average = 0.1
     arm_moving_average = 0.1
     dof_speed_scale = 1.5

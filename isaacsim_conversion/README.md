@@ -171,6 +171,19 @@ PYTHONPATH=. python isaacsim_conversion/rollout.py --headless --max_steps 700 \
     --config path/to/config.yaml
 ```
 
+### DexToolBench rollout example
+
+```bash
+./scripts/run_in_isaacsim_env.sh python isaacsim_conversion/rollout.py \
+    --task_source dextoolbench \
+    --object_category hammer \
+    --object_name claw_hammer \
+    --task_name swing_down \
+    --max_steps 700 \
+    --checkpoint pretrained_policy/model.pth \
+    --config pretrained_policy/config.yaml
+```
+
 ### Full rollout with video recording
 
 ```bash
