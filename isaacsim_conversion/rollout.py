@@ -208,14 +208,7 @@ def main():
     env.set_object_pose(start_pos, start_quat_xyzw)
 
     # --- Set robot to default pose (match Isaac Gym) ---
-    # Arm default: SharPa mount variant (60 deg offset on joint 7)
-    default_arm_pos = np.array([-1.571, 1.571, 0.0, 1.376, 0.0, 1.485, 1.308])
-    default_dof_pos = np.zeros(29, dtype=np.float32)
-    default_dof_pos[:7] = default_arm_pos
-    env.set_joint_position_targets(default_dof_pos)
-    # Let robot settle to default pose
-    for _ in range(60):
-        env.step(render=True)
+    env.reset_robot_to_default_pose(render=False)
     q_init, _ = env.get_robot_state()
     _log(f"Robot default pose set. Arm joints: {q_init[:7]}")
     prev_targets = q_init[None].copy()  # (1, 29)
