@@ -446,13 +446,17 @@ def main():
         if not pdir.exists():
             print(f"ERROR: --policies-dir not found: {pdir}")
             sys.exit(1)
+        name_filter = set(args.policies) if args.policies else None
         for sub in sorted(pdir.iterdir()):
+            if name_filter is not None and sub.name not in name_filter:
+                continue
             cfg = sub / "config.yaml"
             ckpt = sub / "model.pth"
             if cfg.exists() and ckpt.exists():
                 selected_policies[sub.name] = (cfg, ckpt)
         if not selected_policies:
-            print(f"ERROR: No policy subfolders in {pdir} "
+            suffix = f" matching {sorted(name_filter)}" if name_filter else ""
+            print(f"ERROR: No policy subfolders in {pdir}{suffix} "
                   f"(each needs config.yaml + model.pth)")
             sys.exit(1)
     else:
