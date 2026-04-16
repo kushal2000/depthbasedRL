@@ -17,6 +17,8 @@ from isaacsim_conversion.isaacsim_env import (
     CONTROL_DT,
     DEFAULT_ASSET_FRICTION,
     DEFAULT_JOINT_POS,
+    FINGERTIP_FRICTION,
+    FINGERTIP_LINK_NAMES,
     JOINT_DAMPINGS,
     JOINT_DAMPINGS_COMPENSATED,
     JOINT_NAMES_ISAACGYM,
@@ -93,6 +95,8 @@ class IsaacSimDistillEnv:
         self.prev_targets: np.ndarray | None = None
         self.camera_world_pos = np.zeros((self.num_envs, 3), dtype=np.float32)
         self.camera_world_quat_wxyz = np.zeros((self.num_envs, 4), dtype=np.float32)
+        self.permutation: np.ndarray | None = None
+        self.inverse_permutation: np.ndarray | None = None
 
         self._setup_scene()
 
@@ -289,14 +293,120 @@ class IsaacSimDistillEnv:
         self.camera = self.scene.sensors["camera"]
         self.env_origins = self.scene.env_origins
         self.device = self.sim.device
+        self._apply_physics_material_overrides(sim_utils)
         self.sim.reset()
         self.scene.reset()
+        self._validate_joint_ordering()
         _log(
             "Distill camera created "
             f"(instances={self.camera.num_instances}, modality={self.camera_modality}, pos={self.camera_pose.pos}, "
             f"quat_wxyz={self.camera_pose.quat_wxyz}, convention={self.camera_pose.convention})"
         )
         self.reset()
+
+    def _validate_joint_ordering(self):
+        sim_names = list(self.robot.joint_names)
+        if sim_names == JOINT_NAMES_ISAACGYM:
+            self.permutation = None
+            self.inverse_permutation = None
+            _log("Distill joint ordering matches Isaac Gym")
+            return
+        self.permutation = np.array([sim_names.index(name) for name in JOINT_NAMES_ISAACGYM], dtype=np.int32)
+        self.inverse_permutation = np.zeros_like(self.permutation)
+        for gym_idx, sim_idx in enumerate(self.permutation):
+            self.inverse_permutation[sim_idx] = gym_idx
+        _log(f"Distill joint permutation set: {self.permutation}")
+
+    def _sim_to_gym_order(self, values: np.ndarray) -> np.ndarray:
+        if self.permutation is None:
+            return values
+        return values[:, self.permutation]
+
+    def _gym_to_sim_order(self, values: np.ndarray) -> np.ndarray:
+        if self.permutation is None:
+            return values
+        reordered = np.zeros_like(values)
+        reordered[:, self.permutation] = values
+        return reordered
+
+    def _iter_collision_prim_paths(self, root_prim_path: str) -> list[str]:
+        from isaaclab.sim.utils import get_current_stage
+
+        stage = get_current_stage()
+        root_prim = stage.GetPrimAtPath(root_prim_path)
+        if not root_prim.IsValid():
+            return []
+
+        collision_paths: list[str] = []
+        prims_to_visit = [root_prim]
+        while prims_to_visit:
+            prim = prims_to_visit.pop()
+            if prim.GetName() == "collisions":
+                collision_paths.append(str(prim.GetPath()))
+            prims_to_visit.extend(list(prim.GetChildren()))
+        return collision_paths
+
+    def _set_collision_offsets(self, collision_prim_paths: list[str], contact_offset: float, rest_offset: float):
+        from isaaclab.sim.utils import get_current_stage
+        from pxr import PhysxSchema
+
+        stage = get_current_stage()
+        for prim_path in collision_prim_paths:
+            prim = stage.GetPrimAtPath(prim_path)
+            if not prim.IsValid():
+                continue
+            physx_collision_api = PhysxSchema.PhysxCollisionAPI(prim)
+            if not physx_collision_api:
+                physx_collision_api = PhysxSchema.PhysxCollisionAPI.Apply(prim)
+            physx_collision_api.CreateContactOffsetAttr().Set(contact_offset)
+            physx_collision_api.CreateRestOffsetAttr().Set(rest_offset)
+
+    def _apply_material_to_collision_prims(self, material_path: str, collision_prim_paths: list[str]):
+        from isaaclab.sim.utils import bind_physics_material
+
+        raw_bind_physics_material = getattr(bind_physics_material, "__wrapped__", bind_physics_material)
+        for prim_path in collision_prim_paths:
+            raw_bind_physics_material(prim_path, material_path)
+
+    def _apply_physics_material_overrides(self, sim_utils):
+        all_collision_paths: list[str] = []
+        fingertip_collision_paths: list[str] = []
+        for env_id in range(self.num_envs):
+            env_ns = f"/World/envs/env_{env_id}"
+            robot_root = f"{env_ns}/Robot"
+            table_root = f"{env_ns}/Table"
+            object_root = f"{env_ns}/Object"
+            all_collision_paths.extend(self._iter_collision_prim_paths(robot_root))
+            all_collision_paths.extend(self._iter_collision_prim_paths(table_root))
+            all_collision_paths.extend(self._iter_collision_prim_paths(object_root))
+            fingertip_collision_paths.extend(
+                f"{robot_root}/{link_name}/collisions" for link_name in FINGERTIP_LINK_NAMES
+            )
+
+        self._set_collision_offsets(all_collision_paths, contact_offset=0.002, rest_offset=0.0)
+
+        default_material_cfg = sim_utils.RigidBodyMaterialCfg(
+            static_friction=DEFAULT_ASSET_FRICTION,
+            dynamic_friction=DEFAULT_ASSET_FRICTION,
+            restitution=0.0,
+        )
+        default_material_path = "/World/PhysicsMaterials/distill_default_asset_material"
+        default_material_cfg.func(default_material_path, default_material_cfg)
+        self._apply_material_to_collision_prims(default_material_path, all_collision_paths)
+
+        fingertip_material_cfg = sim_utils.RigidBodyMaterialCfg(
+            static_friction=FINGERTIP_FRICTION,
+            dynamic_friction=FINGERTIP_FRICTION,
+            restitution=0.0,
+        )
+        fingertip_material_path = "/World/PhysicsMaterials/distill_fingertip_material"
+        fingertip_material_cfg.func(fingertip_material_path, fingertip_material_cfg)
+        self._apply_material_to_collision_prims(fingertip_material_path, fingertip_collision_paths)
+        _log(
+            "Distill physics materials applied "
+            f"(default_friction={DEFAULT_ASSET_FRICTION}, fingertip_friction={FINGERTIP_FRICTION}, "
+            f"colliders={len(all_collision_paths)})"
+        )
 
     def _apply_camera_world_poses(self, env_ids: torch.Tensor | None = None):
         if env_ids is None:
@@ -362,14 +472,16 @@ class IsaacSimDistillEnv:
         self.scene.update(PHYSICS_DT)
         self.sim.render()
         self.camera.update(0.0, force_recompute=True)
-        self.prev_targets = self.robot.data.joint_pos.detach().cpu().numpy().copy()
+        joint_pos_sim = self.robot.data.joint_pos.detach().cpu().numpy().copy()
+        self.prev_targets = self._sim_to_gym_order(joint_pos_sim)
         self.goal_idx = np.zeros(self.num_envs, dtype=np.int32)
         self.near_goal_steps = np.zeros(self.num_envs, dtype=np.int32)
         self.goal_pose = np.repeat(self.task_spec.goals[0][None], self.num_envs, axis=0).astype(np.float32)
 
     def apply_action(self, targets: np.ndarray):
         self.prev_targets = targets.copy()
-        targets_t = torch.tensor(targets, dtype=torch.float32, device=self.device)
+        targets_sim = self._gym_to_sim_order(targets)
+        targets_t = torch.tensor(targets_sim, dtype=torch.float32, device=self.device)
         self.robot.set_joint_position_target(targets_t)
 
     def step(self, render: bool = True):
@@ -382,8 +494,8 @@ class IsaacSimDistillEnv:
         self.camera.update(PHYSICS_DT, force_recompute=True)
 
     def compute_sim_state(self) -> SimState:
-        q = self.robot.data.joint_pos.detach().cpu().numpy()
-        qd = self.robot.data.joint_vel.detach().cpu().numpy()
+        q = self._sim_to_gym_order(self.robot.data.joint_pos.detach().cpu().numpy())
+        qd = self._sim_to_gym_order(self.robot.data.joint_vel.detach().cpu().numpy())
         object_pos_w = self.object_rigid.data.root_pos_w.detach().cpu().numpy()
         object_quat_w = self.object_rigid.data.root_quat_w.detach().cpu().numpy()
 
