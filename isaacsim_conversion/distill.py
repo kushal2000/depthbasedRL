@@ -46,6 +46,9 @@ def launch_app():
     parser.add_argument("--run_dir", default=None)
     parser.add_argument("--max_steps", type=int, default=None)
     parser.add_argument("--num_episodes", type=int, default=None)
+    parser.add_argument("--num_envs", type=int, default=None)
+    parser.add_argument("--env_spacing", type=float, default=None)
+    parser.add_argument("--object_start_mode", choices=["fixed", "randomized"], default=None)
     AppLauncher.add_app_launcher_args(parser)
     args = parser.parse_args()
     args.enable_cameras = True
@@ -77,6 +80,11 @@ class DistillSettings:
     image_height: int = 224
     image_width: int = 224
     learning_rate: float = 1e-4
+    num_envs: int = 1
+    env_spacing: float = 2.0
+    object_start_mode: str = "fixed"
+    object_pos_noise_xyz: tuple[float, float, float] = (0.03, 0.03, 0.01)
+    object_yaw_noise_deg: float = 20.0
 
 
 class BetaScheduler:
@@ -115,6 +123,12 @@ def load_distill_settings(path: Path, args) -> DistillSettings:
         settings.max_steps = args.max_steps
     if args.num_episodes is not None:
         settings.num_episodes = args.num_episodes
+    if args.num_envs is not None:
+        settings.num_envs = args.num_envs
+    if args.env_spacing is not None:
+        settings.env_spacing = args.env_spacing
+    if args.object_start_mode is not None:
+        settings.object_start_mode = args.object_start_mode
     return settings
 
 
@@ -125,7 +139,7 @@ def load_camera_pose(path: Path) -> tuple[str, CameraPose]:
     return modality, CameraPose(
         pos=tuple(float(x) for x in pose_cfg["pos"]),
         quat_wxyz=tuple(float(x) for x in pose_cfg["quat_wxyz"]),
-        convention=str(cfg.get("convention", pose_cfg.get("convention", "ros"))),
+        convention=str(cfg.get("convention", pose_cfg.get("convention", "opengl"))),
     )
 
 
@@ -169,7 +183,7 @@ def build_student(args, env: IsaacSimDistillEnv, settings: DistillSettings) -> M
         proprio_dim=env.student_proprio_dim,
         action_dim=env.action_dim,
         aux_heads={"object_pos": 3},
-    ).to(env.env.sim.device)
+    ).to(env.device)
 
 
 def save_checkpoint(path: Path, student: torch.nn.Module, optimizer: torch.optim.Optimizer, episode: int, best_metric: float):
@@ -235,7 +249,7 @@ def run_episode(
 ) -> dict[str, float]:
     teacher.reset()
     env.reset()
-    student_hidden = student.initial_state(batch_size=1, device=env.env.sim.device)
+    student_hidden = student.initial_state(batch_size=env.num_envs, device=env.device)
     total_action_loss = 0.0
     total_aux_loss = 0.0
     total_steps = 0
@@ -243,7 +257,7 @@ def run_episode(
     for step_i in range(settings.max_steps):
         sim_state = env.compute_sim_state()
         teacher_obs = env.build_teacher_obs(sim_state)
-        teacher_obs_tensor = torch.from_numpy(teacher_obs).float().to(env.env.sim.device)
+        teacher_obs_tensor = torch.from_numpy(teacher_obs).float().to(env.device)
         teacher_action = teacher.get_normalized_action(teacher_obs_tensor, deterministic_actions=True)
 
         student_obs = env.build_student_obs(sim_state, camera_modality=env.camera_modality)
@@ -261,15 +275,15 @@ def run_episode(
             hand_dof_speed_scale=settings.dof_speed_scale,
             dt=settings.control_dt,
         )
-        env.apply_action(targets[0])
+        env.apply_action(targets)
         env.step(render=not _args.headless)
         next_sim_state = env.compute_sim_state()
         finished = env.maybe_advance_goal(next_sim_state)
 
         action_loss = torch.mean((student_action - teacher_action) ** 2)
         aux_pred = student_out.aux.get("object_pos")
-        gt_object_pos = torch.from_numpy(sim_state.object_pos_world_env_frame[None]).float().to(env.env.sim.device)
-        aux_loss = torch.mean((aux_pred - gt_object_pos) ** 2) if aux_pred is not None else torch.tensor(0.0, device=env.env.sim.device)
+        gt_object_pos = torch.from_numpy(sim_state.object_pos_world_env_frame).float().to(env.device)
+        aux_loss = torch.mean((aux_pred - gt_object_pos) ** 2) if aux_pred is not None else torch.tensor(0.0, device=env.device)
         total_loss = settings.action_loss_weight * action_loss + settings.aux_object_pos_weight * aux_loss
 
         if mode == "train" and optimizer is not None:
@@ -284,8 +298,8 @@ def run_episode(
 
         if step_i % 60 == 0:
             _log(
-                f"[distill step {step_i:5d}] mode={mode}, goal={env.goal_idx}/{len(env.task_spec.goals)}, "
-                f"kp_dist={next_sim_state.kp_dist:.4f}, beta={beta:.3f}"
+                f"[distill step {step_i:5d}] mode={mode}, goal_mean={np.mean(env.goal_idx):.2f}/{len(env.task_spec.goals)}, "
+                f"kp_dist_mean={np.mean(next_sim_state.kp_dist):.4f}, beta={beta:.3f}, num_envs={env.num_envs}"
             )
         if finished:
             break
@@ -302,28 +316,72 @@ def run_episode(
     return metrics
 
 
+def _make_grid(images: list[np.ndarray]) -> np.ndarray:
+    if not images:
+        raise ValueError("No images to grid")
+    n = len(images)
+    cols = int(np.ceil(np.sqrt(n)))
+    rows = int(np.ceil(n / cols))
+    h, w = images[0].shape[:2]
+    if images[0].ndim == 2:
+        grid = np.zeros((rows * h, cols * w), dtype=images[0].dtype)
+    else:
+        grid = np.zeros((rows * h, cols * w, images[0].shape[2]), dtype=images[0].dtype)
+    for idx, image in enumerate(images):
+        r = idx // cols
+        c = idx % cols
+        grid[r * h : (r + 1) * h, c * w : (c + 1) * w, ...] = image
+    return grid
+
+
 def save_camera_debug(env: IsaacSimDistillEnv, run_dir: Path):
     import imageio.v3 as iio
+    import json
 
     outputs = env.camera.data.output
     if outputs.get("rgb") is not None:
-        rgb = outputs["rgb"][0].cpu().numpy()[..., :3].astype(np.uint8)
-        iio.imwrite(run_dir / "camera_debug" / "rgb.png", rgb)
+        rgb_batch = outputs["rgb"].cpu().numpy()[..., :3].astype(np.uint8)
+        rgb_images = []
+        for env_id, rgb in enumerate(rgb_batch):
+            rgb_images.append(rgb)
+            iio.imwrite(run_dir / "camera_debug" / f"env_{env_id}_rgb.png", rgb)
+        iio.imwrite(run_dir / "camera_debug" / "rgb_grid.png", _make_grid(rgb_images))
     if outputs.get("distance_to_image_plane") is not None:
-        depth = outputs["distance_to_image_plane"][0].cpu().numpy()
-        if depth.ndim == 3:
-            depth = depth[..., 0]
-        finite_mask = np.isfinite(depth)
-        if np.any(finite_mask):
-            finite_depth = depth[finite_mask]
-            depth_min = float(np.min(finite_depth))
-            depth_max = float(np.max(finite_depth))
-            denom = max(depth_max - depth_min, 1e-6)
-            depth_vis = np.zeros_like(depth, dtype=np.float32)
-            depth_vis[finite_mask] = np.clip((depth[finite_mask] - depth_min) / denom, 0.0, 1.0)
-        else:
-            depth_vis = np.zeros_like(depth, dtype=np.float32)
-        iio.imwrite(run_dir / "camera_debug" / "depth.png", (depth_vis * 255).astype(np.uint8))
+        depth_batch = outputs["distance_to_image_plane"].cpu().numpy()
+        depth_images = []
+        for env_id, depth in enumerate(depth_batch):
+            if depth.ndim == 3:
+                depth = depth[..., 0]
+            finite_mask = np.isfinite(depth)
+            if np.any(finite_mask):
+                finite_depth = depth[finite_mask]
+                depth_min = float(np.min(finite_depth))
+                depth_max = float(np.max(finite_depth))
+                denom = max(depth_max - depth_min, 1e-6)
+                depth_vis = np.zeros_like(depth, dtype=np.float32)
+                depth_vis[finite_mask] = np.clip((depth[finite_mask] - depth_min) / denom, 0.0, 1.0)
+            else:
+                depth_vis = np.zeros_like(depth, dtype=np.float32)
+            depth_img = (depth_vis * 255).astype(np.uint8)
+            depth_images.append(depth_img)
+            iio.imwrite(run_dir / "camera_debug" / f"env_{env_id}_depth.png", depth_img)
+        iio.imwrite(run_dir / "camera_debug" / "depth_grid.png", _make_grid(depth_images))
+
+    with open(run_dir / "camera_debug" / "metadata.json", "w") as f:
+        json.dump(
+            {
+                "num_envs": env.num_envs,
+                "camera_convention": env.camera_pose.convention,
+                "camera_pose": {
+                    "pos": list(env.camera_pose.pos),
+                    "quat_wxyz": list(env.camera_pose.quat_wxyz),
+                },
+                "object_start_mode": env.object_start_mode,
+                "current_start_pose": env.current_start_pose.tolist(),
+            },
+            f,
+            indent=2,
+        )
 
 
 def main():
@@ -354,14 +412,19 @@ def main():
         headless=args.headless,
         camera_modality=camera_modality,
         camera_pose_override=camera_pose,
+        num_envs=settings.num_envs,
+        env_spacing=settings.env_spacing,
+        object_start_mode=settings.object_start_mode,
+        object_pos_noise_xyz=settings.object_pos_noise_xyz,
+        object_yaw_noise_deg=settings.object_yaw_noise_deg,
     )
     teacher = RlPlayer(
         num_observations=140,
         num_actions=29,
         config_path=str(teacher_config),
         checkpoint_path=teacher_checkpoint,
-        device=str(env.env.sim.device),
-        num_envs=1,
+        device=str(env.device),
+        num_envs=settings.num_envs,
     )
     student = build_student(args, env, settings)
     optimizer = torch.optim.Adam(student.parameters(), lr=settings.learning_rate)
@@ -374,6 +437,10 @@ def main():
     _log(f"Teacher config: {teacher_config}")
     _log(f"Run dir: {run_dir}")
     _log(f"Student arch/modality: {args.student_arch}/{camera_modality}")
+    _log(
+        f"Parallel env config: num_envs={settings.num_envs}, env_spacing={settings.env_spacing}, "
+        f"object_start_mode={settings.object_start_mode}"
+    )
 
     if args.mode == "camera_debug":
         env.reset()

@@ -18,7 +18,7 @@ def xyzw_to_wxyz(xyzw: np.ndarray) -> np.ndarray:
 class CameraPose:
     pos: tuple[float, float, float]
     quat_wxyz: tuple[float, float, float, float]
-    convention: str = "ros"
+    convention: str = "opengl"
 
 
 @dataclass
@@ -55,7 +55,7 @@ def default_real_camera_pose() -> CameraPose:
     return CameraPose(
         pos=tuple(float(x) for x in t_w_c[:3, 3]),
         quat_wxyz=tuple(float(x) for x in quat_wxyz),
-        convention="ros",
+        convention="opengl",
     )
 
 
