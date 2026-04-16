@@ -101,6 +101,11 @@ class FabricaEnv(SimToolReal):
                     self.env_max_goals[mask] = self._ms_traj_lengths[
                         part_idx, self.env_scene_idx[mask]
                     ]
+            # Snapshot of env_max_goals from the just-ended episode, captured in
+            # reset_object_pose before env_max_goals is overwritten. Used by the
+            # success_ratio / all_goals_hit_ratio metrics so the numerator
+            # (prev_episode_successes) and denominator come from the same episode.
+            self.prev_episode_env_max_goals = self.env_max_goals.clone()
 
         # Per-env retract state
         self.retract_phase = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
@@ -832,6 +837,10 @@ class FabricaEnv(SimToolReal):
     def reset_object_pose(self, env_ids, reset_buf_idxs=None, tensor_reset=True):
         """Override to sample new scenes and update start poses."""
         if self.multi_init_states and tensor_reset and len(env_ids) > 0 and reset_buf_idxs is None:
+            # Snapshot the just-ended episode's max_goals before overwriting.
+            # Pairs with prev_episode_successes (captured in SimToolReal.reset_idx).
+            self.prev_episode_env_max_goals[env_ids] = self.env_max_goals[env_ids]
+
             self.env_scene_idx[env_ids] = torch.randint(
                 0, self._ms_num_scenes, (len(env_ids),), device=self.device
             )
@@ -1113,10 +1122,10 @@ class FabricaEnv(SimToolReal):
         self.extras["successes"] = self.prev_episode_successes
         if self.multi_init_states:
             self.extras["success_ratio"] = (
-                self.prev_episode_successes / self.env_max_goals.float()
+                self.prev_episode_successes / self.prev_episode_env_max_goals.float()
             ).mean().item()
             self.extras["all_goals_hit_ratio"] = (
-                self.prev_episode_successes >= self.env_max_goals
+                self.prev_episode_successes >= self.prev_episode_env_max_goals
             ).float().mean().item()
         else:
             self.extras["success_ratio"] = (
@@ -1139,10 +1148,10 @@ class FabricaEnv(SimToolReal):
                     if self.multi_init_states:
                         self.extras[f"success_ratio/{part_name}"] = (
                             self.prev_episode_successes[part_mask]
-                            / self.env_max_goals[part_mask].float()
+                            / self.prev_episode_env_max_goals[part_mask].float()
                         ).mean().item()
                         self.extras[f"all_goals_hit_ratio/{part_name}"] = (
-                            self.prev_episode_successes[part_mask] >= self.env_max_goals[part_mask]
+                            self.prev_episode_successes[part_mask] >= self.prev_episode_env_max_goals[part_mask]
                         ).float().mean().item()
                     else:
                         self.extras[f"success_ratio/{part_name}"] = (
