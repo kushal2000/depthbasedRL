@@ -51,6 +51,10 @@ class FabricaEnv(SimToolReal):
         self.multi_part = cfg["env"].get("multiPart", False)
         self.multi_init_states = cfg["env"].get("multiInitStates", False)
         self.final_goal_only = cfg["env"].get("finalGoalOnly", False)
+        self.pre_insert_and_final = cfg["env"].get("preInsertAndFinal", False)
+        assert not (self.final_goal_only and self.pre_insert_and_final), (
+            "finalGoalOnly and preInsertAndFinal are mutually exclusive"
+        )
         if self.multi_init_states:
             assert self.multi_part, "multiInitStates requires multiPart=True"
             assert self.enable_retract, "multiInitStates requires enableRetract=True"
@@ -80,6 +84,20 @@ class FabricaEnv(SimToolReal):
                 print(
                     f"[FabricaEnv] finalGoalOnly=True (single-part): "
                     f"truncated fixedGoalStates from {len(fgs)} → 1"
+                )
+            elif (
+                self.pre_insert_and_final
+                and cfg["env"].get("useFixedGoalStates", False)
+                and cfg["env"].get("fixedGoalStates")
+            ):
+                fgs = cfg["env"]["fixedGoalStates"]
+                cfg["env"]["fixedGoalStates"] = (
+                    [fgs[-2], fgs[-1]] if len(fgs) >= 2 else [fgs[-1]]
+                )
+                print(
+                    f"[FabricaEnv] preInsertAndFinal=True (single-part): "
+                    f"truncated fixedGoalStates from {len(fgs)} → "
+                    f"{len(cfg['env']['fixedGoalStates'])}"
                 )
 
         super().__init__(cfg, rl_device, sim_device, graphics_device_id,
@@ -190,6 +208,17 @@ class FabricaEnv(SimToolReal):
                 f"[FabricaEnv] finalGoalOnly=True (multi-part): "
                 f"truncated per-part goals from {orig_len} → 1"
             )
+        elif self.pre_insert_and_final:
+            orig_len = traj_lens[0]
+            self._mp_goal_states = [
+                ([goals[-2], goals[-1]] if len(goals) >= 2 else [goals[-1]])
+                for goals in self._mp_goal_states
+            ]
+            print(
+                f"[FabricaEnv] preInsertAndFinal=True (multi-part): "
+                f"truncated per-part goals from {orig_len} → "
+                f"{len(self._mp_goal_states[0])}"
+            )
 
         print(f"[FabricaEnv] Multi-part training with {self._mp_num_parts} parts: {self._mp_object_names}")
         for i, name in enumerate(self._mp_object_names):
@@ -274,6 +303,25 @@ class FabricaEnv(SimToolReal):
             self._ms_traj_lengths = torch.ones_like(self._ms_traj_lengths)
             print(
                 f"[FabricaEnv] finalGoalOnly=True (multi-init): "
+                f"truncated _ms_goals to shape {tuple(self._ms_goals.shape)}"
+            )
+        elif self.pre_insert_and_final:
+            # Per-(part, scene): take the last two valid waypoints. Scenes
+            # whose traj_length is 1 keep a single final goal (the "pre" slot
+            # duplicates the final — but traj_lengths stays 1, so downstream
+            # code only reads slot 0).
+            P, S, _, _ = self._ms_goals.shape
+            final_idx = self._ms_traj_lengths - 1                       # [P, S]
+            pre_idx = torch.clamp(self._ms_traj_lengths - 2, min=0)     # [P, S]
+            p_ar = torch.arange(P).unsqueeze(1).expand(P, S)
+            s_ar = torch.arange(S).unsqueeze(0).expand(P, S)
+            pre_goals = self._ms_goals[p_ar, s_ar, pre_idx]             # [P, S, 7]
+            final_goals = self._ms_goals[p_ar, s_ar, final_idx]         # [P, S, 7]
+            self._ms_goals = torch.stack([pre_goals, final_goals], dim=2)  # [P, S, 2, 7]
+            self._ms_max_traj_len = 2
+            self._ms_traj_lengths = torch.clamp(self._ms_traj_lengths, max=2)
+            print(
+                f"[FabricaEnv] preInsertAndFinal=True (multi-init): "
                 f"truncated _ms_goals to shape {tuple(self._ms_goals.shape)}"
             )
 

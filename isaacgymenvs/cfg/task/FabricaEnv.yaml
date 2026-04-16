@@ -35,3 +35,10 @@ env:
   # scenes.npz) to just the final waypoint. Start pose is unchanged.
   # Downstream: max_consecutive_successes = 1.
   finalGoalOnly: False
+
+  # When True, truncate the subgoal sequence to [pre-insert, insert] —
+  # i.e. the last two waypoints — so the policy first approaches the
+  # insertion site, then inserts. Falls back to the single final goal
+  # when a trajectory has <2 waypoints. Mutually exclusive with
+  # finalGoalOnly. Downstream: max_consecutive_successes = 2.
+  preInsertAndFinal: False
