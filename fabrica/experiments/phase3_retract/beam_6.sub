@@ -100,7 +100,7 @@ else
     EXPERIMENT_NAME="${OBJECT_NAME}_${DATETIME}"
 fi
 scontrol update JobId="$SLURM_JOB_ID" JobName="$EXPERIMENT_NAME"
-HYDRA_RUN_DIR="./train_dir/${WANDB_PROJECT}/${WANDB_GROUP}/${EXPERIMENT_NAME}"
+HYDRA_RUN_DIR="${REPO_ROOT}/train_dir/${WANDB_PROJECT}/${WANDB_GROUP}/${EXPERIMENT_NAME}"
 mkdir -p "$HYDRA_RUN_DIR"
 exec > "${HYDRA_RUN_DIR}/slurm.log" 2> "${HYDRA_RUN_DIR}/slurm.err"
 
