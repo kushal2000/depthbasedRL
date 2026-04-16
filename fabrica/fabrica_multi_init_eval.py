@@ -66,6 +66,21 @@ _GOAL_MODE_OVERRIDE_KEY = {
 }
 
 
+def apply_goal_mode(goals: List[List[float]], mode: str) -> List[List[float]]:
+    """Slice a dense goal trajectory for a given goal mode (client-side).
+
+    Used by the reuse-worker eval path so goal-mode switching doesn't
+    require re-instantiating the env.
+    """
+    if mode == "dense" or len(goals) <= 1:
+        return goals
+    if mode == "final_only":
+        return [goals[-1]]
+    if mode == "pre_insert_and_final":
+        return [goals[-2], goals[-1]]
+    raise ValueError(f"Unknown goal mode: {mode}")
+
+
 # ===================================================================
 # Scene data loading
 # ===================================================================
