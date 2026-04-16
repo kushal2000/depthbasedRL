@@ -184,6 +184,95 @@ PYTHONPATH=. python isaacsim_conversion/rollout.py --headless --max_steps 700 \
     --config pretrained_policy/config.yaml
 ```
 
+## Distillation
+
+The repo now includes a first-pass Isaac Sim distillation path for the fixed
+DexToolBench hammer task:
+
+- task: `hammer / claw_hammer / swing_down`
+- teacher: existing low-dimensional Isaac Gym policy
+- student default: mono transformer + recurrence
+- student modality default: `depth`
+- auxiliary head default: `object_pos`
+
+### Camera sanity check
+
+This uses the real-camera-inspired `T_W_R @ T_R_C` pose from the planning work
+and saves RGB/depth snapshots under `distillation_runs/.../camera_debug/`.
+
+```bash
+./scripts/run_in_isaacsim_env.sh python isaacsim_conversion/camera_debug.py \
+    --mode camera_debug \
+    --headless \
+    --camera_config isaacsim_conversion/configs/hammer_camera.yaml
+```
+
+### Teacher-only baseline
+
+```bash
+./scripts/run_in_isaacsim_env.sh python isaacsim_conversion/distill_eval.py \
+    --mode teacher_eval \
+    --headless \
+    --teacher_checkpoint pretrained_policy/model.pth \
+    --teacher_config pretrained_policy/config.yaml
+```
+
+### Student training
+
+```bash
+./scripts/run_in_isaacsim_env.sh python isaacsim_conversion/distill.py \
+    --mode train \
+    --headless \
+    --teacher_checkpoint pretrained_policy/model.pth \
+    --teacher_config pretrained_policy/config.yaml \
+    --camera_config isaacsim_conversion/configs/hammer_camera.yaml \
+    --distill_config isaacsim_conversion/configs/hammer_distill.yaml
+```
+
+By default this writes to:
+
+```text
+distillation_runs/<timestamped_run>/
+  resolved_distill_config.yaml
+  metrics.csv
+  checkpoints/student_latest.pt
+  checkpoints/student_best.pt
+  camera_debug/
+```
+
+### Student evaluation
+
+```bash
+./scripts/run_in_isaacsim_env.sh python isaacsim_conversion/distill_eval.py \
+    --mode student_eval \
+    --headless \
+    --student_checkpoint distillation_runs/<run>/checkpoints/student_best.pt \
+    --teacher_checkpoint pretrained_policy/model.pth \
+    --teacher_config pretrained_policy/config.yaml
+```
+
+### Quick ablations
+
+Disable auxiliary object-position loss:
+
+```bash
+./scripts/run_in_isaacsim_env.sh python isaacsim_conversion/distill.py \
+    --mode train \
+    --headless \
+    --distill_config isaacsim_conversion/configs/hammer_distill.yaml \
+    --student_modality depth
+```
+
+Then set `aux_object_pos_weight: 0.0` in
+`isaacsim_conversion/configs/hammer_distill.yaml`.
+
+Try RGB or RGB-D instead of depth:
+
+```bash
+--student_modality rgb
+--student_modality rgbd
+```
+
 ### Full rollout with video recording
 
 ```bash
