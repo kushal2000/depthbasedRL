@@ -377,8 +377,8 @@ class IsaacSimDistillEnv:
         for _ in range(PHYSICS_SUBSTEPS):
             self.sim.step(render=render)
         self.scene.update(PHYSICS_DT)
-        if render:
-            self.sim.render()
+        # Camera outputs need an explicit render pass even in headless mode.
+        self.sim.render()
         self.camera.update(PHYSICS_DT, force_recompute=True)
 
     def compute_sim_state(self) -> SimState:
