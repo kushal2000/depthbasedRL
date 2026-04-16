@@ -248,6 +248,7 @@ def _create_fabrica_env(config_path, headless, device, overrides):
         "multiPart": False,
         "multiInitStates": False,
         "finalGoalOnly": False,
+        "preInsertAndFinal": False,
         "objectNames": None,
     }
     for k, v in fabrica_defaults.items():
