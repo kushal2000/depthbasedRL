@@ -43,6 +43,10 @@ from fabrica.fabrica_eval_all import (
     _table_urdf_rel,
     parse_overrides,
 )
+from fabrica.fabrica_multi_init_eval import (
+    GOAL_MODES,
+    _GOAL_MODE_OVERRIDE_KEY,
+)
 
 # scenes.npz / scenes_val.npz filenames per split
 SPLIT_FILES = {
@@ -402,6 +406,15 @@ def main():
                              "multi_init_eval_results_<timestamp>.json)")
     parser.add_argument("--policies", nargs="+", default=None,
                         help="Subset of registered policies (default: all multi-init policies)")
+    parser.add_argument("--policies-dir", type=str, default=None,
+                        help="Directory of policy subfolders, each containing "
+                             "config.yaml + model.pth. Every subfolder becomes "
+                             "one policy. Takes precedence over --policies.")
+    parser.add_argument("--goal-modes", nargs="+", choices=GOAL_MODES,
+                        default=["dense"],
+                        help="One or more goal modes to evaluate. Each selected "
+                             "policy is run once per mode; results use "
+                             "composite names <policy>__<mode>.")
     parser.add_argument("--assemblies", nargs="+", default=None,
                         help="Subset of assemblies (default: beam)")
     parser.add_argument("--parts", nargs="+", default=None,
@@ -424,31 +437,47 @@ def main():
     # Resolve splits
     splits = ["train", "val"] if args.split == "both" else [args.split]
 
-    # Pick default policy subset — multi-init ones — if not specified
-    default_policy_subset = [
-        "beam_multi_init_dr", "beam_multi_init_no_dr",
-        "beam_table_rand_dr", "beam_table_rand_no_dr",
-    ]
-    selected_names = args.policies or default_policy_subset
+    selected_policies: Dict[str, Tuple[Path, Path]] = {}
 
-    selected_policies = {}
-    for name in selected_names:
-        if name not in POLICIES:
-            print(f"WARNING: Unknown policy '{name}', skipping. "
-                  f"Available: {list(POLICIES.keys())}")
-            continue
-        config_path, checkpoint_path = POLICIES[name]
-        if not config_path.exists():
-            print(f"WARNING: Config not found for '{name}': {config_path}, skipping.")
-            continue
-        if not checkpoint_path.exists():
-            print(f"WARNING: Checkpoint not found for '{name}': {checkpoint_path}, skipping.")
-            continue
-        selected_policies[name] = (config_path, checkpoint_path)
+    if args.policies_dir is not None:
+        pdir = Path(args.policies_dir)
+        if not pdir.is_absolute():
+            pdir = REPO_ROOT / pdir
+        if not pdir.exists():
+            print(f"ERROR: --policies-dir not found: {pdir}")
+            sys.exit(1)
+        for sub in sorted(pdir.iterdir()):
+            cfg = sub / "config.yaml"
+            ckpt = sub / "model.pth"
+            if cfg.exists() and ckpt.exists():
+                selected_policies[sub.name] = (cfg, ckpt)
+        if not selected_policies:
+            print(f"ERROR: No policy subfolders in {pdir} "
+                  f"(each needs config.yaml + model.pth)")
+            sys.exit(1)
+    else:
+        default_policy_subset = [
+            "beam_multi_init_dr", "beam_multi_init_no_dr",
+            "beam_table_rand_dr", "beam_table_rand_no_dr",
+        ]
+        selected_names = args.policies or default_policy_subset
+        for name in selected_names:
+            if name not in POLICIES:
+                print(f"WARNING: Unknown policy '{name}', skipping. "
+                      f"Available: {list(POLICIES.keys())}")
+                continue
+            config_path, checkpoint_path = POLICIES[name]
+            if not config_path.exists():
+                print(f"WARNING: Config not found for '{name}': {config_path}, skipping.")
+                continue
+            if not checkpoint_path.exists():
+                print(f"WARNING: Checkpoint not found for '{name}': {checkpoint_path}, skipping.")
+                continue
+            selected_policies[name] = (config_path, checkpoint_path)
 
-    if not selected_policies:
-        print("ERROR: No valid policies found. Exiting.")
-        sys.exit(1)
+        if not selected_policies:
+            print("ERROR: No valid policies found. Exiting.")
+            sys.exit(1)
 
     assemblies = args.assemblies or ALL_ASSEMBLIES_DEFAULT
 
@@ -474,18 +503,38 @@ def main():
               "scenes_val.npz? Exiting.")
         sys.exit(1)
 
-    extra_overrides = parse_overrides(args.override)
+    base_overrides = parse_overrides(args.override)
 
+    # Loop over goal modes. For each mode, run every policy under a
+    # composite name "<policy>__<mode>" so the downstream summary /
+    # printer treat (policy, mode) pairs as independent rows.
+    results: dict = {}
+    composite_policies: Dict[str, Tuple[Path, Path]] = {}
     t_start = time.time()
-    results = run_all_evaluations(
-        selected_policies, tasks, scenes_by_assembly_split,
-        args.collision, extra_overrides, args.timeout,
-    )
+    for mode in args.goal_modes:
+        mode_overrides = dict(base_overrides)
+        mode_key = _GOAL_MODE_OVERRIDE_KEY.get(mode)
+        if mode_key is not None:
+            mode_overrides[mode_key] = True
+
+        mode_policies = {
+            f"{name}__{mode}": paths
+            for name, paths in selected_policies.items()
+        }
+        composite_policies.update(mode_policies)
+
+        print(f"\n########  Goal mode: {mode}  ########")
+        mode_results = run_all_evaluations(
+            mode_policies, tasks, scenes_by_assembly_split,
+            args.collision, mode_overrides, args.timeout,
+        )
+        results.update(mode_results)
+
     total_time = time.time() - t_start
 
     summary = compute_summary(results)
 
-    policy_names = list(selected_policies.keys())
+    policy_names = list(composite_policies.keys())
     print_summary_table(summary, splits, policy_names)
     print(f"\nTotal wall time: {total_time/60:.1f} minutes")
 
@@ -506,9 +555,14 @@ def main():
             "parts": args.parts,
             "num_tasks": len(tasks),
             "total_wall_time_s": round(total_time, 1),
+            "goal_modes": args.goal_modes,
             "policies": {
                 name: {"config": str(cfg), "checkpoint": str(ckpt)}
                 for name, (cfg, ckpt) in selected_policies.items()
+            },
+            "composite_policies": {
+                name: {"config": str(cfg), "checkpoint": str(ckpt)}
+                for name, (cfg, ckpt) in composite_policies.items()
             },
         },
         "results": results,

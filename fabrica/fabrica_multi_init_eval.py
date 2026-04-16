@@ -54,6 +54,17 @@ SPLIT_FILES = {
     "val": "scenes_val.npz",
 }
 
+# Goal modes map to config overrides read by FabricaEnv:
+#   dense                 -> full dense trajectory (no flag)
+#   final_only            -> finalGoalOnly=True     (single insertion goal)
+#   pre_insert_and_final  -> preInsertAndFinal=True (pre-insert + insert, 2 goals)
+GOAL_MODES = ["dense", "final_only", "pre_insert_and_final"]
+
+_GOAL_MODE_OVERRIDE_KEY = {
+    "final_only": "task.env.finalGoalOnly",
+    "pre_insert_and_final": "task.env.preInsertAndFinal",
+}
+
 
 # ===================================================================
 # Scene data loading
@@ -118,18 +129,28 @@ class MultiInitAssemblyDemo:
 
     _PH = "-- Select --"
 
-    def __init__(self, config_path: str, checkpoint_path: str, port: int = 8080,
+    def __init__(self, policies: Dict[str, Tuple[str, str]],
+                 port: int = 8080,
                  final_goal_tolerance: Optional[float] = None,
                  collision_method: str = "coacd",
                  extra_overrides: Optional[dict] = None,
-                 headless: bool = True):
+                 headless: bool = True,
+                 goal_mode: str = "dense",
+                 initial_policy: Optional[str] = None):
+        if goal_mode not in GOAL_MODES:
+            raise ValueError(f"goal_mode must be one of {GOAL_MODES}, got {goal_mode}")
+        if not policies:
+            raise ValueError("policies dict must be non-empty")
+        self.policies = policies
+        if initial_policy is None or initial_policy not in policies:
+            initial_policy = next(iter(policies))
+        self.initial_policy = initial_policy
         self.port = port
-        self.config_path = config_path
-        self.checkpoint_path = checkpoint_path
         self.final_goal_tolerance = final_goal_tolerance
         self.collision_method = collision_method
         self.extra_overrides = extra_overrides or {}
         self.headless = headless
+        self.goal_mode = goal_mode
         self.server = viser.ViserServer(host="0.0.0.0", port=port)
 
         self._proc: Optional[multiprocessing.Process] = None
@@ -179,6 +200,10 @@ class MultiInitAssemblyDemo:
         )
 
         with self.server.gui.add_folder("Scene Selection", expand_by_default=True):
+            self._dd_policy = self.server.gui.add_dropdown(
+                "Policy", options=list(self.policies.keys()),
+                initial_value=self.initial_policy,
+            )
             self._dd_split = self.server.gui.add_dropdown(
                 "Split", options=["train", "val"], initial_value="train",
             )
@@ -191,6 +216,9 @@ class MultiInitAssemblyDemo:
             )
             self._dd_part = self.server.gui.add_dropdown(
                 "Part", options=[self._PH], initial_value=self._PH,
+            )
+            self._dd_goal_mode = self.server.gui.add_dropdown(
+                "Goal Mode", options=GOAL_MODES, initial_value=self.goal_mode,
             )
             self._btn_load = self.server.gui.add_button("Load Environment")
             self._btn_load.on_click(lambda _: self._load_env())
@@ -506,7 +534,12 @@ class MultiInitAssemblyDemo:
         self._pending_split = split
         self._pending_scene_idx = scene_idx
 
-        label = f"{assembly} / scene {scene_idx} [{split}] / Part {part_id}"
+        goal_mode = self._dd_goal_mode.value
+        label = (
+            f"{self._dd_policy.value} | "
+            f"{assembly} / scene {scene_idx} [{split}] / "
+            f"Part {part_id} / goals: {goal_mode}"
+        )
         self._md_status.content = f"**Status:** Loading *{label}* ..."
         self._md_task.content = f"**Task:** {label}"
         self._md_retract.content = "**Retract:** --"
@@ -529,6 +562,9 @@ class MultiInitAssemblyDemo:
             "task.env.objectStartPose": start_pose,
             "task.env.fixedGoalStates": goals,
         }
+        mode_key = _GOAL_MODE_OVERRIDE_KEY.get(goal_mode)
+        if mode_key is not None:
+            scene_overrides[mode_key] = True
 
         # Chain arm state between parts in auto-sequence
         initial_arm_pos = None
@@ -537,13 +573,16 @@ class MultiInitAssemblyDemo:
                 and self._last_arm_pos is not None):
             initial_arm_pos = self._last_arm_pos
 
+        policy_name = self._dd_policy.value
+        config_path, checkpoint_path = self.policies[policy_name]
+
         ctx = multiprocessing.get_context("spawn")
         parent_conn, child_conn = ctx.Pipe()
         self._conn = parent_conn
         self._proc = ctx.Process(
             target=sim_worker,
             args=(child_conn, assembly, part_id,
-                  self.config_path, self.checkpoint_path, table_urdf_rel,
+                  config_path, checkpoint_path, table_urdf_rel,
                   self.final_goal_tolerance, self.collision_method,
                   scene_overrides, self.headless, False, None, initial_arm_pos),
             daemon=True,
@@ -551,7 +590,7 @@ class MultiInitAssemblyDemo:
         self._proc.start()
         child_conn.close()
         print(f"[launcher] Spawned subprocess pid={self._proc.pid} "
-              f"for {assembly}/scene{scene_idx}/{part_id}")
+              f"for {policy_name} on {assembly}/scene{scene_idx}/{part_id}")
 
     # -- Commands -------------------------------------------------------
 
@@ -828,11 +867,25 @@ if __name__ == "__main__":
         description="Fabrica Multi-Init-State Evaluation (interactive viser)",
     )
     parser.add_argument("--port", type=int, default=8080)
-    parser.add_argument("--config-path", type=str, required=True)
-    parser.add_argument("--checkpoint-path", type=str, required=True)
+    parser.add_argument("--policies-dir", type=str, default=None,
+                        help="Directory of policy subfolders, each containing "
+                             "config.yaml + model.pth. One subfolder = one "
+                             "option in the viser Policy dropdown.")
+    parser.add_argument("--config-path", type=str, default=None,
+                        help="Single-policy fallback when --policies-dir is "
+                             "not used.")
+    parser.add_argument("--checkpoint-path", type=str, default=None,
+                        help="Single-policy fallback when --policies-dir is "
+                             "not used.")
+    parser.add_argument("--initial-policy", type=str, default=None,
+                        help="Name of policy subfolder to pre-select in the "
+                             "dropdown (only meaningful with --policies-dir).")
     parser.add_argument("--final-goal-tolerance", type=float, default=None)
     parser.add_argument("--collision", choices=["vhacd", "coacd", "sdf"],
                         default="coacd")
+    parser.add_argument("--goal-mode", choices=GOAL_MODES, default="dense",
+                        help="Initial goal-trajectory mode "
+                             "(runtime-changeable via the viser dropdown)")
     parser.add_argument("--no-headless", action="store_true",
                         help="Show IsaacGym viewer window")
     parser.add_argument("--override", nargs=2, action="append", default=[],
@@ -863,12 +916,33 @@ if __name__ == "__main__":
             val = False
         extra_overrides[key] = val
 
+    policies: Dict[str, Tuple[str, str]] = {}
+    if args.policies_dir is not None:
+        pdir = Path(_resolve(args.policies_dir))
+        for sub in sorted(pdir.iterdir()):
+            cfg = sub / "config.yaml"
+            ckpt = sub / "model.pth"
+            if cfg.exists() and ckpt.exists():
+                policies[sub.name] = (str(cfg), str(ckpt))
+        if not policies:
+            raise SystemExit(
+                f"No policy subfolders (with config.yaml + model.pth) in {pdir}"
+            )
+    if args.config_path and args.checkpoint_path:
+        name = Path(args.config_path).parent.name or "policy"
+        policies[name] = (_resolve(args.config_path), _resolve(args.checkpoint_path))
+    if not policies:
+        raise SystemExit(
+            "Provide --policies-dir or (--config-path and --checkpoint-path)."
+        )
+
     MultiInitAssemblyDemo(
-        config_path=_resolve(args.config_path),
-        checkpoint_path=_resolve(args.checkpoint_path),
+        policies=policies,
         port=args.port,
         final_goal_tolerance=args.final_goal_tolerance,
         collision_method=args.collision,
         extra_overrides=extra_overrides,
         headless=not args.no_headless,
+        goal_mode=args.goal_mode,
+        initial_policy=args.initial_policy,
     ).run()
