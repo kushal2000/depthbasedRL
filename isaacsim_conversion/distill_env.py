@@ -91,6 +91,8 @@ class IsaacSimDistillEnv:
         self.goal_pose = np.repeat(self.task_spec.goals[0][None], self.num_envs, axis=0).astype(np.float32)
         self.current_start_pose = np.repeat(self.task_spec.start_pose[None], self.num_envs, axis=0).astype(np.float32)
         self.prev_targets: np.ndarray | None = None
+        self.camera_world_pos = np.zeros((self.num_envs, 3), dtype=np.float32)
+        self.camera_world_quat_wxyz = np.zeros((self.num_envs, 4), dtype=np.float32)
 
         self._setup_scene()
 
@@ -142,9 +144,6 @@ class IsaacSimDistillEnv:
         from isaaclab.sensors import CameraCfg
         from isaaclab.utils import configclass
 
-        # Camera offsets are authored under each cloned env namespace, so the pose here is
-        # env-local. This matches the usual Isaac Lab clone pattern where translations inherit
-        # the env origin automatically while rotations remain identical across envs.
         camera_pose = self.camera_pose
         camera_types = list(self.camera_data_types)
         robot_joint_vel = {name: 0.0 for name in JOINT_NAMES_ISAACGYM}
@@ -226,9 +225,9 @@ class IsaacSimDistillEnv:
                     clipping_range=(0.1, 100.0),
                 ),
                 offset=CameraCfg.OffsetCfg(
-                    pos=camera_pose.pos,
-                    rot=camera_pose.quat_wxyz,
-                    convention=camera_pose.convention,
+                    pos=(0.0, 0.0, 0.0),
+                    rot=(1.0, 0.0, 0.0, 0.0),
+                    convention="ros",
                 ),
             )
 
@@ -299,6 +298,22 @@ class IsaacSimDistillEnv:
         )
         self.reset()
 
+    def _apply_camera_world_poses(self, env_ids: torch.Tensor | None = None):
+        if env_ids is None:
+            env_ids = torch.arange(self.num_envs, device=self.device, dtype=torch.long)
+        env_ids_np = env_ids.detach().cpu().numpy()
+        env_origins = self.env_origins[env_ids].detach().cpu().numpy()
+        positions = env_origins + np.asarray(self.camera_pose.pos, dtype=np.float32)[None, :]
+        orientations = np.repeat(np.asarray(self.camera_pose.quat_wxyz, dtype=np.float32)[None, :], len(env_ids_np), axis=0)
+        self.camera.set_world_poses(
+            positions=positions,
+            orientations=orientations,
+            env_ids=env_ids,
+            convention=self.camera_pose.convention,
+        )
+        self.camera_world_pos[env_ids_np] = positions
+        self.camera_world_quat_wxyz[env_ids_np] = orientations
+
     def _sample_start_poses(self) -> np.ndarray:
         start = np.repeat(self.task_spec.start_pose[None], self.num_envs, axis=0).astype(np.float32)
         if self.object_start_mode == "fixed":
@@ -340,10 +355,13 @@ class IsaacSimDistillEnv:
         zeros_vel = torch.zeros((self.num_envs, 6), dtype=torch.float32, device=self.device)
         self.object_rigid.write_root_pose_to_sim(object_pose_w)
         self.object_rigid.write_root_velocity_to_sim(zeros_vel)
+        self._apply_camera_world_poses()
 
         self.scene.write_data_to_sim()
         self.sim.step(render=not self.headless)
         self.scene.update(PHYSICS_DT)
+        self.sim.render()
+        self.camera.update(0.0, force_recompute=True)
         self.prev_targets = self.robot.data.joint_pos.detach().cpu().numpy().copy()
         self.goal_idx = np.zeros(self.num_envs, dtype=np.int32)
         self.near_goal_steps = np.zeros(self.num_envs, dtype=np.int32)
@@ -358,8 +376,10 @@ class IsaacSimDistillEnv:
         self.scene.write_data_to_sim()
         for _ in range(PHYSICS_SUBSTEPS):
             self.sim.step(render=render)
-            self.scene.update(PHYSICS_DT)
-        self.camera.update(PHYSICS_DT)
+        self.scene.update(PHYSICS_DT)
+        if render:
+            self.sim.render()
+        self.camera.update(PHYSICS_DT, force_recompute=True)
 
     def compute_sim_state(self) -> SimState:
         q = self.robot.data.joint_pos.detach().cpu().numpy()

@@ -21,7 +21,13 @@ from isaacsim_conversion.student_policy import (
     preprocess_image,
     resize_image,
 )
-from isaacsim_conversion.task_utils import CameraPose, load_task_spec, load_yaml
+from isaacsim_conversion.task_utils import (
+    CameraPose,
+    default_real_camera_pose,
+    default_real_camera_transform,
+    load_task_spec,
+    load_yaml,
+)
 
 
 def launch_app():
@@ -49,6 +55,8 @@ def launch_app():
     parser.add_argument("--num_envs", type=int, default=None)
     parser.add_argument("--env_spacing", type=float, default=None)
     parser.add_argument("--object_start_mode", choices=["fixed", "randomized"], default=None)
+    parser.add_argument("--capture_frames", action="store_true")
+    parser.add_argument("--capture_frame_stride", type=int, default=1)
     AppLauncher.add_app_launcher_args(parser)
     args = parser.parse_args()
     args.enable_cameras = True
@@ -135,11 +143,18 @@ def load_distill_settings(path: Path, args) -> DistillSettings:
 def load_camera_pose(path: Path) -> tuple[str, CameraPose]:
     cfg = load_yaml(path)
     modality = cfg.get("modality", "depth")
+    if cfg.get("pose_source") == "real_camera_t_w_c":
+        pose = default_real_camera_pose()
+        return modality, CameraPose(
+            pos=pose.pos,
+            quat_wxyz=pose.quat_wxyz,
+            convention=str(cfg.get("convention", pose.convention)),
+        )
     pose_cfg = cfg.get("pose", {})
     return modality, CameraPose(
         pos=tuple(float(x) for x in pose_cfg["pos"]),
         quat_wxyz=tuple(float(x) for x in pose_cfg["quat_wxyz"]),
-        convention=str(cfg.get("convention", pose_cfg.get("convention", "opengl"))),
+        convention=str(cfg.get("convention", pose_cfg.get("convention", "ros"))),
     )
 
 
@@ -246,6 +261,9 @@ def run_episode(
     optimizer: torch.optim.Optimizer | None,
     settings: DistillSettings,
     beta_scheduler: BetaScheduler,
+    run_dir: Path | None = None,
+    capture_frames: bool = False,
+    capture_frame_stride: int = 1,
 ) -> dict[str, float]:
     teacher.reset()
     env.reset()
@@ -277,6 +295,8 @@ def run_episode(
         )
         env.apply_action(targets)
         env.step(render=not _args.headless)
+        if capture_frames and run_dir is not None and (step_i % max(capture_frame_stride, 1) == 0):
+            save_camera_debug_step(env, run_dir, step_i)
         next_sim_state = env.compute_sim_state()
         finished = env.maybe_advance_goal(next_sim_state)
 
@@ -372,11 +392,15 @@ def save_camera_debug(env: IsaacSimDistillEnv, run_dir: Path):
             {
                 "num_envs": env.num_envs,
                 "camera_convention": env.camera_pose.convention,
-                "camera_pose_frame": "env_local_after_cloning",
+                "camera_pose_frame": "world_pose_via_set_world_poses",
                 "camera_pose": {
                     "pos": list(env.camera_pose.pos),
                     "quat_wxyz": list(env.camera_pose.quat_wxyz),
                 },
+                "raw_T_W_C": default_real_camera_transform().tolist(),
+                "resolved_camera_world_pos_w": env.camera.data.pos_w.detach().cpu().numpy().tolist(),
+                "resolved_camera_world_quat_w_ros": env.camera.data.quat_w_ros.detach().cpu().numpy().tolist(),
+                "env_origins": env.env_origins.detach().cpu().numpy().tolist(),
                 "aux_object_pos_frame": "env_local_world",
                 "object_start_mode": env.object_start_mode,
                 "current_start_pose": env.current_start_pose.tolist(),
@@ -384,6 +408,43 @@ def save_camera_debug(env: IsaacSimDistillEnv, run_dir: Path):
             f,
             indent=2,
         )
+
+
+def save_camera_debug_step(env: IsaacSimDistillEnv, run_dir: Path, step_i: int):
+    import imageio.v3 as iio
+
+    outputs = env.camera.data.output
+    grids_dir = run_dir / "camera_debug" / "grids"
+    grids_dir.mkdir(parents=True, exist_ok=True)
+    if outputs.get("rgb") is not None:
+        rgb_batch = outputs["rgb"].cpu().numpy()[..., :3].astype(np.uint8)
+        rgb_images = []
+        for env_id, rgb in enumerate(rgb_batch):
+            rgb_images.append(rgb)
+            env_dir = run_dir / "camera_debug" / f"env_{env_id}" / "rgb"
+            env_dir.mkdir(parents=True, exist_ok=True)
+            iio.imwrite(env_dir / f"frame_{step_i:04d}.png", rgb)
+        iio.imwrite(grids_dir / f"rgb_{step_i:04d}.png", _make_grid(rgb_images))
+    if outputs.get("distance_to_image_plane") is not None:
+        depth_batch = outputs["distance_to_image_plane"].cpu().numpy()
+        depth_images = []
+        for env_id, depth in enumerate(depth_batch):
+            if depth.ndim == 3:
+                depth = depth[..., 0]
+            finite_mask = np.isfinite(depth)
+            depth_vis = np.zeros_like(depth, dtype=np.float32)
+            if np.any(finite_mask):
+                finite_depth = depth[finite_mask]
+                depth_min = float(np.min(finite_depth))
+                depth_max = float(np.max(finite_depth))
+                denom = max(depth_max - depth_min, 1e-6)
+                depth_vis[finite_mask] = np.clip((depth[finite_mask] - depth_min) / denom, 0.0, 1.0)
+            depth_img = (depth_vis * 255).astype(np.uint8)
+            depth_images.append(depth_img)
+            env_dir = run_dir / "camera_debug" / f"env_{env_id}" / "depth"
+            env_dir.mkdir(parents=True, exist_ok=True)
+            iio.imwrite(env_dir / f"frame_{step_i:04d}.png", depth_img)
+        iio.imwrite(grids_dir / f"depth_{step_i:04d}.png", _make_grid(depth_images))
 
 
 def main():
@@ -453,7 +514,18 @@ def main():
 
     best_metric = -1.0
     for episode in range(settings.num_episodes if args.mode == "train" else 1):
-        metrics = run_episode(args.mode, env, teacher, student, optimizer if args.mode == "train" else None, settings, beta_scheduler)
+        metrics = run_episode(
+            args.mode,
+            env,
+            teacher,
+            student,
+            optimizer if args.mode == "train" else None,
+            settings,
+            beta_scheduler,
+            run_dir=run_dir,
+            capture_frames=args.capture_frames,
+            capture_frame_stride=args.capture_frame_stride,
+        )
         _log(
             f"[episode {episode}] mode={args.mode}, goal_completion_ratio={metrics['goal_completion_ratio']:.3f}, "
             f"goal_idx={metrics['goal_idx']:.0f}, action_loss={metrics['action_loss']:.6f}, "
