@@ -142,6 +142,9 @@ class IsaacSimDistillEnv:
         from isaaclab.sensors import CameraCfg
         from isaaclab.utils import configclass
 
+        # Camera offsets are authored under each cloned env namespace, so the pose here is
+        # env-local. This matches the usual Isaac Lab clone pattern where translations inherit
+        # the env origin automatically while rotations remain identical across envs.
         camera_pose = self.camera_pose
         camera_types = list(self.camera_data_types)
         robot_joint_vel = {name: 0.0 for name in JOINT_NAMES_ISAACGYM}
@@ -365,6 +368,10 @@ class IsaacSimDistillEnv:
         object_quat_w = self.object_rigid.data.root_quat_w.detach().cpu().numpy()
 
         object_pose = np.zeros((self.num_envs, 7), dtype=np.float32)
+        # Keep object pose env-local by subtracting scene env origins. This matches the
+        # DEXTRAH env convention:
+        #   object_pos = self.object.data.root_pos_w - self.scene.env_origins
+        # and is the frame used for aux_info["object_pos"] in their distillation code.
         object_pose[:, :3] = object_pos_w - self.env_origins.cpu().numpy()
         object_pose[:, 3:] = object_quat_w[:, [1, 2, 3, 0]]
 
@@ -379,6 +386,8 @@ class IsaacSimDistillEnv:
             goal_idx=self.goal_idx.copy(),
             kp_dist=kp_dist.copy(),
             near_goal_steps=self.near_goal_steps.copy(),
+            # This is the DEXTRAH-style auxiliary target frame: env-local world position,
+            # not camera-relative and not robot-relative.
             object_pos_world_env_frame=object_pose[:, :3].copy(),
         )
 

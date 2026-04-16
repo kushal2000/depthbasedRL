@@ -372,10 +372,12 @@ def save_camera_debug(env: IsaacSimDistillEnv, run_dir: Path):
             {
                 "num_envs": env.num_envs,
                 "camera_convention": env.camera_pose.convention,
+                "camera_pose_frame": "env_local_after_cloning",
                 "camera_pose": {
                     "pos": list(env.camera_pose.pos),
                     "quat_wxyz": list(env.camera_pose.quat_wxyz),
                 },
+                "aux_object_pos_frame": "env_local_world",
                 "object_start_mode": env.object_start_mode,
                 "current_start_pose": env.current_start_pose.tolist(),
             },

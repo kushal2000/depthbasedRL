@@ -195,6 +195,37 @@ DexToolBench hammer task:
 - student modality default: `depth`
 - auxiliary head default: `object_pos`
 
+### Frame conventions and DEXTRAH reference
+
+This distillation path now follows the same important env-local convention used
+by DEXTRAH for auxiliary object position:
+
+- DEXTRAH env computes object position as:
+  - `object_pos = object.data.root_pos_w - scene.env_origins`
+- DEXTRAH then exposes that through:
+  - `aux_info["object_pos"]`
+- DEXTRAH's DAgger code consumes that env output directly as the auxiliary
+  supervision target.
+
+This repo mirrors that convention:
+
+- `object_pos` auxiliary target is **env-local world position**
+- it is **not** camera-relative
+- it is **not** robot-relative
+
+For camera placement in cloned multi-env scenes:
+
+- camera rotation is shared across envs
+- camera translation is authored **env-locally** under each cloned env namespace
+- env origins provide the world translation offset automatically
+
+For the real-camera `T_W_C` path, use Isaac Lab / USD camera convention:
+
+- `convention="opengl"`
+- right: `+X`
+- up: `+Y`
+- forward: `-Z`
+
 ### Camera sanity check
 
 This uses the real-camera-inspired `T_W_R @ T_R_C` pose from the planning work
