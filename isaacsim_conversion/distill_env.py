@@ -10,11 +10,14 @@ import torch
 
 from isaacgymenvs.utils.observation_action_utils_sharpa import (
     _compute_keypoint_positions,
-    compute_observation,
-    compute_fk_dict,
-    create_urdf_object,
     matrix_to_quaternion_xyzw_scipy,
+    OBJECT_KEYPOINT_OFFSETS_np,
+    PALM_OFFSET_np,
+    FINGERTIP_OFFSETS_np,
+    Q_LOWER_LIMITS_np,
+    Q_UPPER_LIMITS_np,
 )
+from isaacgymenvs.utils.torch_jit_utils import quat_rotate, unscale
 from isaacsim_conversion.isaacsim_env import (
     CONTROL_DT,
     DEFAULT_ASSET_FRICTION,
@@ -46,6 +49,8 @@ OBS_LIST = [
     "keypoints_rel_goal",
     "object_scales",
 ]
+OBJECT_BASE_SIZE = 0.04
+KEYPOINT_SCALE = 1.5
 
 
 @dataclass
@@ -75,6 +80,7 @@ class IsaacSimDistillEnv:
         object_start_mode: str = "fixed",
         object_pos_noise_xyz: tuple[float, float, float] = (0.03, 0.03, 0.01),
         object_yaw_noise_deg: float = 20.0,
+        enable_camera: bool = True,
     ):
         self.task_spec = task_spec
         self.camera_modality = camera_modality
@@ -85,10 +91,10 @@ class IsaacSimDistillEnv:
         self.object_yaw_noise_deg = float(object_yaw_noise_deg)
         self.app = app
         self.headless = headless
-        self._fk_urdf = create_urdf_object("iiwa14_left_sharpa_adjusted_restricted")
         self.camera_pose = camera_pose_override or task_spec.camera_pose
         self.camera_intrinsics = camera_intrinsics or CameraIntrinsics()
         self.use_real_camera_transform = use_real_camera_transform
+        self.enable_camera = enable_camera
         self.action_dim = 29
         self.student_proprio_dim = 29 + 29 + 29 + 1
         self.object_scales_batch = np.repeat(self.task_spec.object_scales.astype(np.float32), self.num_envs, axis=0)
@@ -102,6 +108,10 @@ class IsaacSimDistillEnv:
         self.camera_world_quat_wxyz = np.zeros((self.num_envs, 4), dtype=np.float32)
         self.permutation: np.ndarray | None = None
         self.inverse_permutation: np.ndarray | None = None
+        self.permutation_torch: torch.Tensor | None = None
+        self.inverse_permutation_torch: torch.Tensor | None = None
+        self.palm_body_idx: int | None = None
+        self.fingertip_body_indices: torch.Tensor | None = None
 
         self._setup_scene()
 
@@ -153,100 +163,168 @@ class IsaacSimDistillEnv:
         from isaaclab.actuators import ImplicitActuatorCfg
         from isaaclab.assets import AssetBaseCfg, ArticulationCfg, RigidObjectCfg
         from isaaclab.scene import InteractiveSceneCfg
-        from isaaclab.sensors import CameraCfg
         from isaaclab.utils import configclass
 
-        camera_pose = self.camera_pose
-        camera_types = list(self.camera_data_types)
         robot_joint_vel = {name: 0.0 for name in JOINT_NAMES_ISAACGYM}
         default_joint_pos = dict(DEFAULT_JOINT_POS)
+        if self.enable_camera:
+            from isaaclab.sensors import CameraCfg
 
-        @configclass
-        class DistillSceneCfg(InteractiveSceneCfg):
-            robot = ArticulationCfg(
-                prim_path="{ENV_REGEX_NS}/Robot",
-                spawn=sim_utils.UsdFileCfg(
-                    usd_path=robot_usd,
-                    rigid_props=sim_utils.RigidBodyPropertiesCfg(
-                        disable_gravity=True,
-                        max_depenetration_velocity=1000.0,
-                    ),
-                    collision_props=sim_utils.CollisionPropertiesCfg(
-                        contact_offset=0.002,
-                        rest_offset=0.0,
-                    ),
-                    articulation_props=sim_utils.ArticulationRootPropertiesCfg(
-                        enabled_self_collisions=False,
-                        solver_position_iteration_count=8,
-                        solver_velocity_iteration_count=0,
-                    ),
-                ),
-                init_state=ArticulationCfg.InitialStateCfg(
-                    pos=(0.0, 0.8, 0.0),
-                    joint_pos=default_joint_pos,
-                    joint_vel=robot_joint_vel,
-                ),
-                actuators={
-                    "arm": ImplicitActuatorCfg(
-                        joint_names_expr=["iiwa14_joint_.*"],
-                        stiffness={k: v for k, v in JOINT_STIFFNESSES.items() if k.startswith("iiwa14")},
-                        damping={k: v for k, v in JOINT_DAMPINGS.items() if k.startswith("iiwa14")},
-                    ),
-                    "hand": ImplicitActuatorCfg(
-                        joint_names_expr=["left_.*"],
-                        stiffness={k: v for k, v in JOINT_STIFFNESSES.items() if k.startswith("left")},
-                        damping={k: v for k, v in JOINT_DAMPINGS.items() if k.startswith("left")},
-                    ),
-                },
-            )
+            camera_types = list(self.camera_data_types)
 
-            table = AssetBaseCfg(
-                prim_path="{ENV_REGEX_NS}/Table",
-                spawn=sim_utils.UsdFileCfg(
-                    usd_path=table_usd,
-                    collision_props=sim_utils.CollisionPropertiesCfg(
-                        contact_offset=0.002,
-                        rest_offset=0.0,
+            @configclass
+            class DistillSceneCfg(InteractiveSceneCfg):
+                robot = ArticulationCfg(
+                    prim_path="{ENV_REGEX_NS}/Robot",
+                    spawn=sim_utils.UsdFileCfg(
+                        usd_path=robot_usd,
+                        rigid_props=sim_utils.RigidBodyPropertiesCfg(
+                            disable_gravity=True,
+                            max_depenetration_velocity=1000.0,
+                        ),
+                        collision_props=sim_utils.CollisionPropertiesCfg(
+                            contact_offset=0.002,
+                            rest_offset=0.0,
+                        ),
+                        articulation_props=sim_utils.ArticulationRootPropertiesCfg(
+                            enabled_self_collisions=False,
+                            solver_position_iteration_count=8,
+                            solver_velocity_iteration_count=0,
+                        ),
                     ),
-                ),
-                init_state=AssetBaseCfg.InitialStateCfg(pos=(0.0, 0.0, 0.38)),
-            )
-
-            object = RigidObjectCfg(
-                prim_path="{ENV_REGEX_NS}/Object",
-                spawn=sim_utils.UsdFileCfg(
-                    usd_path=object_usd,
-                    collision_props=sim_utils.CollisionPropertiesCfg(
-                        contact_offset=0.002,
-                        rest_offset=0.0,
+                    init_state=ArticulationCfg.InitialStateCfg(
+                        pos=(0.0, 0.8, 0.0),
+                        joint_pos=default_joint_pos,
+                        joint_vel=robot_joint_vel,
                     ),
-                ),
-            )
+                    actuators={
+                        "arm": ImplicitActuatorCfg(
+                            joint_names_expr=["iiwa14_joint_.*"],
+                            stiffness={k: v for k, v in JOINT_STIFFNESSES.items() if k.startswith("iiwa14")},
+                            damping={k: v for k, v in JOINT_DAMPINGS.items() if k.startswith("iiwa14")},
+                        ),
+                        "hand": ImplicitActuatorCfg(
+                            joint_names_expr=["left_.*"],
+                            stiffness={k: v for k, v in JOINT_STIFFNESSES.items() if k.startswith("left")},
+                            damping={k: v for k, v in JOINT_DAMPINGS.items() if k.startswith("left")},
+                        ),
+                    },
+                )
 
-            camera = CameraCfg(
-                prim_path="{ENV_REGEX_NS}/DistillCamera",
-                update_period=0,
-                update_latest_camera_pose=True,
-                height=self.camera_intrinsics.height,
-                width=self.camera_intrinsics.width,
-                data_types=camera_types,
-                spawn=sim_utils.PinholeCameraCfg(
-                    focal_length=self.camera_intrinsics.focal_length,
-                    focus_distance=self.camera_intrinsics.focus_distance,
-                    horizontal_aperture=self.camera_intrinsics.horizontal_aperture,
-                    clipping_range=self.camera_intrinsics.clipping_range,
-                ),
-                offset=CameraCfg.OffsetCfg(
-                    pos=(0.0, 0.0, 0.0),
-                    rot=(1.0, 0.0, 0.0, 0.0),
-                    convention=self.camera_pose.convention,
-                ),
-            )
+                table = AssetBaseCfg(
+                    prim_path="{ENV_REGEX_NS}/Table",
+                    spawn=sim_utils.UsdFileCfg(
+                        usd_path=table_usd,
+                        collision_props=sim_utils.CollisionPropertiesCfg(
+                            contact_offset=0.002,
+                            rest_offset=0.0,
+                        ),
+                    ),
+                    init_state=AssetBaseCfg.InitialStateCfg(pos=(0.0, 0.0, 0.38)),
+                )
 
-            light = AssetBaseCfg(
-                prim_path="/World/DomeLight",
-                spawn=sim_utils.DomeLightCfg(intensity=2000.0, color=(0.9, 0.9, 0.9)),
-            )
+                object = RigidObjectCfg(
+                    prim_path="{ENV_REGEX_NS}/Object",
+                    spawn=sim_utils.UsdFileCfg(
+                        usd_path=object_usd,
+                        collision_props=sim_utils.CollisionPropertiesCfg(
+                            contact_offset=0.002,
+                            rest_offset=0.0,
+                        ),
+                    ),
+                )
+
+                camera = CameraCfg(
+                    prim_path="{ENV_REGEX_NS}/DistillCamera",
+                    update_period=0,
+                    update_latest_camera_pose=True,
+                    height=self.camera_intrinsics.height,
+                    width=self.camera_intrinsics.width,
+                    data_types=camera_types,
+                    spawn=sim_utils.PinholeCameraCfg(
+                        focal_length=self.camera_intrinsics.focal_length,
+                        focus_distance=self.camera_intrinsics.focus_distance,
+                        horizontal_aperture=self.camera_intrinsics.horizontal_aperture,
+                        clipping_range=self.camera_intrinsics.clipping_range,
+                    ),
+                    offset=CameraCfg.OffsetCfg(
+                        pos=(0.0, 0.0, 0.0),
+                        rot=(1.0, 0.0, 0.0, 0.0),
+                        convention=self.camera_pose.convention,
+                    ),
+                )
+
+                light = AssetBaseCfg(
+                    prim_path="/World/DomeLight",
+                    spawn=sim_utils.DomeLightCfg(intensity=2000.0, color=(0.9, 0.9, 0.9)),
+                )
+        else:
+            @configclass
+            class DistillSceneCfg(InteractiveSceneCfg):
+                robot = ArticulationCfg(
+                    prim_path="{ENV_REGEX_NS}/Robot",
+                    spawn=sim_utils.UsdFileCfg(
+                        usd_path=robot_usd,
+                        rigid_props=sim_utils.RigidBodyPropertiesCfg(
+                            disable_gravity=True,
+                            max_depenetration_velocity=1000.0,
+                        ),
+                        collision_props=sim_utils.CollisionPropertiesCfg(
+                            contact_offset=0.002,
+                            rest_offset=0.0,
+                        ),
+                        articulation_props=sim_utils.ArticulationRootPropertiesCfg(
+                            enabled_self_collisions=False,
+                            solver_position_iteration_count=8,
+                            solver_velocity_iteration_count=0,
+                        ),
+                    ),
+                    init_state=ArticulationCfg.InitialStateCfg(
+                        pos=(0.0, 0.8, 0.0),
+                        joint_pos=default_joint_pos,
+                        joint_vel=robot_joint_vel,
+                    ),
+                    actuators={
+                        "arm": ImplicitActuatorCfg(
+                            joint_names_expr=["iiwa14_joint_.*"],
+                            stiffness={k: v for k, v in JOINT_STIFFNESSES.items() if k.startswith("iiwa14")},
+                            damping={k: v for k, v in JOINT_DAMPINGS.items() if k.startswith("iiwa14")},
+                        ),
+                        "hand": ImplicitActuatorCfg(
+                            joint_names_expr=["left_.*"],
+                            stiffness={k: v for k, v in JOINT_STIFFNESSES.items() if k.startswith("left")},
+                            damping={k: v for k, v in JOINT_DAMPINGS.items() if k.startswith("left")},
+                        ),
+                    },
+                )
+
+                table = AssetBaseCfg(
+                    prim_path="{ENV_REGEX_NS}/Table",
+                    spawn=sim_utils.UsdFileCfg(
+                        usd_path=table_usd,
+                        collision_props=sim_utils.CollisionPropertiesCfg(
+                            contact_offset=0.002,
+                            rest_offset=0.0,
+                        ),
+                    ),
+                    init_state=AssetBaseCfg.InitialStateCfg(pos=(0.0, 0.0, 0.38)),
+                )
+
+                object = RigidObjectCfg(
+                    prim_path="{ENV_REGEX_NS}/Object",
+                    spawn=sim_utils.UsdFileCfg(
+                        usd_path=object_usd,
+                        collision_props=sim_utils.CollisionPropertiesCfg(
+                            contact_offset=0.002,
+                            rest_offset=0.0,
+                        ),
+                    ),
+                )
+
+                light = AssetBaseCfg(
+                    prim_path="/World/DomeLight",
+                    spawn=sim_utils.DomeLightCfg(intensity=2000.0, color=(0.9, 0.9, 0.9)),
+                )
 
         return DistillSceneCfg
 
@@ -298,31 +376,52 @@ class IsaacSimDistillEnv:
         )
         self.robot = self.scene.articulations["robot"]
         self.object_rigid = self.scene.rigid_objects["object"]
-        self.camera = self.scene.sensors["camera"]
+        self.camera = self.scene.sensors["camera"] if self.enable_camera else None
         self.env_origins = self.scene.env_origins
         self.device = self.sim.device
+        self.q_lower_limits_t = torch.tensor(Q_LOWER_LIMITS_np, dtype=torch.float32, device=self.device)
+        self.q_upper_limits_t = torch.tensor(Q_UPPER_LIMITS_np, dtype=torch.float32, device=self.device)
+        self.palm_offset_t = torch.tensor(PALM_OFFSET_np, dtype=torch.float32, device=self.device).unsqueeze(0).repeat(self.num_envs, 1)
+        self.fingertip_offsets_t = torch.tensor(FINGERTIP_OFFSETS_np, dtype=torch.float32, device=self.device).unsqueeze(0).repeat(self.num_envs, 1, 1)
+        self.object_keypoint_offsets_t = (
+            torch.tensor(OBJECT_KEYPOINT_OFFSETS_np, dtype=torch.float32, device=self.device)
+            * (OBJECT_BASE_SIZE * KEYPOINT_SCALE / 2.0)
+        ).unsqueeze(0)
         self._apply_physics_material_overrides(sim_utils)
         self.sim.reset()
         self.scene.reset()
         self._validate_joint_ordering()
-        _log(
-            "Distill camera created "
-            f"(instances={self.camera.num_instances}, modality={self.camera_modality}, pos={self.camera_pose.pos}, "
-            f"quat_wxyz={self.camera_pose.quat_wxyz}, convention={self.camera_pose.convention})"
-        )
+        if self.camera is not None:
+            _log(
+                "Distill camera created "
+                f"(instances={self.camera.num_instances}, modality={self.camera_modality}, pos={self.camera_pose.pos}, "
+                f"quat_wxyz={self.camera_pose.quat_wxyz}, convention={self.camera_pose.convention})"
+            )
+        else:
+            _log("Distill camera disabled for this run")
         self.reset()
 
     def _validate_joint_ordering(self):
         sim_names = list(self.robot.joint_names)
+        self.palm_body_idx = self.robot.body_names.index("iiwa14_link_7")
+        self.fingertip_body_indices = torch.tensor(
+            [self.robot.body_names.index(name) for name in FINGERTIP_LINK_NAMES],
+            dtype=torch.long,
+            device=self.device,
+        )
         if sim_names == JOINT_NAMES_ISAACGYM:
             self.permutation = None
             self.inverse_permutation = None
+            self.permutation_torch = None
+            self.inverse_permutation_torch = None
             _log("Distill joint ordering matches Isaac Gym")
             return
         self.permutation = np.array([sim_names.index(name) for name in JOINT_NAMES_ISAACGYM], dtype=np.int32)
         self.inverse_permutation = np.zeros_like(self.permutation)
         for gym_idx, sim_idx in enumerate(self.permutation):
             self.inverse_permutation[sim_idx] = gym_idx
+        self.permutation_torch = torch.tensor(self.permutation, dtype=torch.long, device=self.device)
+        self.inverse_permutation_torch = torch.tensor(self.inverse_permutation, dtype=torch.long, device=self.device)
         _log(f"Distill joint permutation set: {self.permutation}")
 
     def _sim_to_gym_order(self, values: np.ndarray) -> np.ndarray:
@@ -417,6 +516,8 @@ class IsaacSimDistillEnv:
         )
 
     def _apply_camera_world_poses(self, env_ids: torch.Tensor | None = None):
+        if self.camera is None:
+            return
         if env_ids is None:
             env_ids = torch.arange(self.num_envs, device=self.device, dtype=torch.long)
         env_ids_np = env_ids.detach().cpu().numpy()
@@ -437,16 +538,11 @@ class IsaacSimDistillEnv:
 
     def _compute_wrist_camera_world_poses(self, env_ids_np: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
         link_name = self.camera_pose.link_name or "iiwa14_link_7"
-        q_gym = self._sim_to_gym_order(self.robot.data.joint_pos.detach().cpu().numpy()[env_ids_np])
-        fk_dict = compute_fk_dict(self._fk_urdf, q_gym, [link_name])
-        t_r_link = fk_dict[link_name]
-
-        t_w_r = np.eye(4, dtype=np.float32)
-        t_w_r[:3, 3] = np.array([0.0, 0.8, 0.0], dtype=np.float32)
-        t_w_link_local = t_w_r[None] @ t_r_link
-
-        link_rot = t_w_link_local[:, :3, :3]
-        link_pos = t_w_link_local[:, :3, 3] + self.env_origins[env_ids_np].detach().cpu().numpy()
+        link_idx = self.robot.body_names.index(link_name)
+        body_state = self.robot.data.body_state_w[env_ids_np, link_idx]
+        link_pos = body_state[:, :3].detach().cpu().numpy()
+        link_quat_wxyz = body_state[:, 3:7].detach().cpu().numpy()
+        link_rot = R.from_quat(link_quat_wxyz[:, [1, 2, 3, 0]]).as_matrix()
 
         cam_offset = np.asarray(self.camera_pose.pos, dtype=np.float32)[None, :]
         cam_pos = link_pos + np.einsum("nij,nj->ni", link_rot, cam_offset)
@@ -512,8 +608,10 @@ class IsaacSimDistillEnv:
         self.scene.write_data_to_sim()
         self.sim.step(render=not self.headless)
         self.scene.update(PHYSICS_DT)
-        self.sim.render()
-        self.camera.update(0.0, force_recompute=True)
+        if self.camera is not None:
+            self.sim.render()
+        if self.camera is not None:
+            self.camera.update(0.0, force_recompute=True)
         joint_pos_sim = self.robot.data.joint_pos.detach().cpu().numpy().copy()
         if self.prev_targets is None:
             self.prev_targets = self._sim_to_gym_order(joint_pos_sim)
@@ -534,11 +632,11 @@ class IsaacSimDistillEnv:
         for _ in range(PHYSICS_SUBSTEPS):
             self.sim.step(render=render)
         self.scene.update(PHYSICS_DT)
-        if self._camera_mount_mode() == "wrist":
+        if self.camera is not None and self._camera_mount_mode() == "wrist":
             self._apply_camera_world_poses()
-        # Camera outputs need an explicit render pass even in headless mode.
-        self.sim.render()
-        self.camera.update(PHYSICS_DT, force_recompute=True)
+        if self.camera is not None:
+            self.sim.render()
+            self.camera.update(PHYSICS_DT, force_recompute=True)
 
     def compute_sim_state(self) -> SimState:
         q = self._sim_to_gym_order(self.robot.data.joint_pos.detach().cpu().numpy())
@@ -609,18 +707,66 @@ class IsaacSimDistillEnv:
     def build_teacher_obs(self, sim_state: SimState) -> np.ndarray:
         if self.prev_targets is None:
             raise RuntimeError("Environment must be reset before building teacher observations")
-        return compute_observation(
-            q=sim_state.q,
-            qd=sim_state.qd,
-            prev_action_targets=self.prev_targets,
-            object_pose=sim_state.object_pose,
-            goal_object_pose=self.goal_pose,
-            object_scales=self.object_scales_batch,
-            urdf=self._fk_urdf,
-            obs_list=OBS_LIST,
-        )
+        joint_pos = self.robot.data.joint_pos
+        joint_vel = self.robot.data.joint_vel
+        if self.permutation_torch is not None:
+            joint_pos = joint_pos[:, self.permutation_torch]
+            joint_vel = joint_vel[:, self.permutation_torch]
+        joint_pos_unscaled = unscale(joint_pos, self.q_lower_limits_t, self.q_upper_limits_t)
+
+        body_state = self.robot.data.body_state_w
+        env_origins = self.env_origins
+
+        palm_state = body_state[:, self.palm_body_idx]
+        palm_pos = palm_state[:, :3] - env_origins
+        palm_quat_wxyz = palm_state[:, 3:7]
+        palm_quat_xyzw = palm_quat_wxyz[:, [1, 2, 3, 0]]
+        palm_center_pos = palm_pos + quat_rotate(palm_quat_xyzw, self.palm_offset_t)
+
+        fingertip_state = body_state[:, self.fingertip_body_indices]
+        fingertip_pos = fingertip_state[:, :, :3] - env_origins.unsqueeze(1)
+        fingertip_quat_xyzw = fingertip_state[:, :, 3:7][:, :, [1, 2, 3, 0]]
+        fingertip_pos_offset = fingertip_pos + quat_rotate(
+            fingertip_quat_xyzw.reshape(-1, 4),
+            self.fingertip_offsets_t.reshape(-1, 3),
+        ).reshape(self.num_envs, len(FINGERTIP_LINK_NAMES), 3)
+        fingertip_pos_rel_palm = fingertip_pos_offset - palm_center_pos.unsqueeze(1)
+
+        object_pos = self.object_rigid.data.root_pos_w - env_origins
+        object_quat_xyzw = self.object_rigid.data.root_quat_w[:, [1, 2, 3, 0]]
+        goal_pose_t = torch.tensor(self.goal_pose, dtype=torch.float32, device=self.device)
+        object_scales_t = torch.tensor(self.object_scales_batch, dtype=torch.float32, device=self.device)
+        object_keypoint_offsets = self.object_keypoint_offsets_t.repeat(self.num_envs, 1, 1) * object_scales_t.unsqueeze(1)
+        obj_keypoint_pos = object_pos.unsqueeze(1) + quat_rotate(
+            object_quat_xyzw.unsqueeze(1).repeat(1, object_keypoint_offsets.shape[1], 1).reshape(-1, 4),
+            object_keypoint_offsets.reshape(-1, 3),
+        ).reshape(self.num_envs, object_keypoint_offsets.shape[1], 3)
+        goal_keypoint_pos = goal_pose_t[:, :3].unsqueeze(1) + quat_rotate(
+            goal_pose_t[:, 3:7].unsqueeze(1).repeat(1, object_keypoint_offsets.shape[1], 1).reshape(-1, 4),
+            object_keypoint_offsets.reshape(-1, 3),
+        ).reshape(self.num_envs, object_keypoint_offsets.shape[1], 3)
+        keypoints_rel_palm = obj_keypoint_pos - palm_center_pos.unsqueeze(1)
+        keypoints_rel_goal = obj_keypoint_pos - goal_keypoint_pos
+
+        prev_targets_t = torch.tensor(self.prev_targets, dtype=torch.float32, device=self.device)
+        obs_dict = {
+            "joint_pos": joint_pos_unscaled,
+            "joint_vel": joint_vel,
+            "prev_action_targets": prev_targets_t,
+            "palm_pos": palm_center_pos,
+            "palm_rot": palm_quat_xyzw,
+            "object_rot": object_quat_xyzw,
+            "fingertip_pos_rel_palm": fingertip_pos_rel_palm.reshape(self.num_envs, -1),
+            "keypoints_rel_palm": keypoints_rel_palm.reshape(self.num_envs, -1),
+            "keypoints_rel_goal": keypoints_rel_goal.reshape(self.num_envs, -1),
+            "object_scales": object_scales_t,
+        }
+        obs = torch.cat([obs_dict[key] for key in OBS_LIST], dim=-1)
+        return obs.detach().cpu().numpy()
 
     def _read_camera_outputs(self) -> dict[str, torch.Tensor]:
+        if self.camera is None:
+            raise RuntimeError("Camera is disabled for this environment")
         outputs = self.camera.data.output
         available = {key: value for key, value in outputs.items() if value is not None}
         if not available:

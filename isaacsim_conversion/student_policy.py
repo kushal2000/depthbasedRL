@@ -154,4 +154,17 @@ def preprocess_image(image: torch.Tensor, modality: str) -> torch.Tensor:
 
 
 def resize_image(image: torch.Tensor, height: int = 224, width: int = 224) -> torch.Tensor:
-    return F.interpolate(image, size=(height, width), mode="bilinear", align_corners=False)
+    _, _, src_h, src_w = image.shape
+    if src_h == height and src_w == width:
+        return image
+    scale = min(height / src_h, width / src_w)
+    resized_h = max(1, int(round(src_h * scale)))
+    resized_w = max(1, int(round(src_w * scale)))
+    resized = F.interpolate(image, size=(resized_h, resized_w), mode="bilinear", align_corners=False)
+    pad_h = height - resized_h
+    pad_w = width - resized_w
+    pad_top = pad_h // 2
+    pad_bottom = pad_h - pad_top
+    pad_left = pad_w // 2
+    pad_right = pad_w - pad_left
+    return F.pad(resized, (pad_left, pad_right, pad_top, pad_bottom))

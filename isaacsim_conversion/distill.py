@@ -472,6 +472,8 @@ def save_camera_debug(env: IsaacSimDistillEnv, run_dir: Path):
     import imageio.v3 as iio
     import json
 
+    if env.camera is None:
+        return
     outputs = env.camera.data.output
     if outputs.get("rgb") is not None:
         rgb_batch = outputs["rgb"].cpu().numpy()[..., :3].astype(np.uint8)
@@ -537,6 +539,8 @@ def save_camera_debug(env: IsaacSimDistillEnv, run_dir: Path):
 def save_camera_debug_step(env: IsaacSimDistillEnv, run_dir: Path, step_i: int):
     import imageio.v3 as iio
 
+    if env.camera is None:
+        return
     outputs = env.camera.data.output
     grids_dir = run_dir / "camera_debug" / "grids"
     grids_dir.mkdir(parents=True, exist_ok=True)
@@ -581,6 +585,7 @@ def main():
     camera_modality, camera_pose, camera_intrinsics = load_camera_pose(Path(resolve_repo_path(repo_root, args.camera_config)))
     if args.student_modality:
         camera_modality = args.student_modality
+    enable_camera = args.mode == "camera_debug" or args.capture_frames or args.student_input == "camera"
 
     task_spec = load_task_spec(
         repo_root=repo_root,
@@ -600,6 +605,7 @@ def main():
         camera_modality=camera_modality,
         camera_pose_override=camera_pose,
         camera_intrinsics=camera_intrinsics,
+        enable_camera=enable_camera,
         num_envs=settings.num_envs,
         env_spacing=settings.env_spacing,
         object_start_mode=settings.object_start_mode,
@@ -626,6 +632,7 @@ def main():
     _log(f"Teacher config: {teacher_config}")
     _log(f"Run dir: {run_dir}")
     _log(f"Student arch/modality: {args.student_arch}/{camera_modality}")
+    _log(f"Cameras enabled: {enable_camera}")
     _log(
         f"Parallel env config: num_envs={settings.num_envs}, env_spacing={settings.env_spacing}, "
         f"object_start_mode={settings.object_start_mode}"
