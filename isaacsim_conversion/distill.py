@@ -22,6 +22,7 @@ from isaacsim_conversion.student_policy import (
     resize_image,
 )
 from isaacsim_conversion.task_utils import (
+    CameraIntrinsics,
     CameraPose,
     default_real_camera_pose,
     default_real_camera_transform,
@@ -140,22 +141,30 @@ def load_distill_settings(path: Path, args) -> DistillSettings:
     return settings
 
 
-def load_camera_pose(path: Path) -> tuple[str, CameraPose]:
+def load_camera_pose(path: Path) -> tuple[str, CameraPose, CameraIntrinsics]:
     cfg = load_yaml(path)
     modality = cfg.get("modality", "depth")
+    intrinsics = CameraIntrinsics(
+        width=int(cfg.get("width", 640)),
+        height=int(cfg.get("height", 480)),
+        focal_length=float(cfg.get("focal_length", 24.0)),
+        horizontal_aperture=float(cfg.get("horizontal_aperture", 20.955)),
+        focus_distance=float(cfg.get("focus_distance", 400.0)),
+        clipping_range=tuple(float(x) for x in cfg.get("clipping_range", [0.1, 100.0])),
+    )
     if cfg.get("pose_source") == "real_camera_t_w_c":
         pose = default_real_camera_pose()
         return modality, CameraPose(
             pos=pose.pos,
             quat_wxyz=pose.quat_wxyz,
             convention=str(cfg.get("convention", pose.convention)),
-        )
+        ), intrinsics
     pose_cfg = cfg.get("pose", {})
     return modality, CameraPose(
         pos=tuple(float(x) for x in pose_cfg["pos"]),
         quat_wxyz=tuple(float(x) for x in pose_cfg["quat_wxyz"]),
         convention=str(cfg.get("convention", pose_cfg.get("convention", "ros"))),
-    )
+    ), intrinsics
 
 
 def resolve_repo_path(repo_root: Path, maybe_relative: str | None) -> str | None:
@@ -295,9 +304,12 @@ def run_episode(
         )
         env.apply_action(targets)
         env.step(render=not _args.headless)
+        next_sim_state = env.compute_sim_state()
+        dropped_env_ids = env.reset_dropped_envs(next_sim_state)
+        if dropped_env_ids.size > 0:
+            next_sim_state = env.compute_sim_state()
         if capture_frames and run_dir is not None and (step_i % max(capture_frame_stride, 1) == 0):
             save_camera_debug_step(env, run_dir, step_i)
-        next_sim_state = env.compute_sim_state()
         finished = env.maybe_advance_goal(next_sim_state)
 
         action_loss = torch.mean((student_action - teacher_action) ** 2)
@@ -397,6 +409,14 @@ def save_camera_debug(env: IsaacSimDistillEnv, run_dir: Path):
                     "pos": list(env.camera_pose.pos),
                     "quat_wxyz": list(env.camera_pose.quat_wxyz),
                 },
+                "camera_intrinsics": {
+                    "width": env.camera_intrinsics.width,
+                    "height": env.camera_intrinsics.height,
+                    "focal_length": env.camera_intrinsics.focal_length,
+                    "horizontal_aperture": env.camera_intrinsics.horizontal_aperture,
+                    "focus_distance": env.camera_intrinsics.focus_distance,
+                    "clipping_range": list(env.camera_intrinsics.clipping_range),
+                },
                 "raw_T_W_C": default_real_camera_transform().tolist(),
                 "resolved_camera_world_pos_w": env.camera.data.pos_w.detach().cpu().numpy().tolist(),
                 "resolved_camera_world_quat_w_ros": env.camera.data.quat_w_ros.detach().cpu().numpy().tolist(),
@@ -454,7 +474,7 @@ def main():
     teacher_config = Path(resolve_repo_path(repo_root, args.teacher_config))
     teacher_checkpoint = resolve_repo_path(repo_root, args.teacher_checkpoint)
     settings = load_distill_settings(Path(resolve_repo_path(repo_root, args.distill_config)), args)
-    camera_modality, camera_pose = load_camera_pose(Path(resolve_repo_path(repo_root, args.camera_config)))
+    camera_modality, camera_pose, camera_intrinsics = load_camera_pose(Path(resolve_repo_path(repo_root, args.camera_config)))
     if args.student_modality:
         camera_modality = args.student_modality
 
@@ -475,6 +495,7 @@ def main():
         headless=args.headless,
         camera_modality=camera_modality,
         camera_pose_override=camera_pose,
+        camera_intrinsics=camera_intrinsics,
         num_envs=settings.num_envs,
         env_spacing=settings.env_spacing,
         object_start_mode=settings.object_start_mode,

@@ -22,6 +22,16 @@ class CameraPose:
 
 
 @dataclass
+class CameraIntrinsics:
+    width: int = 640
+    height: int = 480
+    focal_length: float = 24.0
+    horizontal_aperture: float = 20.955
+    focus_distance: float = 400.0
+    clipping_range: tuple[float, float] = (0.1, 100.0)
+
+
+@dataclass
 class TaskSpec:
     robot_urdf: str
     table_urdf: str

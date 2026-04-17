@@ -29,6 +29,7 @@ from isaacsim_conversion.isaacsim_env import (
     _log,
 )
 from isaacsim_conversion.task_utils import CameraPose, TaskSpec, xyzw_to_wxyz
+from isaacsim_conversion.task_utils import CameraIntrinsics
 
 
 OBS_LIST = [
@@ -66,6 +67,7 @@ class IsaacSimDistillEnv:
         camera_modality: str = "depth",
         use_real_camera_transform: bool = True,
         camera_pose_override: CameraPose | None = None,
+        camera_intrinsics: CameraIntrinsics | None = None,
         num_envs: int = 1,
         env_spacing: float = 2.0,
         object_start_mode: str = "fixed",
@@ -83,6 +85,7 @@ class IsaacSimDistillEnv:
         self.headless = headless
         self._fk_urdf = create_urdf_object("iiwa14_left_sharpa_adjusted_restricted")
         self.camera_pose = camera_pose_override or task_spec.camera_pose
+        self.camera_intrinsics = camera_intrinsics or CameraIntrinsics()
         self.use_real_camera_transform = use_real_camera_transform
         self.action_dim = 29
         self.student_proprio_dim = 29 + 29 + 29 + 1
@@ -219,14 +222,14 @@ class IsaacSimDistillEnv:
                 prim_path="{ENV_REGEX_NS}/DistillCamera",
                 update_period=0,
                 update_latest_camera_pose=True,
-                height=480,
-                width=640,
+                height=self.camera_intrinsics.height,
+                width=self.camera_intrinsics.width,
                 data_types=camera_types,
                 spawn=sim_utils.PinholeCameraCfg(
-                    focal_length=24.0,
-                    focus_distance=400.0,
-                    horizontal_aperture=20.955,
-                    clipping_range=(0.1, 100.0),
+                    focal_length=self.camera_intrinsics.focal_length,
+                    focus_distance=self.camera_intrinsics.focus_distance,
+                    horizontal_aperture=self.camera_intrinsics.horizontal_aperture,
+                    clipping_range=self.camera_intrinsics.clipping_range,
                 ),
                 offset=CameraCfg.OffsetCfg(
                     pos=(0.0, 0.0, 0.0),
@@ -451,21 +454,29 @@ class IsaacSimDistillEnv:
         return torch.tensor(world_pose, dtype=torch.float32, device=self.device)
 
     def reset(self):
+        self._reset_envs(torch.arange(self.num_envs, device=self.device, dtype=torch.long))
+
+    def _reset_envs(self, env_ids: torch.Tensor):
+        env_ids = env_ids.to(device=self.device, dtype=torch.long)
+        if env_ids.numel() == 0:
+            return
+        env_ids_np = env_ids.detach().cpu().numpy()
         root_state = self.robot.data.default_root_state.clone()
-        root_state[:, :3] += self.env_origins
-        self.robot.write_root_pose_to_sim(root_state[:, :7])
-        self.robot.write_root_velocity_to_sim(root_state[:, 7:])
+        root_state[env_ids, :3] += self.env_origins[env_ids]
+        self.robot.write_root_pose_to_sim(root_state[env_ids, :7], env_ids=env_ids)
+        self.robot.write_root_velocity_to_sim(root_state[env_ids, 7:], env_ids=env_ids)
         joint_pos = self.robot.data.default_joint_pos.clone()
         joint_vel = self.robot.data.default_joint_vel.clone()
-        self.robot.write_joint_state_to_sim(joint_pos, joint_vel)
-        self.robot.set_joint_position_target(joint_pos)
+        self.robot.write_joint_state_to_sim(joint_pos[env_ids], joint_vel[env_ids], env_ids=env_ids)
+        self.robot.set_joint_position_target(joint_pos[env_ids], env_ids=env_ids)
 
-        self.current_start_pose = self._sample_start_poses()
+        start_poses = self._sample_start_poses()[env_ids_np]
+        self.current_start_pose[env_ids_np] = start_poses
         object_pose_w = self._local_pose_to_world_pose(self.current_start_pose)
-        zeros_vel = torch.zeros((self.num_envs, 6), dtype=torch.float32, device=self.device)
-        self.object_rigid.write_root_pose_to_sim(object_pose_w)
-        self.object_rigid.write_root_velocity_to_sim(zeros_vel)
-        self._apply_camera_world_poses()
+        zeros_vel = torch.zeros((len(env_ids_np), 6), dtype=torch.float32, device=self.device)
+        self.object_rigid.write_root_pose_to_sim(object_pose_w[env_ids], env_ids=env_ids)
+        self.object_rigid.write_root_velocity_to_sim(zeros_vel, env_ids=env_ids)
+        self._apply_camera_world_poses(env_ids)
 
         self.scene.write_data_to_sim()
         self.sim.step(render=not self.headless)
@@ -473,10 +484,13 @@ class IsaacSimDistillEnv:
         self.sim.render()
         self.camera.update(0.0, force_recompute=True)
         joint_pos_sim = self.robot.data.joint_pos.detach().cpu().numpy().copy()
-        self.prev_targets = self._sim_to_gym_order(joint_pos_sim)
-        self.goal_idx = np.zeros(self.num_envs, dtype=np.int32)
-        self.near_goal_steps = np.zeros(self.num_envs, dtype=np.int32)
-        self.goal_pose = np.repeat(self.task_spec.goals[0][None], self.num_envs, axis=0).astype(np.float32)
+        if self.prev_targets is None:
+            self.prev_targets = self._sim_to_gym_order(joint_pos_sim)
+        else:
+            self.prev_targets[env_ids_np] = self._sim_to_gym_order(joint_pos_sim)[env_ids_np]
+        self.goal_idx[env_ids_np] = 0
+        self.near_goal_steps[env_ids_np] = 0
+        self.goal_pose[env_ids_np] = np.repeat(self.task_spec.goals[0][None], len(env_ids_np), axis=0).astype(np.float32)
 
     def apply_action(self, targets: np.ndarray):
         self.prev_targets = targets.copy()
@@ -550,6 +564,14 @@ class IsaacSimDistillEnv:
             "kp_dist": float(np.mean(sim_state.kp_dist)),
             "near_goal_steps": float(np.mean(self.near_goal_steps)),
         }
+
+    def reset_dropped_envs(self, sim_state: SimState) -> np.ndarray:
+        dropped_env_ids = np.where(sim_state.object_pose[:, 2] < 0.1)[0].astype(np.int64)
+        if dropped_env_ids.size == 0:
+            return dropped_env_ids
+        _log(f"Resetting dropped envs: {dropped_env_ids.tolist()}")
+        self._reset_envs(torch.tensor(dropped_env_ids, device=self.device, dtype=torch.long))
+        return dropped_env_ids
 
     def build_teacher_obs(self, sim_state: SimState) -> np.ndarray:
         if self.prev_targets is None:
