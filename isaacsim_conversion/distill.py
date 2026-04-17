@@ -364,7 +364,7 @@ def run_episode(
     mode: str,
     env: IsaacSimDistillEnv,
     teacher: RlPlayer,
-    student: MonoTransformerRecurrentPolicy,
+    student: MonoTransformerRecurrentPolicy | None,
     optimizer: torch.optim.Optimizer | None,
     settings: DistillSettings,
     beta_scheduler: BetaScheduler,
@@ -374,7 +374,7 @@ def run_episode(
 ) -> dict[str, float]:
     teacher.reset()
     env.reset()
-    student_hidden = student.initial_state(batch_size=env.num_envs, device=env.device)
+    student_hidden = None if student is None else student.initial_state(batch_size=env.num_envs, device=env.device)
     total_action_loss = 0.0
     total_aux_loss = 0.0
     total_steps = 0
@@ -385,13 +385,17 @@ def run_episode(
         teacher_obs_tensor = torch.from_numpy(teacher_obs).float().to(env.device)
         teacher_action = teacher.get_normalized_action(teacher_obs_tensor, deterministic_actions=True)
 
-        if _args.student_input == "teacher_obs":
+        student_out = None
+        if student is None:
+            student_action = teacher_action
+        elif _args.student_input == "teacher_obs":
             student_out, student_hidden = student(teacher_obs_tensor, student_hidden)
+            student_action = student_out.action
         else:
             student_obs = env.build_student_obs(sim_state, camera_modality=env.camera_modality)
             student_image = stack_student_image(student_obs, env.camera_modality, settings)
             student_out, student_hidden = student(student_image, student_obs["proprio"], student_hidden)
-        student_action = student_out.action
+            student_action = student_out.action
 
         beta = beta_scheduler.value() if mode in ("train", "mixed_eval") else (1.0 if mode == "teacher_eval" else 0.0)
         stepping_action = choose_stepping_action(beta, teacher_action, student_action)
@@ -413,13 +417,17 @@ def run_episode(
             save_camera_debug_step(env, run_dir, step_i)
         finished = env.maybe_advance_goal(next_sim_state)
 
-        action_loss = torch.mean((student_action - teacher_action) ** 2)
-        aux_pred = student_out.aux.get("object_pos")
-        gt_object_pos = torch.from_numpy(sim_state.object_pos_world_env_frame).float().to(env.device)
-        aux_loss = torch.mean((aux_pred - gt_object_pos) ** 2) if aux_pred is not None else torch.tensor(0.0, device=env.device)
+        if student_out is None:
+            action_loss = torch.tensor(0.0, device=env.device)
+            aux_loss = torch.tensor(0.0, device=env.device)
+        else:
+            action_loss = torch.mean((student_action - teacher_action) ** 2)
+            aux_pred = student_out.aux.get("object_pos")
+            gt_object_pos = torch.from_numpy(sim_state.object_pos_world_env_frame).float().to(env.device)
+            aux_loss = torch.mean((aux_pred - gt_object_pos) ** 2) if aux_pred is not None else torch.tensor(0.0, device=env.device)
         total_loss = settings.action_loss_weight * action_loss + settings.aux_object_pos_weight * aux_loss
 
-        if mode == "train" and optimizer is not None:
+        if mode == "train" and optimizer is not None and student is not None:
             optimizer.zero_grad()
             total_loss.backward()
             torch.nn.utils.clip_grad_norm_(student.parameters(), 1.0)
@@ -612,6 +620,7 @@ def main():
         object_pos_noise_xyz=settings.object_pos_noise_xyz,
         object_yaw_noise_deg=settings.object_yaw_noise_deg,
     )
+    teacher_inference_batch_size = 128 if args.mode == "teacher_eval" else 32
     teacher = RlPlayer(
         num_observations=140,
         num_actions=29,
@@ -619,11 +628,11 @@ def main():
         checkpoint_path=teacher_checkpoint,
         device=str(env.device),
         num_envs=settings.num_envs,
-        inference_batch_size=min(settings.num_envs, 128),
+        inference_batch_size=min(settings.num_envs, teacher_inference_batch_size),
     )
-    student = build_student(args, env, settings)
-    optimizer = torch.optim.Adam(student.parameters(), lr=settings.learning_rate)
-    if args.student_checkpoint:
+    student = None if args.mode == "teacher_eval" else build_student(args, env, settings)
+    optimizer = None if student is None else torch.optim.Adam(student.parameters(), lr=settings.learning_rate)
+    if args.student_checkpoint and student is not None and optimizer is not None:
         load_student_checkpoint(resolve_repo_path(repo_root, args.student_checkpoint), student, optimizer)
     run_dir = ensure_run_dir(repo_root, args, settings)
     beta_scheduler = BetaScheduler(settings)
@@ -649,7 +658,7 @@ def main():
         force_exit(0)
 
     best_metric = -1.0
-    if args.mode == "train":
+    if args.mode == "train" and settings.num_envs < 2048:
         teacher_metrics = run_episode(
             "teacher_eval",
             env,
@@ -672,6 +681,8 @@ def main():
             wandb_run=wandb_run,
             step=0,
         )
+    elif args.mode == "train":
+        _log("Skipping in-run teacher baseline for large batch training; use standalone teacher_eval reference instead")
 
     for episode in range(settings.num_episodes if args.mode == "train" else 1):
         metrics = run_episode(
