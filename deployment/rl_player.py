@@ -24,6 +24,7 @@ class RlPlayer:
         checkpoint_path: Optional[str],
         device: str,
         num_envs: int = 1,
+        inference_batch_size: Optional[int] = None,
     ) -> None:
         self.num_observations = num_observations
         self.num_actions = num_actions
@@ -37,6 +38,7 @@ class RlPlayer:
             low=-1, high=1, shape=(num_actions,), dtype=np.float32
         )
         self.num_envs = num_envs
+        self.inference_batch_size = inference_batch_size or num_envs
         self.set_env_state = lambda *args, **kwargs: None
 
         self.cfg = read_cfg(config_path=config_path, device=self.device)
@@ -99,9 +101,16 @@ class RlPlayer:
             [obs, 50.0 + torch.zeros((batch_size, 1), device=self.device)], dim=1
         )
 
-        normalized_action = self.player.get_action(
-            obs=obs, is_deterministic=deterministic_actions
-        )
+        if batch_size <= self.inference_batch_size:
+            normalized_action = self.player.get_action(
+                obs=obs, is_deterministic=deterministic_actions
+            )
+        else:
+            normalized_action = self._get_action_chunked(
+                obs=obs,
+                deterministic_actions=deterministic_actions,
+                chunk_size=self.inference_batch_size,
+            )
 
         # DEBUG:
         DEBUGGING = False
@@ -117,6 +126,52 @@ class RlPlayer:
         normalized_action = normalized_action.reshape(-1, self.num_actions)
         assert_equals(normalized_action.shape, (batch_size, self.num_actions))
         return normalized_action
+
+    def _slice_states(self, states, sl: slice):
+        if states is None:
+            return None
+        return tuple(state[:, sl, :].contiguous() for state in states)
+
+    def _concat_states(self, state_chunks):
+        if not state_chunks:
+            return None
+        num_tensors = len(state_chunks[0])
+        return tuple(torch.cat([chunk[i] for chunk in state_chunks], dim=1) for i in range(num_tensors))
+
+    def _get_action_chunked(
+        self,
+        obs: torch.Tensor,
+        deterministic_actions: bool,
+        chunk_size: int,
+    ) -> torch.Tensor:
+        player = self.player
+        obs = player._preproc_obs(obs)
+        prev_states = player.states
+        actions = []
+        next_state_chunks = []
+
+        for start in range(0, obs.shape[0], chunk_size):
+            end = min(start + chunk_size, obs.shape[0])
+            sl = slice(start, end)
+            chunk_states = self._slice_states(prev_states, sl)
+            input_dict = {
+                "is_train": False,
+                "prev_actions": None,
+                "obs": obs[sl],
+                "rnn_states": chunk_states,
+            }
+            with torch.no_grad():
+                res_dict = player.model(input_dict)
+            chunk_action = res_dict["mus"] if deterministic_actions else res_dict["actions"]
+            if player.clip_actions:
+                chunk_action = players.rescale_actions(
+                    player.actions_low, player.actions_high, torch.clamp(chunk_action, -1.0, 1.0)
+                )
+            actions.append(chunk_action)
+            next_state_chunks.append(tuple(res_dict["rnn_states"]))
+
+        player.states = self._concat_states(next_state_chunks)
+        return torch.cat(actions, dim=0)
 
     def reset(self) -> None:
         self.player.reset()

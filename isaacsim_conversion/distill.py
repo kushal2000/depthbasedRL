@@ -619,6 +619,7 @@ def main():
         checkpoint_path=teacher_checkpoint,
         device=str(env.device),
         num_envs=settings.num_envs,
+        inference_batch_size=min(settings.num_envs, 128),
     )
     student = build_student(args, env, settings)
     optimizer = torch.optim.Adam(student.parameters(), lr=settings.learning_rate)
