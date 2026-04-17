@@ -257,7 +257,8 @@ and saves RGB/depth snapshots under `distillation_runs/.../camera_debug/`.
     --teacher_checkpoint pretrained_policy/model.pth \
     --teacher_config pretrained_policy/config.yaml \
     --camera_config isaacsim_conversion/configs/hammer_camera.yaml \
-    --distill_config isaacsim_conversion/configs/hammer_distill.yaml
+    --distill_config isaacsim_conversion/configs/hammer_distill.yaml \
+    --wandb
 ```
 
 By default this writes to:
@@ -271,6 +272,21 @@ distillation_runs/<timestamped_run>/
   camera_debug/
 ```
 
+Training defaults in `hammer_distill.yaml` now use:
+
+- depth images
+- `mono_transformer_recurrent`
+- `beta_mode: fixed_decay`
+- `beta_decay: 0.1`
+- randomized object starts
+
+During training, the script now also:
+
+- logs a one-time `teacher_eval_baseline`
+- runs periodic `student_eval` every `eval_interval` episodes
+- writes all of those rows into `metrics.csv`
+- optionally logs them to Weights & Biases with `--wandb`
+
 ### Student evaluation
 
 ```bash
@@ -280,6 +296,12 @@ distillation_runs/<timestamped_run>/
     --student_checkpoint distillation_runs/<run>/checkpoints/student_best.pt \
     --teacher_checkpoint pretrained_policy/model.pth \
     --teacher_config pretrained_policy/config.yaml
+```
+
+You can override the beta schedule from the CLI without editing YAML:
+
+```bash
+--beta_mode fixed_decay --beta_start 1.0 --beta_end 0.0 --beta_decay 0.1
 ```
 
 ### Quick ablations

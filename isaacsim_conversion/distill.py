@@ -56,8 +56,22 @@ def launch_app():
     parser.add_argument("--num_envs", type=int, default=None)
     parser.add_argument("--env_spacing", type=float, default=None)
     parser.add_argument("--object_start_mode", choices=["fixed", "randomized"], default=None)
+    parser.add_argument(
+        "--beta_mode",
+        choices=["metric_driven", "fixed_decay", "always_teacher", "always_student"],
+        default=None,
+    )
+    parser.add_argument("--beta_start", type=float, default=None)
+    parser.add_argument("--beta_end", type=float, default=None)
+    parser.add_argument("--beta_decay", type=float, default=None)
+    parser.add_argument("--eval_interval", type=int, default=None)
+    parser.add_argument("--checkpoint_interval", type=int, default=None)
     parser.add_argument("--capture_frames", action="store_true")
     parser.add_argument("--capture_frame_stride", type=int, default=1)
+    parser.add_argument("--wandb", action="store_true")
+    parser.add_argument("--wandb_project", default="depthbasedRL-isaacsim-distill")
+    parser.add_argument("--wandb_entity", default=None)
+    parser.add_argument("--wandb_name", default=None)
     AppLauncher.add_app_launcher_args(parser)
     args = parser.parse_args()
     args.enable_cameras = True
@@ -138,6 +152,18 @@ def load_distill_settings(path: Path, args) -> DistillSettings:
         settings.env_spacing = args.env_spacing
     if args.object_start_mode is not None:
         settings.object_start_mode = args.object_start_mode
+    if args.beta_mode is not None:
+        settings.beta_mode = args.beta_mode
+    if args.beta_start is not None:
+        settings.beta_start = args.beta_start
+    if args.beta_end is not None:
+        settings.beta_end = args.beta_end
+    if args.beta_decay is not None:
+        settings.beta_decay = args.beta_decay
+    if args.eval_interval is not None:
+        settings.eval_interval = args.eval_interval
+    if args.checkpoint_interval is not None:
+        settings.checkpoint_interval = args.checkpoint_interval
     return settings
 
 
@@ -256,10 +282,68 @@ def log_csv_row(csv_path: Path, row: dict[str, float | int | str]):
         writer.writerow(row)
 
 
+def record_metrics(run_dir: Path, row: dict[str, float | int | str], wandb_run=None, step: int | None = None):
+    log_csv_row(run_dir / "metrics.csv", row)
+    wandb_payload = {
+        f"{row['mode']}/{key}": value
+        for key, value in row.items()
+        if key not in ("episode", "mode")
+    }
+    wandb_payload["episode"] = row["episode"]
+    wandb_log(wandb_run, wandb_payload, step=step)
+
+
 def force_exit(code: int = 0):
     sys.stdout.flush()
     sys.stderr.flush()
     os._exit(code)
+
+
+def detach_hidden_state(hidden_state):
+    if hidden_state is None:
+        return None
+    if isinstance(hidden_state, torch.Tensor):
+        return hidden_state.detach()
+    if isinstance(hidden_state, tuple):
+        return tuple(detach_hidden_state(item) for item in hidden_state)
+    if isinstance(hidden_state, list):
+        return [detach_hidden_state(item) for item in hidden_state]
+    return hidden_state
+
+
+def init_wandb(args, run_dir: Path, settings: DistillSettings):
+    if not args.wandb:
+        return None
+    try:
+        import wandb
+    except ImportError:
+        _log("wandb requested but not installed; continuing without wandb logging")
+        return None
+
+    run = wandb.init(
+        project=args.wandb_project,
+        entity=args.wandb_entity,
+        name=args.wandb_name or run_dir.name,
+        dir=str(run_dir),
+        config={
+            "mode": args.mode,
+            "task_source": args.task_source,
+            "object_category": args.object_category,
+            "object_name": args.object_name,
+            "task_name": args.task_name,
+            **settings.__dict__,
+        },
+        reinit=True,
+    )
+    return run
+
+
+def wandb_log(run, payload: dict[str, float | int | str], step: int | None = None):
+    if run is None:
+        return
+    import wandb
+
+    wandb.log(payload, step=step)
 
 
 def run_episode(
@@ -323,6 +407,7 @@ def run_episode(
             total_loss.backward()
             torch.nn.utils.clip_grad_norm_(student.parameters(), 1.0)
             optimizer.step()
+            student_hidden = detach_hidden_state(student_hidden)
 
         total_action_loss += float(action_loss.item())
         total_aux_loss += float(aux_loss.item())
@@ -516,6 +601,7 @@ def main():
         load_student_checkpoint(resolve_repo_path(repo_root, args.student_checkpoint), student, optimizer)
     run_dir = ensure_run_dir(repo_root, args, settings)
     beta_scheduler = BetaScheduler(settings)
+    wandb_run = init_wandb(args, run_dir, settings)
 
     _log(f"Teacher checkpoint: {teacher_checkpoint}")
     _log(f"Teacher config: {teacher_config}")
@@ -531,9 +617,35 @@ def main():
         env.step(render=not args.headless)
         save_camera_debug(env, run_dir)
         _log(f"Saved camera debug outputs under {run_dir / 'camera_debug'}")
+        if wandb_run is not None:
+            wandb_run.finish()
         force_exit(0)
 
     best_metric = -1.0
+    if args.mode == "train":
+        teacher_metrics = run_episode(
+            "teacher_eval",
+            env,
+            teacher,
+            student,
+            None,
+            settings,
+            beta_scheduler,
+            run_dir=None,
+            capture_frames=False,
+            capture_frame_stride=args.capture_frame_stride,
+        )
+        _log(
+            f"[teacher baseline] goal_completion_ratio={teacher_metrics['goal_completion_ratio']:.3f}, "
+            f"goal_idx={teacher_metrics['goal_idx']:.0f}, kp_dist={teacher_metrics['kp_dist']:.4f}"
+        )
+        record_metrics(
+            run_dir,
+            {"episode": -1, "mode": "teacher_eval_baseline", **teacher_metrics},
+            wandb_run=wandb_run,
+            step=0,
+        )
+
     for episode in range(settings.num_episodes if args.mode == "train" else 1):
         metrics = run_episode(
             args.mode,
@@ -552,24 +664,49 @@ def main():
             f"goal_idx={metrics['goal_idx']:.0f}, action_loss={metrics['action_loss']:.6f}, "
             f"aux_object_pos_loss={metrics['aux_object_pos_loss']:.6f}, beta={metrics['beta']:.3f}"
         )
-        log_csv_row(
-            run_dir / "metrics.csv",
-            {
-                "episode": episode,
-                "mode": args.mode,
-                **metrics,
-            },
+        record_metrics(
+            run_dir,
+            {"episode": episode, "mode": args.mode, **metrics},
+            wandb_run=wandb_run,
+            step=episode + 1,
         )
         save_camera_debug(env, run_dir)
         if args.mode == "train":
             beta_scheduler.update(metrics["goal_completion_ratio"])
+            selection_metric = metrics["goal_completion_ratio"]
             save_checkpoint(run_dir / "checkpoints" / "student_latest.pt", student, optimizer, episode, best_metric)
-            if metrics["goal_completion_ratio"] >= best_metric:
-                best_metric = metrics["goal_completion_ratio"]
+            if (episode + 1) % settings.eval_interval == 0:
+                eval_metrics = run_episode(
+                    "student_eval",
+                    env,
+                    teacher,
+                    student,
+                    None,
+                    settings,
+                    beta_scheduler,
+                    run_dir=None,
+                    capture_frames=False,
+                    capture_frame_stride=args.capture_frame_stride,
+                )
+                _log(
+                    f"[student eval {episode}] goal_completion_ratio={eval_metrics['goal_completion_ratio']:.3f}, "
+                    f"goal_idx={eval_metrics['goal_idx']:.0f}, kp_dist={eval_metrics['kp_dist']:.4f}"
+                )
+                record_metrics(
+                    run_dir,
+                    {"episode": episode, "mode": "student_eval", **eval_metrics},
+                    wandb_run=wandb_run,
+                    step=episode + 1,
+                )
+                selection_metric = eval_metrics["goal_completion_ratio"]
+            if selection_metric >= best_metric:
+                best_metric = selection_metric
                 save_checkpoint(run_dir / "checkpoints" / "student_best.pt", student, optimizer, episode, best_metric)
             if (episode + 1) % settings.checkpoint_interval == 0:
                 save_checkpoint(run_dir / "checkpoints" / f"student_step_{episode + 1}.pt", student, optimizer, episode, best_metric)
 
+    if wandb_run is not None:
+        wandb_run.finish()
     force_exit(0)
 
 
