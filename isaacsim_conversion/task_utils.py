@@ -19,6 +19,8 @@ class CameraPose:
     pos: tuple[float, float, float]
     quat_wxyz: tuple[float, float, float, float]
     convention: str = "ros"
+    mount: str = "world"
+    link_name: str | None = None
 
 
 @dataclass
@@ -66,6 +68,7 @@ def default_real_camera_pose() -> CameraPose:
         pos=tuple(float(x) for x in t_w_c[:3, 3]),
         quat_wxyz=tuple(float(x) for x in quat_wxyz),
         convention="ros",
+        mount="world",
     )
 
 

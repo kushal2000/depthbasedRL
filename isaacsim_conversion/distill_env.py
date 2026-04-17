@@ -11,7 +11,9 @@ import torch
 from isaacgymenvs.utils.observation_action_utils_sharpa import (
     _compute_keypoint_positions,
     compute_observation,
+    compute_fk_dict,
     create_urdf_object,
+    matrix_to_quaternion_xyzw_scipy,
 )
 from isaacsim_conversion.isaacsim_env import (
     CONTROL_DT,
@@ -102,6 +104,9 @@ class IsaacSimDistillEnv:
         self.inverse_permutation: np.ndarray | None = None
 
         self._setup_scene()
+
+    def _camera_mount_mode(self) -> str:
+        return getattr(self.camera_pose, "mount", "world")
 
     def _data_types_for_modality(self, modality: str) -> list[str]:
         if modality == "depth":
@@ -234,7 +239,7 @@ class IsaacSimDistillEnv:
                 offset=CameraCfg.OffsetCfg(
                     pos=(0.0, 0.0, 0.0),
                     rot=(1.0, 0.0, 0.0, 0.0),
-                    convention="ros",
+                    convention=self.camera_pose.convention,
                 ),
             )
 
@@ -415,9 +420,12 @@ class IsaacSimDistillEnv:
         if env_ids is None:
             env_ids = torch.arange(self.num_envs, device=self.device, dtype=torch.long)
         env_ids_np = env_ids.detach().cpu().numpy()
-        env_origins = self.env_origins[env_ids].detach().cpu().numpy()
-        positions = env_origins + np.asarray(self.camera_pose.pos, dtype=np.float32)[None, :]
-        orientations = np.repeat(np.asarray(self.camera_pose.quat_wxyz, dtype=np.float32)[None, :], len(env_ids_np), axis=0)
+        if self._camera_mount_mode() == "wrist":
+            positions, orientations = self._compute_wrist_camera_world_poses(env_ids_np)
+        else:
+            env_origins = self.env_origins[env_ids].detach().cpu().numpy()
+            positions = env_origins + np.asarray(self.camera_pose.pos, dtype=np.float32)[None, :]
+            orientations = np.repeat(np.asarray(self.camera_pose.quat_wxyz, dtype=np.float32)[None, :], len(env_ids_np), axis=0)
         self.camera.set_world_poses(
             positions=positions,
             orientations=orientations,
@@ -426,6 +434,29 @@ class IsaacSimDistillEnv:
         )
         self.camera_world_pos[env_ids_np] = positions
         self.camera_world_quat_wxyz[env_ids_np] = orientations
+
+    def _compute_wrist_camera_world_poses(self, env_ids_np: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+        link_name = self.camera_pose.link_name or "iiwa14_link_7"
+        q_gym = self._sim_to_gym_order(self.robot.data.joint_pos.detach().cpu().numpy()[env_ids_np])
+        fk_dict = compute_fk_dict(self._fk_urdf, q_gym, [link_name])
+        t_r_link = fk_dict[link_name]
+
+        t_w_r = np.eye(4, dtype=np.float32)
+        t_w_r[:3, 3] = np.array([0.0, 0.8, 0.0], dtype=np.float32)
+        t_w_link_local = t_w_r[None] @ t_r_link
+
+        link_rot = t_w_link_local[:, :3, :3]
+        link_pos = t_w_link_local[:, :3, 3] + self.env_origins[env_ids_np].detach().cpu().numpy()
+
+        cam_offset = np.asarray(self.camera_pose.pos, dtype=np.float32)[None, :]
+        cam_pos = link_pos + np.einsum("nij,nj->ni", link_rot, cam_offset)
+
+        rel_quat_wxyz = np.asarray(self.camera_pose.quat_wxyz, dtype=np.float32)
+        rel_rot = R.from_quat(rel_quat_wxyz[[1, 2, 3, 0]]).as_matrix()
+        cam_rot = link_rot @ rel_rot[None, :, :]
+        cam_quat_xyzw = matrix_to_quaternion_xyzw_scipy(cam_rot)
+        cam_quat_wxyz = cam_quat_xyzw[:, [3, 0, 1, 2]].astype(np.float32)
+        return cam_pos.astype(np.float32), cam_quat_wxyz
 
     def _sample_start_poses(self) -> np.ndarray:
         start = np.repeat(self.task_spec.start_pose[None], self.num_envs, axis=0).astype(np.float32)
@@ -503,6 +534,8 @@ class IsaacSimDistillEnv:
         for _ in range(PHYSICS_SUBSTEPS):
             self.sim.step(render=render)
         self.scene.update(PHYSICS_DT)
+        if self._camera_mount_mode() == "wrist":
+            self._apply_camera_world_poses()
         # Camera outputs need an explicit render pass even in headless mode.
         self.sim.render()
         self.camera.update(PHYSICS_DT, force_recompute=True)

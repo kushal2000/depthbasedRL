@@ -184,12 +184,16 @@ def load_camera_pose(path: Path) -> tuple[str, CameraPose, CameraIntrinsics]:
             pos=pose.pos,
             quat_wxyz=pose.quat_wxyz,
             convention=str(cfg.get("convention", pose.convention)),
+            mount=str(cfg.get("mount", pose.mount)),
+            link_name=cfg.get("link_name", pose.link_name),
         ), intrinsics
     pose_cfg = cfg.get("pose", {})
     return modality, CameraPose(
         pos=tuple(float(x) for x in pose_cfg["pos"]),
         quat_wxyz=tuple(float(x) for x in pose_cfg["quat_wxyz"]),
         convention=str(cfg.get("convention", pose_cfg.get("convention", "ros"))),
+        mount=str(cfg.get("mount", pose_cfg.get("mount", "world"))),
+        link_name=cfg.get("link_name", pose_cfg.get("link_name")),
     ), intrinsics
 
 
@@ -493,6 +497,8 @@ def save_camera_debug(env: IsaacSimDistillEnv, run_dir: Path):
                 "camera_pose": {
                     "pos": list(env.camera_pose.pos),
                     "quat_wxyz": list(env.camera_pose.quat_wxyz),
+                    "mount": env.camera_pose.mount,
+                    "link_name": env.camera_pose.link_name,
                 },
                 "camera_intrinsics": {
                     "width": env.camera_intrinsics.width,
