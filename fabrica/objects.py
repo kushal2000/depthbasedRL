@@ -61,3 +61,11 @@ for _assembly in ALL_ASSEMBLIES:
 
 # Register into the global object registry so the sim can find them
 NAME_TO_OBJECT.update(FABRICA_NAME_TO_OBJECT)
+
+# Chain-register sibling benchmarks. Importing these here guarantees that any
+# code path which imports fabrica.objects (including FabricaEnv construction)
+# also picks up their NAME_TO_OBJECT entries.
+try:
+    import peg_in_hole.objects  # noqa: F401
+except ImportError:
+    pass

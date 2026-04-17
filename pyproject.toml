@@ -78,6 +78,7 @@ include = [
     "fabrica*",
     "baselines*",
     "recorded_data*",
+    "peg_in_hole*",
 ]
 
 [tool.uv]
