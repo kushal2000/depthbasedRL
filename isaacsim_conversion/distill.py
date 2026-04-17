@@ -17,6 +17,7 @@ from isaacgymenvs.utils.observation_action_utils_sharpa import compute_joint_pos
 from isaacsim_conversion.distill_env import IsaacSimDistillEnv
 from isaacsim_conversion.isaacsim_env import _log
 from isaacsim_conversion.student_policy import (
+    MLPRecurrentPolicy,
     MonoTransformerRecurrentPolicy,
     preprocess_image,
     resize_image,
@@ -47,6 +48,7 @@ def launch_app():
     parser.add_argument("--teacher_config", default="pretrained_policy/config.yaml")
     parser.add_argument("--student_checkpoint", default=None)
     parser.add_argument("--student_arch", default="mono_transformer_recurrent")
+    parser.add_argument("--student_input", choices=["camera", "teacher_obs"], default="camera")
     parser.add_argument("--student_modality", choices=["depth", "rgb", "rgbd"], default=None)
     parser.add_argument("--distill_config", default="isaacsim_conversion/configs/hammer_distill.yaml")
     parser.add_argument("--camera_config", default="isaacsim_conversion/configs/hammer_camera.yaml")
@@ -229,8 +231,16 @@ def stack_student_image(student_obs: dict[str, torch.Tensor], modality: str, set
 
 
 def build_student(args, env: IsaacSimDistillEnv, settings: DistillSettings) -> MonoTransformerRecurrentPolicy:
+    if args.student_input == "teacher_obs":
+        if args.student_arch != "mlp_recurrent":
+            raise ValueError("teacher_obs student_input currently requires --student_arch mlp_recurrent")
+        return MLPRecurrentPolicy(
+            obs_dim=140,
+            action_dim=env.action_dim,
+            aux_heads={"object_pos": 3},
+        ).to(env.device)
     if args.student_arch != "mono_transformer_recurrent":
-        raise ValueError(f"Unsupported student_arch for now: {args.student_arch}")
+        raise ValueError(f"Unsupported student_arch for camera input: {args.student_arch}")
     image_channels = {"depth": 1, "rgb": 3, "rgbd": 4}[env.camera_modality]
     return MonoTransformerRecurrentPolicy(
         image_channels=image_channels,
@@ -375,9 +385,12 @@ def run_episode(
         teacher_obs_tensor = torch.from_numpy(teacher_obs).float().to(env.device)
         teacher_action = teacher.get_normalized_action(teacher_obs_tensor, deterministic_actions=True)
 
-        student_obs = env.build_student_obs(sim_state, camera_modality=env.camera_modality)
-        student_image = stack_student_image(student_obs, env.camera_modality, settings)
-        student_out, student_hidden = student(student_image, student_obs["proprio"], student_hidden)
+        if _args.student_input == "teacher_obs":
+            student_out, student_hidden = student(teacher_obs_tensor, student_hidden)
+        else:
+            student_obs = env.build_student_obs(sim_state, camera_modality=env.camera_modality)
+            student_image = stack_student_image(student_obs, env.camera_modality, settings)
+            student_out, student_hidden = student(student_image, student_obs["proprio"], student_hidden)
         student_action = student_out.action
 
         beta = beta_scheduler.value() if mode in ("train", "mixed_eval") else (1.0 if mode == "teacher_eval" else 0.0)
