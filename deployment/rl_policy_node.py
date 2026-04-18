@@ -13,6 +13,8 @@ import torch
 import tyro
 from geometry_msgs.msg import Pose, PoseStamped
 from rl_player import RlPlayer
+# RlPlayerSimpleRL is imported lazily inside RLPolicyNode to avoid importing
+# simple_rl at module load time (it's only needed for simple_rl checkpoints).
 from scipy.spatial.transform import Rotation as R
 from sensor_msgs.msg import JointState
 from termcolor import colored
@@ -220,9 +222,11 @@ class RLPolicyNode:
         use_relative_object_pose_once_lifted: bool = False,
         object_name: Optional[str] = None,
         automatically_detect_object_lifted: bool = False,
+        use_simple_rl: bool = False,
     ):
         self.config_path = config_path
         self.checkpoint_path = checkpoint_path
+        self.use_simple_rl = use_simple_rl
         self.hand_moving_average = hand_moving_average
         self.arm_moving_average = arm_moving_average
         self.hand_dof_speed_scale = hand_dof_speed_scale
@@ -314,14 +318,31 @@ class RLPolicyNode:
         )
 
         # Create the RL player
-        self.player = RlPlayer(
-            num_observations=self.num_observations,
-            num_actions=self.num_actions,
-            config_path=str(self.config_path),
-            checkpoint_path=str(self.checkpoint_path),
-            device=self.device,
-        )
-        self.obs_list = self.player.cfg["task"]["env"]["obsList"]
+        if self.use_simple_rl:
+            from rl_player_simple_rl import RlPlayerSimpleRL
+            self.player = RlPlayerSimpleRL(
+                num_observations=self.num_observations,
+                num_actions=self.num_actions,
+                config_path=str(self.config_path),
+                checkpoint_path=str(self.checkpoint_path),
+                device=self.device,
+                num_envs=1,
+            )
+        else:
+            self.player = RlPlayer(
+                num_observations=self.num_observations,
+                num_actions=self.num_actions,
+                config_path=str(self.config_path),
+                checkpoint_path=str(self.checkpoint_path),
+                device=self.device,
+            )
+        if self.use_simple_rl:
+            # RlPlayerSimpleRL doesn't expose .cfg; read it directly.
+            from rl_player_utils import read_cfg as _read_cfg
+            _full_cfg = _read_cfg(str(self.config_path), self.device)
+            self.obs_list = _full_cfg["task"]["env"]["obsList"]
+        else:
+            self.obs_list = self.player.cfg["task"]["env"]["obsList"]
 
         # ROS rate
         self.control_dt = 1.0 / 60
@@ -1453,6 +1474,10 @@ class RLPolicyNodeArgs:
     object_name: str = "claw_hammer"
     """The name of the object whose grasp bounding box will be used as input to the policy."""
 
+    use_simple_rl: bool = False
+    """If True, load the checkpoint using RlPlayerSimpleRL (simple_rl format) instead of the
+    default RlPlayer (rl_games format). Use this for checkpoints trained with train_simple_rl.py."""
+
 
 def main():
     args: RLPolicyNodeArgs = tyro.cli(RLPolicyNodeArgs)
@@ -1474,6 +1499,7 @@ def main():
             use_relative_object_pose_once_lifted=True,
             object_name=args.object_name,
             automatically_detect_object_lifted=False,
+            use_simple_rl=args.use_simple_rl,
         )
         rl_policy_node.run()
     except rospy.ROSInterruptException:

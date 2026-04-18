@@ -1,0 +1,54 @@
+# Simple-RL PPO training config for SimToolReal.
+# Used by isaacgymenvs/train_simple_rl.py (not train.py / rl_games).
+#
+# Top-level keys are consumed directly by train_simple_rl.py:
+#   cfg.train.ppo    -> dict_to_dataclass(d, PpoConfig)
+#   cfg.train.network -> dict_to_dataclass(d, NetworkConfig)
+#   cfg.train.player  -> dict_to_dataclass(d, PlayerConfig)
+
+ppo:
+  num_actors: ${...task.env.numEnvs}
+  learning_rate: 1e-4
+  entropy_coef: 0.0
+  horizon_length: 16
+  normalize_advantage: True
+  normalize_input: True
+  grad_norm: 1.0
+  critic_coef: 4.0
+  gamma: 0.99
+  tau: 0.95
+  mini_epochs: 2
+  e_clip: 0.1
+  reward_shaper:
+    scale_value: 0.01
+  # optional overrides from defaults
+  truncate_grads: True
+  mixed_precision: True
+  normalize_value: True
+  save_frequency: 3000
+  save_best_after: 100
+  max_epochs: 1000000
+  games_to_track: 100
+  # batch_size = num_actors * horizon_length; minibatch_size must divide it.
+  # Default 8192 works for ≥512 envs (512*16=8192). Override for smaller runs,
+  # e.g. num_envs=64: add train.ppo.minibatch_size=512 on the CLI.
+  # NOTE: the SAPG/EPO reference repos use minibatch_size = 4 * num_envs (e.g.
+  # 4*24576=98304 for the 24576-env runs), giving exactly 4 minibatches per epoch.
+  # We use a fixed 8192 instead (more gradient steps per epoch).  To match the
+  # reference exactly, override: train.ppo.minibatch_size=$((4 * num_envs)).
+  minibatch_size: 8192
+
+network:
+  mlp:
+    units: [1024, 1024, 512, 512]
+  rnn:
+    name: lstm
+    units: 1024
+    layers: 1
+    before_mlp: True
+    layer_norm: True
+
+player:
+  deterministic: True
+  games_num: 100000
+  print_stats: True

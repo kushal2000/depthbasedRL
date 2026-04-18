@@ -136,6 +136,8 @@ Training logs are tracked with [Weights & Biases](https://wandb.ai/). Before tra
 wandb login
 ```
 
+A **`simple_rl` training path** (PPO / SAPG / EPO) is available as a clean alternative to the rl_games path, with support for entropy-conditioned multi-block policies and evolutionary optimization. See [docs/rl.md](docs/rl.md) for training commands, checkpoint conversion, and eval instructions.
+
 ### Training a New Policy
 
 To train a policy from scratch, run the following command:

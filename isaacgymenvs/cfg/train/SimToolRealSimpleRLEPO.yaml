@@ -1,0 +1,20 @@
+# Simple-RL EPO training config for SimToolReal.
+# EPO = SAPG + evolutionary update.  M=64 blocks.
+# Used by isaacgymenvs/train_simple_rl.py.
+
+defaults:
+  - SimToolRealSimpleRLPPO
+  - _self_
+
+ppo:
+  sapg:
+    num_conditionings: 64
+    conditioning_dim: 32   # 32 deliberately differs from SAPG's 6×32 to avoid confusion
+    use_others_experience: True
+    off_policy_ratio: 1
+    use_entropy_bonus: true
+    entropy_coef_scale: 0.005
+  epo:
+    evolution_frequency: 50
+    evolution_kill_ratio: 0.3
+    log_sigma: True
