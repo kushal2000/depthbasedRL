@@ -25,3 +25,5 @@ env_spacing: 4.0
 object_start_mode: fixed
 object_pos_noise_xyz: [0.0, 0.0, 0.0]
 object_yaw_noise_deg: 0.0
+monitor_num_envs: 32
+monitor_log_window: 10

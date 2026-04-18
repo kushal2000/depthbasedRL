@@ -114,6 +114,8 @@ class DistillSettings:
     object_start_mode: str = "fixed"
     object_pos_noise_xyz: tuple[float, float, float] = (0.03, 0.03, 0.01)
     object_yaw_noise_deg: float = 20.0
+    monitor_num_envs: int = 0
+    monitor_log_window: int = 10
 
 
 class BetaScheduler:
@@ -175,6 +177,17 @@ def load_distill_settings(path: Path, args) -> DistillSettings:
     return settings
 
 
+def validate_distill_settings(settings: DistillSettings):
+    if settings.monitor_num_envs < 0:
+        raise ValueError("monitor_num_envs must be >= 0")
+    if settings.monitor_num_envs >= settings.num_envs:
+        raise ValueError(
+            f"monitor_num_envs ({settings.monitor_num_envs}) must be smaller than num_envs ({settings.num_envs})"
+        )
+    if settings.monitor_log_window <= 0:
+        raise ValueError("monitor_log_window must be > 0")
+
+
 def load_camera_pose(path: Path) -> tuple[str, CameraPose, CameraIntrinsics]:
     cfg = load_yaml(path)
     modality = cfg.get("modality", "depth")
@@ -221,6 +234,36 @@ def choose_stepping_action(beta: float, teacher_action: torch.Tensor, student_ac
     use_teacher = torch.rand(teacher_action.shape[0], device=teacher_action.device) < beta
     mask = use_teacher.unsqueeze(-1)
     return torch.where(mask, teacher_action, student_action)
+
+
+def get_monitor_env_mask(num_envs: int, monitor_num_envs: int) -> np.ndarray:
+    mask = np.zeros(num_envs, dtype=bool)
+    if monitor_num_envs > 0:
+        mask[-monitor_num_envs:] = True
+    return mask
+
+
+def subset_mean(values: np.ndarray, mask: np.ndarray) -> float:
+    if mask.size == 0 or not np.any(mask):
+        return 0.0
+    return float(np.mean(values[mask]))
+
+
+def compute_subset_progress_metrics(env: IsaacSimDistillEnv, sim_state, mask: np.ndarray) -> dict[str, float]:
+    if mask.size == 0 or not np.any(mask):
+        return {
+            "goal_idx": 0.0,
+            "goal_completion_ratio": 0.0,
+            "kp_dist": 0.0,
+            "near_goal_steps": 0.0,
+        }
+    goal_completion = env.goal_idx.astype(np.float32) / len(env.task_spec.goals)
+    return {
+        "goal_idx": subset_mean(env.goal_idx.astype(np.float32), mask),
+        "goal_completion_ratio": subset_mean(goal_completion, mask),
+        "kp_dist": subset_mean(sim_state.kp_dist.astype(np.float32), mask),
+        "near_goal_steps": subset_mean(env.near_goal_steps.astype(np.float32), mask),
+    }
 
 
 def stack_student_image(student_obs: dict[str, torch.Tensor], modality: str, settings: DistillSettings) -> torch.Tensor:
@@ -299,13 +342,31 @@ def ensure_run_dir(repo_root: Path, args, settings: DistillSettings) -> Path:
 
 
 def log_csv_row(csv_path: Path, row: dict[str, float | int | str]):
+    fieldnames = [
+        "episode",
+        "mode",
+        "goal_idx",
+        "goal_completion_ratio",
+        "kp_dist",
+        "near_goal_steps",
+        "episode_steps",
+        "action_loss",
+        "aux_object_pos_loss",
+        "beta",
+        "goal_completion_ratio_window",
+        "goal_idx_window",
+        "kp_dist_window",
+        "action_loss_window",
+        "aux_object_pos_loss_window",
+    ]
     csv_path.parent.mkdir(parents=True, exist_ok=True)
     write_header = not csv_path.exists()
+    normalized_row = {name: row.get(name, "") for name in fieldnames}
     with open(csv_path, "a", newline="") as f:
-        writer = csv.DictWriter(f, fieldnames=list(row.keys()))
+        writer = csv.DictWriter(f, fieldnames=fieldnames)
         if write_header:
             writer.writeheader()
-        writer.writerow(row)
+        writer.writerow(normalized_row)
 
 
 def record_metrics(run_dir: Path, row: dict[str, float | int | str], wandb_run=None, step: int | None = None):
@@ -383,13 +444,15 @@ def run_episode(
     run_dir: Path | None = None,
     capture_frames: bool = False,
     capture_frame_stride: int = 1,
-) -> dict[str, float]:
+) -> tuple[dict[str, float], dict[str, float] | None]:
     teacher.reset()
     env.reset()
     student_hidden = None if student is None else student.initial_state(batch_size=env.num_envs, device=env.device)
-    total_action_loss = 0.0
-    total_aux_loss = 0.0
+    total_action_loss_per_env = np.zeros(env.num_envs, dtype=np.float64)
+    total_aux_loss_per_env = np.zeros(env.num_envs, dtype=np.float64)
     total_steps = 0
+    monitor_mask = get_monitor_env_mask(env.num_envs, settings.monitor_num_envs if mode == "train" else 0)
+    train_mask = ~monitor_mask if mode == "train" else np.ones(env.num_envs, dtype=bool)
 
     for step_i in range(settings.max_steps):
         sim_state = env.compute_sim_state()
@@ -411,6 +474,10 @@ def run_episode(
 
         beta = beta_scheduler.value() if mode in ("train", "mixed_eval") else (1.0 if mode == "teacher_eval" else 0.0)
         stepping_action = choose_stepping_action(beta, teacher_action, student_action)
+        if mode == "train" and np.any(monitor_mask):
+            monitor_mask_t = torch.from_numpy(monitor_mask).to(device=env.device, dtype=torch.bool)
+            stepping_action = stepping_action.clone()
+            stepping_action[monitor_mask_t] = student_action[monitor_mask_t]
         targets = compute_joint_pos_targets(
             actions=stepping_action.detach().cpu().numpy(),
             prev_targets=env.prev_targets,
@@ -430,13 +497,19 @@ def run_episode(
         finished = env.maybe_advance_goal(next_sim_state)
 
         if student_out is None:
-            action_loss = torch.tensor(0.0, device=env.device)
-            aux_loss = torch.tensor(0.0, device=env.device)
+            action_loss_per_env = torch.zeros(env.num_envs, device=env.device)
+            aux_loss_per_env = torch.zeros(env.num_envs, device=env.device)
         else:
-            action_loss = torch.mean((student_action - teacher_action) ** 2)
+            action_loss_per_env = torch.mean((student_action - teacher_action) ** 2, dim=1)
             aux_pred = student_out.aux.get("object_pos")
             gt_object_pos = torch.from_numpy(sim_state.object_pos_world_env_frame).float().to(env.device)
-            aux_loss = torch.mean((aux_pred - gt_object_pos) ** 2) if aux_pred is not None else torch.tensor(0.0, device=env.device)
+            aux_loss_per_env = (
+                torch.mean((aux_pred - gt_object_pos) ** 2, dim=1)
+                if aux_pred is not None
+                else torch.zeros(env.num_envs, device=env.device)
+            )
+        action_loss = torch.mean(action_loss_per_env)
+        aux_loss = torch.mean(aux_loss_per_env)
         total_loss = settings.action_loss_weight * action_loss + settings.aux_object_pos_weight * aux_loss
 
         if mode == "train" and optimizer is not None and student is not None:
@@ -446,28 +519,47 @@ def run_episode(
             optimizer.step()
             student_hidden = detach_hidden_state(student_hidden)
 
-        total_action_loss += float(action_loss.item())
-        total_aux_loss += float(aux_loss.item())
+        total_action_loss_per_env += action_loss_per_env.detach().cpu().numpy()
+        total_aux_loss_per_env += aux_loss_per_env.detach().cpu().numpy()
         total_steps += 1
 
         if step_i % 60 == 0:
+            monitor_log = ""
+            if mode == "train" and np.any(monitor_mask):
+                monitor_metrics_step = compute_subset_progress_metrics(env, next_sim_state, monitor_mask)
+                monitor_log = (
+                    f", monitor_goal_mean={monitor_metrics_step['goal_idx']:.2f}/{len(env.task_spec.goals)}, "
+                    f"monitor_kp_dist_mean={monitor_metrics_step['kp_dist']:.4f}"
+                )
             _log(
-                f"[distill step {step_i:5d}] mode={mode}, goal_mean={np.mean(env.goal_idx):.2f}/{len(env.task_spec.goals)}, "
-                f"kp_dist_mean={np.mean(next_sim_state.kp_dist):.4f}, beta={beta:.3f}, num_envs={env.num_envs}"
+                f"[distill step {step_i:5d}] mode={mode}, goal_mean={subset_mean(env.goal_idx.astype(np.float32), train_mask):.2f}/{len(env.task_spec.goals)}, "
+                f"kp_dist_mean={subset_mean(next_sim_state.kp_dist.astype(np.float32), train_mask):.4f}, beta={beta:.3f}, num_envs={env.num_envs}{monitor_log}"
             )
         if finished:
             break
 
-    metrics = env.compute_progress_metrics(env.compute_sim_state())
+    final_state = env.compute_sim_state()
+    metrics = compute_subset_progress_metrics(env, final_state, train_mask)
     metrics.update(
         {
             "episode_steps": float(total_steps),
-            "action_loss": total_action_loss / max(total_steps, 1),
-            "aux_object_pos_loss": total_aux_loss / max(total_steps, 1),
+            "action_loss": subset_mean((total_action_loss_per_env / max(total_steps, 1)).astype(np.float32), train_mask),
+            "aux_object_pos_loss": subset_mean((total_aux_loss_per_env / max(total_steps, 1)).astype(np.float32), train_mask),
             "beta": beta_scheduler.value(),
         }
     )
-    return metrics
+    monitor_metrics = None
+    if mode == "train" and np.any(monitor_mask):
+        monitor_metrics = compute_subset_progress_metrics(env, final_state, monitor_mask)
+        monitor_metrics.update(
+            {
+                "episode_steps": float(total_steps),
+                "action_loss": subset_mean((total_action_loss_per_env / max(total_steps, 1)).astype(np.float32), monitor_mask),
+                "aux_object_pos_loss": subset_mean((total_aux_loss_per_env / max(total_steps, 1)).astype(np.float32), monitor_mask),
+                "beta": 0.0,
+            }
+        )
+    return metrics, monitor_metrics
 
 
 def _make_grid(images: list[np.ndarray]) -> np.ndarray:
@@ -595,6 +687,22 @@ def save_camera_debug_step(env: IsaacSimDistillEnv, run_dir: Path, step_i: int):
         iio.imwrite(grids_dir / f"depth_{step_i:04d}.png", _make_grid(depth_images))
 
 
+def update_monitor_history(
+    monitor_history: dict[str, list[float]],
+    monitor_metrics: dict[str, float] | None,
+    window: int,
+) -> dict[str, float]:
+    if monitor_metrics is None:
+        return {}
+    rolling_metrics = {}
+    for key in ("goal_completion_ratio", "goal_idx", "kp_dist", "action_loss", "aux_object_pos_loss"):
+        history = monitor_history.setdefault(key, [])
+        history.append(float(monitor_metrics[key]))
+        recent = history[-window:]
+        rolling_metrics[f"{key}_window"] = float(np.mean(recent))
+    return rolling_metrics
+
+
 def main():
     args = _args
     app = _app
@@ -602,6 +710,7 @@ def main():
     teacher_config = Path(resolve_repo_path(repo_root, args.teacher_config))
     teacher_checkpoint = resolve_repo_path(repo_root, args.teacher_checkpoint)
     settings = load_distill_settings(Path(resolve_repo_path(repo_root, args.distill_config)), args)
+    validate_distill_settings(settings)
     camera_modality, camera_pose, camera_intrinsics = load_camera_pose(Path(resolve_repo_path(repo_root, args.camera_config)))
     if args.student_modality:
         camera_modality = args.student_modality
@@ -670,8 +779,9 @@ def main():
         force_exit(0)
 
     best_metric = -1.0
+    monitor_history: dict[str, list[float]] = {}
     if args.mode == "train" and settings.num_envs < 2048:
-        teacher_metrics = run_episode(
+        teacher_metrics, _ = run_episode(
             "teacher_eval",
             env,
             teacher,
@@ -697,7 +807,7 @@ def main():
         _log("Skipping in-run teacher baseline for large batch training; use standalone teacher_eval reference instead")
 
     for episode in range(settings.num_episodes if args.mode == "train" else 1):
-        metrics = run_episode(
+        metrics, monitor_metrics = run_episode(
             args.mode,
             env,
             teacher,
@@ -720,6 +830,20 @@ def main():
             wandb_run=wandb_run,
             step=episode + 1,
         )
+        if monitor_metrics is not None:
+            monitor_row = {"episode": episode, "mode": "student_monitor", **monitor_metrics}
+            monitor_row.update(update_monitor_history(monitor_history, monitor_metrics, settings.monitor_log_window))
+            _log(
+                f"[episode {episode}] mode=student_monitor, goal_completion_ratio={monitor_metrics['goal_completion_ratio']:.3f}, "
+                f"goal_idx={monitor_metrics['goal_idx']:.0f}, action_loss={monitor_metrics['action_loss']:.6f}, "
+                f"aux_object_pos_loss={monitor_metrics['aux_object_pos_loss']:.6f}, beta=0.000"
+            )
+            record_metrics(
+                run_dir,
+                monitor_row,
+                wandb_run=wandb_run,
+                step=episode + 1,
+            )
         save_camera_debug(env, run_dir)
         if args.mode == "train":
             beta_scheduler.update(metrics["goal_completion_ratio"])
@@ -751,7 +875,7 @@ def main():
                     inference_batch_size=min(settings.eval_num_envs, 128),
                 )
                 eval_settings = replace(settings, num_envs=settings.eval_num_envs, max_steps=settings.eval_max_steps)
-                eval_metrics = run_episode(
+                eval_metrics, _ = run_episode(
                     "student_eval",
                     eval_env,
                     eval_teacher,
