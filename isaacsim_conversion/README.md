@@ -219,12 +219,16 @@ For camera placement in cloned multi-env scenes:
 - camera translation is authored **env-locally** under each cloned env namespace
 - env origins provide the world translation offset automatically
 
-For the real-camera `T_W_C` path, use Isaac Lab / USD camera convention:
+For the real-camera `T_W_C` path, the current implementation uses a ROS optical
+camera convention:
 
-- `convention="opengl"`
+- `convention="ros"`
 - right: `+X`
-- up: `+Y`
-- forward: `-Z`
+- down: `+Y`
+- forward: `+Z`
+
+The source of truth is the raw calibrated transform in
+`isaacsim_conversion/task_utils.py`.
 
 ### Camera sanity check
 
@@ -270,6 +274,33 @@ distillation_runs/<timestamped_run>/
   checkpoints/student_latest.pt
   checkpoints/student_best.pt
   camera_debug/
+```
+
+### Cluster usage
+
+For cluster runs on shared storage, use:
+
+- shared repo clone under `/move/u/$USER/github_repos/depthbasedRL`
+- repo-local Isaac Sim env `.venv-isaacsim-py311`
+- `OMNI_KIT_CACHE_PATH=/tmp/$USER_ov_cache`
+
+Bootstrap on an allocated node with:
+
+```bash
+./scripts/cluster/bootstrap_cluster_isaacsim.sh
+```
+
+Then launch the long teacher-observation distillation run with:
+
+```bash
+sbatch scripts/cluster/sbatch_distill_teacher_obs_l40s.sh
+```
+
+And evaluate a saved student checkpoint with:
+
+```bash
+sbatch --export=CHECKPOINT=distillation_runs/<run>/checkpoints/student_best.pt \
+  scripts/cluster/sbatch_student_eval_l40s.sh
 ```
 
 Training defaults in `hammer_distill.yaml` now use:

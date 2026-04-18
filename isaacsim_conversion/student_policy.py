@@ -141,6 +141,55 @@ class MLPRecurrentPolicy(nn.Module):
         return StudentOutput(action=action, aux=aux), next_hidden
 
 
+class MLPPolicy(nn.Module):
+    def __init__(
+        self,
+        obs_dim: int,
+        action_dim: int,
+        hidden_dim: int = 256,
+        aux_heads: dict[str, int] | None = None,
+    ):
+        super().__init__()
+        self.backbone = nn.Sequential(
+            nn.Linear(obs_dim, hidden_dim),
+            nn.LayerNorm(hidden_dim),
+            nn.GELU(),
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.GELU(),
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.GELU(),
+        )
+        self.actor = nn.Sequential(
+            nn.LayerNorm(hidden_dim),
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.GELU(),
+            nn.Linear(hidden_dim, action_dim),
+            nn.Tanh(),
+        )
+        self.aux_heads = nn.ModuleDict()
+        for name, size in (aux_heads or {}).items():
+            self.aux_heads[name] = nn.Sequential(
+                nn.LayerNorm(hidden_dim),
+                nn.Linear(hidden_dim, hidden_dim),
+                nn.GELU(),
+                nn.Linear(hidden_dim, size),
+            )
+        self.hidden_dim = hidden_dim
+
+    def initial_state(self, batch_size: int, device: torch.device) -> torch.Tensor | None:
+        return None
+
+    def forward(
+        self,
+        obs: torch.Tensor,
+        hidden_state: torch.Tensor | None = None,
+    ) -> tuple[StudentOutput, torch.Tensor | None]:
+        feat = self.backbone(obs)
+        action = self.actor(feat)
+        aux = {name: head(feat) for name, head in self.aux_heads.items()}
+        return StudentOutput(action=action, aux=aux), None
+
+
 def preprocess_image(image: torch.Tensor, modality: str) -> torch.Tensor:
     if modality == "depth":
         if image.dim() == 3:

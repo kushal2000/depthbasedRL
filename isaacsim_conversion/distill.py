@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import argparse
 import csv
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime
 import os
 from pathlib import Path
@@ -17,6 +17,7 @@ from isaacgymenvs.utils.observation_action_utils_sharpa import compute_joint_pos
 from isaacsim_conversion.distill_env import IsaacSimDistillEnv
 from isaacsim_conversion.isaacsim_env import _log
 from isaacsim_conversion.student_policy import (
+    MLPPolicy,
     MLPRecurrentPolicy,
     MonoTransformerRecurrentPolicy,
     preprocess_image,
@@ -100,8 +101,11 @@ class DistillSettings:
     beta_decay: float = 0.1
     beta_metric_threshold: float = 0.8
     beta_update_episodes: int = 2
+    beta_hold_episodes: int = 0
     checkpoint_interval: int = 5
     eval_interval: int = 5
+    eval_num_envs: int = 0
+    eval_max_steps: int = 700
     image_height: int = 224
     image_width: int = 224
     learning_rate: float = 1e-4
@@ -129,6 +133,8 @@ class BetaScheduler:
     def update(self, goal_completion_ratio: float):
         self.episode_counter += 1
         self.window.append(goal_completion_ratio)
+        if self.episode_counter <= self.cfg.beta_hold_episodes:
+            return
         if self.cfg.beta_mode == "fixed_decay":
             self.beta = max(self.cfg.beta_end, self.beta - self.cfg.beta_decay)
             return
@@ -230,15 +236,21 @@ def stack_student_image(student_obs: dict[str, torch.Tensor], modality: str, set
     return resize_image(image, settings.image_height, settings.image_width)
 
 
-def build_student(args, env: IsaacSimDistillEnv, settings: DistillSettings) -> MonoTransformerRecurrentPolicy:
+def build_student(args, env: IsaacSimDistillEnv, settings: DistillSettings):
     if args.student_input == "teacher_obs":
-        if args.student_arch != "mlp_recurrent":
-            raise ValueError("teacher_obs student_input currently requires --student_arch mlp_recurrent")
-        return MLPRecurrentPolicy(
-            obs_dim=140,
-            action_dim=env.action_dim,
-            aux_heads={"object_pos": 3},
-        ).to(env.device)
+        if args.student_arch == "mlp_recurrent":
+            return MLPRecurrentPolicy(
+                obs_dim=140,
+                action_dim=env.action_dim,
+                aux_heads={"object_pos": 3},
+            ).to(env.device)
+        if args.student_arch == "mlp":
+            return MLPPolicy(
+                obs_dim=140,
+                action_dim=env.action_dim,
+                aux_heads={"object_pos": 3},
+            ).to(env.device)
+        raise ValueError("teacher_obs student_input currently requires --student_arch mlp_recurrent or mlp")
     if args.student_arch != "mono_transformer_recurrent":
         raise ValueError(f"Unsupported student_arch for camera input: {args.student_arch}")
     image_channels = {"depth": 1, "rgb": 3, "rgbd": 4}[env.camera_modality]
@@ -364,7 +376,7 @@ def run_episode(
     mode: str,
     env: IsaacSimDistillEnv,
     teacher: RlPlayer,
-    student: MonoTransformerRecurrentPolicy | None,
+    student,
     optimizer: torch.optim.Optimizer | None,
     settings: DistillSettings,
     beta_scheduler: BetaScheduler,
@@ -713,14 +725,39 @@ def main():
             beta_scheduler.update(metrics["goal_completion_ratio"])
             selection_metric = metrics["goal_completion_ratio"]
             save_checkpoint(run_dir / "checkpoints" / "student_latest.pt", student, optimizer, episode, best_metric)
-            if (episode + 1) % settings.eval_interval == 0:
+            if (episode + 1) % settings.eval_interval == 0 and settings.eval_num_envs > 0:
+                eval_run_dir = run_dir / "eval_tmp"
+                eval_env = IsaacSimDistillEnv(
+                    task_spec=task_spec,
+                    app=app,
+                    headless=args.headless,
+                    camera_modality=camera_modality,
+                    camera_pose_override=camera_pose,
+                    camera_intrinsics=camera_intrinsics,
+                    enable_camera=False,
+                    num_envs=settings.eval_num_envs,
+                    env_spacing=settings.env_spacing,
+                    object_start_mode=settings.object_start_mode,
+                    object_pos_noise_xyz=settings.object_pos_noise_xyz,
+                    object_yaw_noise_deg=settings.object_yaw_noise_deg,
+                )
+                eval_teacher = RlPlayer(
+                    num_observations=140,
+                    num_actions=29,
+                    config_path=str(teacher_config),
+                    checkpoint_path=teacher_checkpoint,
+                    device=str(eval_env.device),
+                    num_envs=settings.eval_num_envs,
+                    inference_batch_size=min(settings.eval_num_envs, 128),
+                )
+                eval_settings = replace(settings, num_envs=settings.eval_num_envs, max_steps=settings.eval_max_steps)
                 eval_metrics = run_episode(
                     "student_eval",
-                    env,
-                    teacher,
+                    eval_env,
+                    eval_teacher,
                     student,
                     None,
-                    settings,
+                    eval_settings,
                     beta_scheduler,
                     run_dir=None,
                     capture_frames=False,
@@ -737,6 +774,7 @@ def main():
                     step=episode + 1,
                 )
                 selection_metric = eval_metrics["goal_completion_ratio"]
+                eval_env.close()
             if selection_metric >= best_metric:
                 best_metric = selection_metric
                 save_checkpoint(run_dir / "checkpoints" / "student_best.pt", student, optimizer, episode, best_metric)
