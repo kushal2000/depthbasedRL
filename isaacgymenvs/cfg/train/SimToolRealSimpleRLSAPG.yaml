@@ -1,0 +1,21 @@
+# Simple-RL SAPG training config for SimToolReal.
+# Extends SimToolRealSimpleRLPPO with M=6 conditioned policies.
+# Used by isaacgymenvs/train_simple_rl.py.
+#
+# conditioning_dim=32, num_conditionings=6 matches the pretrained rl_games policy
+# (extra_params shape (6,32), LSTM input 140+32=172) — enabling weight transfer.
+# Each block also gets its own sigma vector (shape 6×29), matching rl_games coef_cond.
+
+defaults:
+  - SimToolRealSimpleRLPPO
+  - _self_
+
+ppo:
+  # SAPG: 6 blocks, each with a distinct entropy coefficient (linspace 0.5 → 0.0)
+  sapg:
+    num_conditionings: 6
+    conditioning_dim: 32   # matches rl_games pretrained (extra_params dim=32)
+    use_others_experience: True
+    off_policy_ratio: 1
+    use_entropy_bonus: true
+    entropy_coef_scale: 0.005

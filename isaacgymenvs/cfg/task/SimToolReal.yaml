@@ -137,6 +137,33 @@ env:
   capture_video_len: 600
   capture_video_collision_geometry: True  # Also record a collision-geometry video alongside the visual one
 
+  # Interactive 3D viewer: pose-based, no camera sensors needed (works headless)
+  # Logs wandb.Html alongside the wandb.Video so both can be compared side-by-side
+  capture_viewer: True
+  capture_viewer_freq: 6_000   # same cadence as video
+  capture_viewer_len: 600
+
+  # Base URL for GitHub raw URDF fetching in the interactive viewer.
+  # The browser resolves mesh paths relative to this, so it must point to a
+  # location where all referenced URDF + mesh files exist and are accessible.
+  #
+  # "" (empty string, default) → uses /main/ branch (stable; always has all
+  #     released URDF + mesh files).
+  #
+  # To target a specific commit instead (e.g. when you've added new URDF/mesh
+  # files that aren't on main yet), set _VIEWER_USE_CURRENT_COMMIT = True in
+  # env.py, or override this key with an explicit URL:
+  #   specific commit: "https://raw.githubusercontent.com/tylerlum/simtoolreal/abc123def456/"
+  #   specific branch: "https://raw.githubusercontent.com/tylerlum/simtoolreal/my-branch/"
+  capture_viewer_github_raw_base: ""
+
+  # What to do when a URDF URL is unreachable (checked with an HTTP HEAD request):
+  #   "warn"  (default) — print a loud warning box but continue; HTML still generated,
+  #                        mesh just won't load in the browser
+  #   "error"           — raise ValueError and abort the capture
+  #   "skip"            — do not check at all (use when no internet access)
+  capture_viewer_url_check: "warn"
+
   turn_off_extra_obs: False
   turn_off_extra_obs_slowly: False
 

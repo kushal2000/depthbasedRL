@@ -81,7 +81,10 @@ class A2CBase(BaseAlgorithm):
             self.experiment_name = full_experiment_name
         else:
             self.experiment_name = config['name']
-        self.policy_idx = int(self.experiment_name.split('_')[0])
+        try:
+            self.policy_idx = int(self.experiment_name.split('_')[0])
+        except ValueError:
+            self.policy_idx = 0
 
         self.config = config
         self.algo_observer = config['features']['observer']

@@ -273,6 +273,7 @@ class EvalRunner:
         output_dir: Optional[Path] = None,
         record_video: bool = False,
         policy_name: str = None,
+        use_simple_rl: bool = False,
     ):
         self.env = env
         self.device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -288,11 +289,21 @@ class EvalRunner:
 
         # Load policy
         self.env.set_env_state(torch.load(checkpoint_path)[0]["env_state"])
-        self.policy = RlPlayer(
-            140, self.n_act, config_path, checkpoint_path, self.device, env.num_envs
-        )
+        if use_simple_rl:
+            import sys as _sys
+            _sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+            from deployment.rl_player_simple_rl import RlPlayerSimpleRL
+            self.policy = RlPlayerSimpleRL(
+                140, self.n_act, str(config_path), str(checkpoint_path),
+                self.device, num_envs=env.num_envs,
+            )
+        else:
+            self.policy = RlPlayer(
+                140, self.n_act, config_path, checkpoint_path, self.device, env.num_envs
+            )
 
         self.output_dir = output_dir
+        self.config_path = config_path
 
         # Recording setup
         self.record_video = record_video
@@ -468,8 +479,13 @@ class EvalRunner:
         # And save the env cfg because of overrides
         from omegaconf import OmegaConf
 
-        with open(output_dir / "policy_config.yaml", "w") as f:
-            f.write(OmegaConf.to_yaml(self.policy.cfg))
+        if hasattr(self.policy, "cfg"):
+            with open(output_dir / "policy_config.yaml", "w") as f:
+                f.write(OmegaConf.to_yaml(self.policy.cfg))
+        else:
+            # simple_rl path: copy the config file directly
+            import shutil as _shutil
+            _shutil.copy(self.config_path, output_dir / "policy_config.yaml")
         with open(output_dir / "env_cfg.yaml", "w") as f:
             f.write(OmegaConf.to_yaml(self.env.cfg))
         log_success(f"Saved: {output_json_file}")
@@ -512,6 +528,14 @@ class EvalArgs:
 
     z_offset: float = 0.03
     """Z offset added to start pose to avoid the table."""
+
+    wandb_project: Optional[str] = None
+    """WandB project to log results to. If None, wandb logging is skipped."""
+
+    use_simple_rl: bool = False
+    """If True, load the checkpoint using RlPlayerSimpleRL (simple_rl format).
+    Use this for checkpoints trained with train_simple_rl.py / launch_simple_rl.py.
+    Default False uses RlPlayer (rl_games format, e.g. the pretrained policy)."""
 
 
 TABLE_URDF = "urdf/table_narrow.urdf"
@@ -575,7 +599,16 @@ def main():
             # Set up environment parameters
             "task.env.numEnvs": 1,
             "task.env.envSpacing": 0.4,
-            "task.env.capture_video": False,
+            # Video + interactive viewer capture.
+            # freq=1 arms at step 0; len=400 finishes well within a 600-step episode.
+            # Both are enabled so the MP4 and HTML can be compared side-by-side.
+            "task.env.capture_video": True,
+            "task.env.enableCameraSensors": True,
+            "task.env.capture_video_freq": 1,
+            "task.env.capture_video_len": 400,
+            "task.env.capture_viewer": True,
+            "task.env.capture_viewer_freq": 1,
+            "task.env.capture_viewer_len": 400,
             # Goal settings
             "task.env.useFixedGoalStates": True,
             "task.env.fixedGoalStates": traj_data["goals"],
@@ -624,12 +657,67 @@ def main():
         table_urdf=selected_table_urdf,
         output_dir=args.output_dir,
         policy_name=args.policy_name,
+        use_simple_rl=args.use_simple_rl,
     )
+
+    # Record start time so we can find videos/viewer files created during this run.
+    run_start_time = time.time()
 
     if args.interactive:
         runner.run_interactive_eval()
     else:
         runner.run_eval(num_episodes=args.num_episodes)
+
+    # Log results + captured video/viewer HTML to wandb.
+    if args.wandb_project is not None:
+        import wandb
+        from datetime import datetime as _dt
+
+        timestamp = _dt.now().strftime("%Y%m%d_%H%M%S")
+        run_name = f"eval_{args.object_name}_{args.task_name}_{timestamp}"
+        wandb.init(
+            project=args.wandb_project,
+            name=run_name,
+            id=f"uid_{run_name}",
+            resume=False,
+            config={
+                "object_category": args.object_category,
+                "object_name": args.object_name,
+                "task_name": args.task_name,
+                "num_episodes": args.num_episodes,
+                "checkpoint_path": str(args.checkpoint_path),
+            },
+        )
+
+        # Log scalar results.
+        if args.output_dir is not None:
+            import json as _json
+            eval_json = args.output_dir / "eval.json"
+            if eval_json.exists():
+                with open(eval_json) as f:
+                    results = _json.load(f)
+                wandb.log({
+                    "avg_goal_pct": results["avg_goal_pct"],
+                    "avg_time_sec": results["avg_time_sec"],
+                })
+
+        # Log any video/viewer files created during this run.
+        videos_dir = Path("videos")
+        if videos_dir.exists():
+            new_files = [
+                p for p in videos_dir.iterdir()
+                if p.stat().st_mtime >= run_start_time
+            ]
+            for p in sorted(new_files):
+                if p.suffix == ".mp4":
+                    wandb.log({"video": wandb.Video(str(p), fps=60)})
+                    print(f"[wandb] Logged video: {p.name}")
+                elif p.suffix == ".html":
+                    wandb.log({"interactive_viewer": wandb.Html(p.read_text())})
+                    print(f"[wandb] Logged viewer: {p.name}")
+
+        wandb.finish()
+        print(f"[wandb] Run: https://wandb.ai/tylerlum/{args.wandb_project}/runs/uid_{run_name}")
 
 
 if __name__ == "__main__":

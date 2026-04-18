@@ -79,6 +79,7 @@ include = [
     "baselines*",
     "recorded_data*",
     "peg_in_hole*",
+    "simple_rl*",
 ]
 
 [tool.uv]

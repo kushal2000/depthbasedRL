@@ -1,0 +1,34 @@
+# rl_games SAPG training config for SimToolReal.
+# Extends SimToolRealLSTMAsymmetricPPO with SAPG conditioning (M=6, embd_dim=32).
+# Matches the pretrained policy architecture exactly.
+#
+# num_envs must satisfy: num_envs = expl_coef_block_size * 6 (6 SAPG blocks)
+# Default: num_envs=6144, expl_coef_block_size=1024
+# Pretrained scale: num_envs=24576, expl_coef_block_size=4096
+
+defaults:
+  - SimToolRealLSTMAsymmetricPPO
+  - _self_
+
+params:
+  network:
+    space:
+      continuous:
+        fixed_sigma: coef_cond   # per-block sigma (shape 6×actions), matches pretrained
+
+  config:
+    name: ${resolve_default:SimToolRealSAPG,${....experiment}}
+    minibatch_size: 16384      # must divide num_envs*horizon_length; 6144*16/16384=6
+    mini_epochs: 2
+
+    # SAPG exploration
+    use_others_experience: lf
+    off_policy_ratio: 1.0
+    expl_type: mixed_expl_learn_param
+    expl_reward_coef_embd_size: 32     # conditioning_dim (matches pretrained extra_params)
+    expl_reward_coef_scale: 0.005      # entropy bonus scale (matches pretrained)
+    expl_reward_type: entropy
+    expl_coef_block_size: 1024         # envs per block; override to 4096 for 24576-env runs
+
+    central_value_config:
+      minibatch_size: 16384

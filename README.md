@@ -126,6 +126,8 @@ See `dextoolbench/trajectories` for the list of task names following the directo
 
 ## Policy Learning in Simulation
 
+Training supports an **interactive 3D pose-based viewer** logged to WandB alongside the standard video — works headless, no camera sensors required. See [docs/wandb_viewer.md](docs/wandb_viewer.md) for setup and config options.
+
 ### WandB Setup
 
 Training logs are tracked with [Weights & Biases](https://wandb.ai/). Before training, log in and update the `wandb_entity` in `isaacgymenvs/launch_training.py` to your own WandB entity:
@@ -133,6 +135,8 @@ Training logs are tracked with [Weights & Biases](https://wandb.ai/). Before tra
 ```
 wandb login
 ```
+
+A **`simple_rl` training path** (PPO / SAPG / EPO) is available as a clean alternative to the rl_games path, with support for entropy-conditioned multi-block policies and evolutionary optimization. See [docs/rl.md](docs/rl.md) for training commands, checkpoint conversion, and eval instructions.
 
 ### Training a New Policy
 
