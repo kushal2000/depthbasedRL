@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import argparse
 import csv
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from datetime import datetime
 import os
 from pathlib import Path
@@ -103,7 +103,7 @@ class DistillSettings:
     beta_update_episodes: int = 2
     beta_hold_episodes: int = 0
     checkpoint_interval: int = 5
-    eval_interval: int = 5
+    eval_interval: int = 999
     eval_num_envs: int = 0
     eval_max_steps: int = 700
     image_height: int = 224
@@ -849,56 +849,6 @@ def main():
             beta_scheduler.update(metrics["goal_completion_ratio"])
             selection_metric = metrics["goal_completion_ratio"]
             save_checkpoint(run_dir / "checkpoints" / "student_latest.pt", student, optimizer, episode, best_metric)
-            if (episode + 1) % settings.eval_interval == 0 and settings.eval_num_envs > 0:
-                eval_run_dir = run_dir / "eval_tmp"
-                eval_env = IsaacSimDistillEnv(
-                    task_spec=task_spec,
-                    app=app,
-                    headless=args.headless,
-                    camera_modality=camera_modality,
-                    camera_pose_override=camera_pose,
-                    camera_intrinsics=camera_intrinsics,
-                    enable_camera=False,
-                    num_envs=settings.eval_num_envs,
-                    env_spacing=settings.env_spacing,
-                    object_start_mode=settings.object_start_mode,
-                    object_pos_noise_xyz=settings.object_pos_noise_xyz,
-                    object_yaw_noise_deg=settings.object_yaw_noise_deg,
-                )
-                eval_teacher = RlPlayer(
-                    num_observations=140,
-                    num_actions=29,
-                    config_path=str(teacher_config),
-                    checkpoint_path=teacher_checkpoint,
-                    device=str(eval_env.device),
-                    num_envs=settings.eval_num_envs,
-                    inference_batch_size=min(settings.eval_num_envs, 128),
-                )
-                eval_settings = replace(settings, num_envs=settings.eval_num_envs, max_steps=settings.eval_max_steps)
-                eval_metrics, _ = run_episode(
-                    "student_eval",
-                    eval_env,
-                    eval_teacher,
-                    student,
-                    None,
-                    eval_settings,
-                    beta_scheduler,
-                    run_dir=None,
-                    capture_frames=False,
-                    capture_frame_stride=args.capture_frame_stride,
-                )
-                _log(
-                    f"[student eval {episode}] goal_completion_ratio={eval_metrics['goal_completion_ratio']:.3f}, "
-                    f"goal_idx={eval_metrics['goal_idx']:.0f}, kp_dist={eval_metrics['kp_dist']:.4f}"
-                )
-                record_metrics(
-                    run_dir,
-                    {"episode": episode, "mode": "student_eval", **eval_metrics},
-                    wandb_run=wandb_run,
-                    step=episode + 1,
-                )
-                selection_metric = eval_metrics["goal_completion_ratio"]
-                eval_env.close()
             if selection_metric >= best_metric:
                 best_metric = selection_metric
                 save_checkpoint(run_dir / "checkpoints" / "student_best.pt", student, optimizer, episode, best_metric)
