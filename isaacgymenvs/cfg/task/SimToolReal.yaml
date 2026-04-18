@@ -144,15 +144,15 @@ env:
   capture_viewer_len: 600
 
   # Base URL for GitHub raw URDF fetching in the interactive viewer.
-  # The browser resolves mesh paths relative to this, so it must point to a commit
-  # where all referenced URDF + mesh files exist and are accessible.
+  # The browser resolves mesh paths relative to this, so it must point to a
+  # location where all referenced URDF + mesh files exist and are accessible.
   #
-  # "" (empty string, default) → auto-derive from `git rev-parse HEAD` so the URL
-  #     always points to your current pushed commit.  Falls back to /main/ if git
-  #     is unavailable.
+  # "" (empty string, default) → uses /main/ branch (stable; always has all
+  #     released URDF + mesh files).
   #
-  # Typical overrides:
-  #   main branch:     "https://raw.githubusercontent.com/tylerlum/simtoolreal/main/"
+  # To target a specific commit instead (e.g. when you've added new URDF/mesh
+  # files that aren't on main yet), set _VIEWER_USE_CURRENT_COMMIT = True in
+  # env.py, or override this key with an explicit URL:
   #   specific commit: "https://raw.githubusercontent.com/tylerlum/simtoolreal/abc123def456/"
   #   specific branch: "https://raw.githubusercontent.com/tylerlum/simtoolreal/my-branch/"
   capture_viewer_github_raw_base: ""

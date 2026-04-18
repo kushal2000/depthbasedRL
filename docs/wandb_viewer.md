@@ -24,10 +24,10 @@ env:
   capture_viewer_len: 600       # number of frames to capture per episode
 
   # Base URL for GitHub raw URDF fetching.
-  # "" (default) = auto-derived from `git rev-parse HEAD` — always points to your
-  # current pushed commit.  Falls back to /main/ if git is unavailable.
-  # Override to a specific branch/commit/URL:
-  #   task.env.capture_viewer_github_raw_base=https://raw.githubusercontent.com/tylerlum/simtoolreal/main/
+  # "" (default) = /main/ branch (stable; always has all released URDF + mesh files).
+  # To target your exact pushed commit instead, set _VIEWER_USE_CURRENT_COMMIT = True
+  # in env.py, or override this key with an explicit URL:
+  #   task.env.capture_viewer_github_raw_base=https://raw.githubusercontent.com/tylerlum/simtoolreal/abc123def456/
   capture_viewer_github_raw_base: ""
 
   # What to do when a URDF URL is unreachable (HTTP HEAD request, with timing):
@@ -42,10 +42,11 @@ env:
 When adding a new robot or object URDF with mesh files:
 
 1. Push the new files to GitHub.
-2. The auto-derived URL (`git rev-parse HEAD`) will point to your exact commit, so
-   the browser can resolve the mesh paths correctly.
-3. If your commit is not yet pushed, you will see a URL check failure. Either push
-   first, or set `capture_viewer_url_check=skip` while iterating locally.
+2. The default `/main/` base will serve the files as long as they are merged to main.
+   While iterating on an unpushed branch, override with your commit/branch URL or set
+   `_VIEWER_USE_CURRENT_COMMIT = True` in `env.py` to auto-derive from `git rev-parse HEAD`.
+3. If the URL is unreachable you will see a URL check failure. Set
+   `capture_viewer_url_check=skip` to bypass the check when offline.
 
 ## Quaternion convention
 
