@@ -81,6 +81,7 @@ class IsaacSimDistillEnv:
         object_pos_noise_xyz: tuple[float, float, float] = (0.03, 0.03, 0.01),
         object_yaw_noise_deg: float = 20.0,
         enable_camera: bool = True,
+        camera_backend: str = "tiled",
     ):
         self.task_spec = task_spec
         self.camera_modality = camera_modality
@@ -95,6 +96,7 @@ class IsaacSimDistillEnv:
         self.camera_intrinsics = camera_intrinsics or CameraIntrinsics()
         self.use_real_camera_transform = use_real_camera_transform
         self.enable_camera = enable_camera
+        self.camera_backend = camera_backend
         self.action_dim = 29
         self.student_proprio_dim = 29 + 29 + 29 + 1
         self.object_scales_batch = np.repeat(self.task_spec.object_scales.astype(np.float32), self.num_envs, axis=0)
@@ -168,9 +170,10 @@ class IsaacSimDistillEnv:
         robot_joint_vel = {name: 0.0 for name in JOINT_NAMES_ISAACGYM}
         default_joint_pos = dict(DEFAULT_JOINT_POS)
         if self.enable_camera:
-            from isaaclab.sensors import CameraCfg
+            from isaaclab.sensors import CameraCfg, TiledCameraCfg
 
             camera_types = list(self.camera_data_types)
+            camera_cfg_cls = TiledCameraCfg if self.camera_backend == "tiled" and self._camera_mount_mode() == "world" else CameraCfg
 
             @configclass
             class DistillSceneCfg(InteractiveSceneCfg):
@@ -234,7 +237,7 @@ class IsaacSimDistillEnv:
                     ),
                 )
 
-                camera = CameraCfg(
+                camera = camera_cfg_cls(
                     prim_path="{ENV_REGEX_NS}/DistillCamera",
                     update_period=0,
                     update_latest_camera_pose=True,
@@ -247,7 +250,7 @@ class IsaacSimDistillEnv:
                         horizontal_aperture=self.camera_intrinsics.horizontal_aperture,
                         clipping_range=self.camera_intrinsics.clipping_range,
                     ),
-                    offset=CameraCfg.OffsetCfg(
+                    offset=camera_cfg_cls.OffsetCfg(
                         pos=(0.0, 0.0, 0.0),
                         rot=(1.0, 0.0, 0.0, 0.0),
                         convention=self.camera_pose.convention,
@@ -394,7 +397,7 @@ class IsaacSimDistillEnv:
         if self.camera is not None:
             _log(
                 "Distill camera created "
-                f"(instances={self.camera.num_instances}, modality={self.camera_modality}, pos={self.camera_pose.pos}, "
+                f"(backend={self.camera_backend}, instances={self.camera.num_instances}, modality={self.camera_modality}, pos={self.camera_pose.pos}, "
                 f"quat_wxyz={self.camera_pose.quat_wxyz}, convention={self.camera_pose.convention})"
             )
         else:

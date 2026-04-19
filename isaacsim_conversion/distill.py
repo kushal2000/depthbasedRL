@@ -53,6 +53,7 @@ def launch_app():
     parser.add_argument("--student_modality", choices=["depth", "rgb", "rgbd"], default=None)
     parser.add_argument("--distill_config", default="isaacsim_conversion/configs/hammer_distill.yaml")
     parser.add_argument("--camera_config", default="isaacsim_conversion/configs/hammer_camera.yaml")
+    parser.add_argument("--camera_backend", choices=["tiled", "standard"], default=None)
     parser.add_argument("--run_dir", default=None)
     parser.add_argument("--max_steps", type=int, default=None)
     parser.add_argument("--num_episodes", type=int, default=None)
@@ -116,6 +117,7 @@ class DistillSettings:
     object_yaw_noise_deg: float = 20.0
     monitor_num_envs: int = 0
     monitor_log_window: int = 10
+    camera_backend: str = "tiled"
 
 
 class BetaScheduler:
@@ -740,6 +742,7 @@ def main():
         object_start_mode=settings.object_start_mode,
         object_pos_noise_xyz=settings.object_pos_noise_xyz,
         object_yaw_noise_deg=settings.object_yaw_noise_deg,
+        camera_backend=args.camera_backend or settings.camera_backend,
     )
     teacher_inference_batch_size = 128 if args.mode == "teacher_eval" else 32
     teacher = RlPlayer(
