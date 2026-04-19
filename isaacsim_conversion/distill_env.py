@@ -82,6 +82,9 @@ class IsaacSimDistillEnv:
         object_yaw_noise_deg: float = 20.0,
         enable_camera: bool = True,
         camera_backend: str = "tiled",
+        depth_preprocess_mode: str = "clip_divide",
+        depth_min_m: float = 0.0,
+        depth_max_m: float = 5.0,
     ):
         self.task_spec = task_spec
         self.camera_modality = camera_modality
@@ -99,6 +102,13 @@ class IsaacSimDistillEnv:
         self.camera_backend = camera_backend
         if self.camera_backend not in {"tiled", "standard"}:
             raise ValueError(f"Unsupported camera_backend={self.camera_backend!r}")
+        self.depth_preprocess_mode = depth_preprocess_mode
+        self.depth_min_m = float(depth_min_m)
+        self.depth_max_m = float(depth_max_m)
+        if self.depth_preprocess_mode not in {"clip_divide", "window_normalize", "metric"}:
+            raise ValueError(f"Unsupported depth_preprocess_mode={self.depth_preprocess_mode!r}")
+        if self.depth_max_m <= self.depth_min_m:
+            raise ValueError("depth_max_m must be greater than depth_min_m")
         self.action_dim = 29
         self.student_proprio_dim = 29 + 29 + 29 + 1
         self.object_scales_batch = np.repeat(self.task_spec.object_scales.astype(np.float32), self.num_envs, axis=0)
@@ -789,6 +799,16 @@ class IsaacSimDistillEnv:
             raise RuntimeError("Camera produced no outputs")
         return available
 
+    def _preprocess_depth(self, depth: torch.Tensor) -> torch.Tensor:
+        depth = depth.float()
+        if self.depth_preprocess_mode == "clip_divide":
+            return torch.clamp(depth, self.depth_min_m, self.depth_max_m) / self.depth_max_m
+        valid = (depth >= self.depth_min_m) & (depth <= self.depth_max_m)
+        if self.depth_preprocess_mode == "metric":
+            return torch.where(valid, depth, torch.zeros_like(depth))
+        normalized = (depth - self.depth_min_m) / (self.depth_max_m - self.depth_min_m)
+        return torch.where(valid, normalized, torch.zeros_like(depth))
+
     def build_student_obs(self, sim_state: SimState, camera_modality: str | None = None) -> dict[str, torch.Tensor]:
         modality = camera_modality or self.camera_modality
         outputs = self._read_camera_outputs()
@@ -801,7 +821,7 @@ class IsaacSimDistillEnv:
                 depth = depth.permute(0, 3, 1, 2)
             elif depth.dim() == 3:
                 depth = depth.unsqueeze(1)
-            image_dict["depth"] = torch.clamp(depth.float(), 0.0, 5.0) / 5.0
+            image_dict["depth"] = self._preprocess_depth(depth)
         if modality in ("rgb", "rgbd"):
             rgb = outputs.get("rgb")
             if rgb is None:

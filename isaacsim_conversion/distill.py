@@ -119,6 +119,9 @@ class DistillSettings:
     monitor_num_envs: int = 0
     monitor_log_window: int = 10
     camera_backend: str = "tiled"
+    depth_preprocess_mode: str = "clip_divide"
+    depth_min_m: float = 0.0
+    depth_max_m: float = 5.0
 
 
 class BetaScheduler:
@@ -189,6 +192,10 @@ def validate_distill_settings(settings: DistillSettings):
         )
     if settings.monitor_log_window <= 0:
         raise ValueError("monitor_log_window must be > 0")
+    if settings.depth_preprocess_mode not in {"clip_divide", "window_normalize", "metric"}:
+        raise ValueError(f"Unsupported depth_preprocess_mode={settings.depth_preprocess_mode!r}")
+    if settings.depth_max_m <= settings.depth_min_m:
+        raise ValueError("depth_max_m must be greater than depth_min_m")
 
 
 def load_camera_pose(path: Path) -> tuple[str, CameraPose, CameraIntrinsics]:
@@ -353,14 +360,20 @@ def log_csv_row(csv_path: Path, row: dict[str, float | int | str]):
         "kp_dist",
         "near_goal_steps",
         "episode_steps",
+        "episode_wall_time_s",
+        "env_steps_per_s",
         "action_loss",
+        "action_rmse",
         "aux_object_pos_loss",
+        "aux_object_pos_rmse_m",
         "beta",
         "goal_completion_ratio_window",
         "goal_idx_window",
         "kp_dist_window",
         "action_loss_window",
+        "action_rmse_window",
         "aux_object_pos_loss_window",
+        "aux_object_pos_rmse_m_window",
     ]
     csv_path.parent.mkdir(parents=True, exist_ok=True)
     write_header = not csv_path.exists()
@@ -565,6 +578,8 @@ def run_episode(
             "beta": beta_scheduler.value(),
         }
     )
+    metrics["action_rmse"] = float(np.sqrt(max(metrics["action_loss"], 0.0)))
+    metrics["aux_object_pos_rmse_m"] = float(np.sqrt(max(metrics["aux_object_pos_loss"], 0.0)))
     monitor_metrics = None
     if mode == "train" and np.any(monitor_mask):
         monitor_metrics = compute_subset_progress_metrics(env, final_state, monitor_mask)
@@ -577,6 +592,10 @@ def run_episode(
                 "aux_object_pos_loss": subset_mean((total_aux_loss_per_env / max(total_steps, 1)).astype(np.float32), monitor_mask),
                 "beta": 0.0,
             }
+        )
+        monitor_metrics["action_rmse"] = float(np.sqrt(max(monitor_metrics["action_loss"], 0.0)))
+        monitor_metrics["aux_object_pos_rmse_m"] = float(
+            np.sqrt(max(monitor_metrics["aux_object_pos_loss"], 0.0))
         )
     return metrics, monitor_metrics
 
@@ -719,6 +738,10 @@ def update_monitor_history(
         history.append(float(monitor_metrics[key]))
         recent = history[-window:]
         rolling_metrics[f"{key}_window"] = float(np.mean(recent))
+    rolling_metrics["action_rmse_window"] = float(np.sqrt(max(rolling_metrics["action_loss_window"], 0.0)))
+    rolling_metrics["aux_object_pos_rmse_m_window"] = float(
+        np.sqrt(max(rolling_metrics["aux_object_pos_loss_window"], 0.0))
+    )
     return rolling_metrics
 
 
@@ -760,6 +783,9 @@ def main():
         object_pos_noise_xyz=settings.object_pos_noise_xyz,
         object_yaw_noise_deg=settings.object_yaw_noise_deg,
         camera_backend=args.camera_backend or settings.camera_backend,
+        depth_preprocess_mode=settings.depth_preprocess_mode,
+        depth_min_m=settings.depth_min_m,
+        depth_max_m=settings.depth_max_m,
     )
     teacher_inference_batch_size = 128 if args.mode == "teacher_eval" else 32
     teacher = RlPlayer(
