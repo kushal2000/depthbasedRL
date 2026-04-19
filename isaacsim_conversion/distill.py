@@ -7,6 +7,7 @@ from datetime import datetime
 import os
 from pathlib import Path
 import sys
+import time
 
 import numpy as np
 import torch
@@ -447,6 +448,7 @@ def run_episode(
     capture_frames: bool = False,
     capture_frame_stride: int = 1,
 ) -> tuple[dict[str, float], dict[str, float] | None]:
+    episode_start_time = time.perf_counter()
     teacher.reset()
     env.reset()
     student_hidden = None if student is None else student.initial_state(batch_size=env.num_envs, device=env.device)
@@ -550,10 +552,14 @@ def run_episode(
             break
 
     final_state = env.compute_sim_state()
+    episode_wall_time_s = max(time.perf_counter() - episode_start_time, 1e-9)
+    env_steps_per_s = env.num_envs * total_steps / episode_wall_time_s
     metrics = compute_subset_progress_metrics(env, final_state, train_mask)
     metrics.update(
         {
             "episode_steps": float(total_steps),
+            "episode_wall_time_s": float(episode_wall_time_s),
+            "env_steps_per_s": float(env_steps_per_s),
             "action_loss": subset_mean((total_action_loss_per_env / max(total_steps, 1)).astype(np.float32), train_mask),
             "aux_object_pos_loss": subset_mean((total_aux_loss_per_env / max(total_steps, 1)).astype(np.float32), train_mask),
             "beta": beta_scheduler.value(),
@@ -565,6 +571,8 @@ def run_episode(
         monitor_metrics.update(
             {
                 "episode_steps": float(total_steps),
+                "episode_wall_time_s": float(episode_wall_time_s),
+                "env_steps_per_s": float(env_steps_per_s),
                 "action_loss": subset_mean((total_action_loss_per_env / max(total_steps, 1)).astype(np.float32), monitor_mask),
                 "aux_object_pos_loss": subset_mean((total_aux_loss_per_env / max(total_steps, 1)).astype(np.float32), monitor_mask),
                 "beta": 0.0,
