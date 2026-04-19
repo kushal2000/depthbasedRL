@@ -97,6 +97,8 @@ class IsaacSimDistillEnv:
         self.use_real_camera_transform = use_real_camera_transform
         self.enable_camera = enable_camera
         self.camera_backend = camera_backend
+        if self.camera_backend not in {"tiled", "standard"}:
+            raise ValueError(f"Unsupported camera_backend={self.camera_backend!r}")
         self.action_dim = 29
         self.student_proprio_dim = 29 + 29 + 29 + 1
         self.object_scales_batch = np.repeat(self.task_spec.object_scales.astype(np.float32), self.num_envs, axis=0)
@@ -174,6 +176,10 @@ class IsaacSimDistillEnv:
 
             camera_types = list(self.camera_data_types)
             camera_cfg_cls = TiledCameraCfg if self.camera_backend == "tiled" and self._camera_mount_mode() == "world" else CameraCfg
+            spawn_camera_at_static_pose = self.camera_backend == "tiled" and self._camera_mount_mode() == "world"
+            camera_offset_pos = self.camera_pose.pos if spawn_camera_at_static_pose else (0.0, 0.0, 0.0)
+            camera_offset_rot = self.camera_pose.quat_wxyz if spawn_camera_at_static_pose else (1.0, 0.0, 0.0, 0.0)
+            camera_offset_convention = self.camera_pose.convention if spawn_camera_at_static_pose else "ros"
 
             @configclass
             class DistillSceneCfg(InteractiveSceneCfg):
@@ -251,9 +257,12 @@ class IsaacSimDistillEnv:
                         clipping_range=self.camera_intrinsics.clipping_range,
                     ),
                     offset=camera_cfg_cls.OffsetCfg(
-                        pos=(0.0, 0.0, 0.0),
-                        rot=(1.0, 0.0, 0.0, 0.0),
-                        convention=self.camera_pose.convention,
+                        # TiledCamera render products do not reliably pick up poses
+                        # written after initialization, so static world cameras are
+                        # spawned directly at the per-env local camera pose.
+                        pos=camera_offset_pos,
+                        rot=camera_offset_rot,
+                        convention=camera_offset_convention,
                     ),
                 )
 
@@ -530,6 +539,10 @@ class IsaacSimDistillEnv:
             env_origins = self.env_origins[env_ids].detach().cpu().numpy()
             positions = env_origins + np.asarray(self.camera_pose.pos, dtype=np.float32)[None, :]
             orientations = np.repeat(np.asarray(self.camera_pose.quat_wxyz, dtype=np.float32)[None, :], len(env_ids_np), axis=0)
+        if self.camera_backend == "tiled" and self._camera_mount_mode() == "world":
+            self.camera_world_pos[env_ids_np] = positions
+            self.camera_world_quat_wxyz[env_ids_np] = orientations
+            return
         self.camera.set_world_poses(
             positions=positions,
             orientations=orientations,
