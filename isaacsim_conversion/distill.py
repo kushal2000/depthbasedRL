@@ -460,18 +460,27 @@ def run_episode(
         sim_state = env.compute_sim_state()
         teacher_obs = env.build_teacher_obs(sim_state)
         teacher_obs_tensor = torch.from_numpy(teacher_obs).float().to(env.device)
-        teacher_action = teacher.get_normalized_action(teacher_obs_tensor, deterministic_actions=True)
+        with torch.no_grad():
+            teacher_action = teacher.get_normalized_action(teacher_obs_tensor, deterministic_actions=True)
 
         student_out = None
-        if student is None:
+        if student is None or mode == "teacher_eval":
             student_action = teacher_action
         elif _args.student_input == "teacher_obs":
-            student_out, student_hidden = student(teacher_obs_tensor, student_hidden)
+            if mode == "train":
+                student_out, student_hidden = student(teacher_obs_tensor, student_hidden)
+            else:
+                with torch.no_grad():
+                    student_out, student_hidden = student(teacher_obs_tensor, student_hidden)
             student_action = student_out.action
         else:
             student_obs = env.build_student_obs(sim_state, camera_modality=env.camera_modality)
             student_image = stack_student_image(student_obs, env.camera_modality, settings)
-            student_out, student_hidden = student(student_image, student_obs["proprio"], student_hidden)
+            if mode == "train":
+                student_out, student_hidden = student(student_image, student_obs["proprio"], student_hidden)
+            else:
+                with torch.no_grad():
+                    student_out, student_hidden = student(student_image, student_obs["proprio"], student_hidden)
             student_action = student_out.action
 
         beta = beta_scheduler.value() if mode in ("train", "mixed_eval") else (1.0 if mode == "teacher_eval" else 0.0)
