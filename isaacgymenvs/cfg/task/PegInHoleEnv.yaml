@@ -29,6 +29,12 @@ env:
   #                        max_consecutive_successes = 1.
   goalMode: "dense"
 
+  # ── Table force reset ────────────────────────────────────────
+  # Episode resets if max smoothed table-sensor force (||F|| in Newtons)
+  # ever exceeds this value. Only active when withTableForceSensor=True
+  # (which is off by default in training; enabled for eval).
+  tableForceResetThreshold: 100.0
+
   # ── Goal observation noise ───────────────────────────────────
   # Per-episode XY offset (uniform in ±goalXyObsNoise) applied to every
   # goal waypoint observed by the actor. Does NOT affect reward, success,
