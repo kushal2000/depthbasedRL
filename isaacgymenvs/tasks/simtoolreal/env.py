@@ -2514,9 +2514,11 @@ class SimToolReal(VecTask):
         )
 
         if self.with_table_force_sensor:
-            TABLE_FORCE_THRESHOLD = 100.0
+            table_force_threshold = float(
+                self.cfg["env"].get("tableForceResetThreshold", 100.0)
+            )
             table_force_too_high = torch.where(
-                self.max_table_sensor_force_norm_smoothed > TABLE_FORCE_THRESHOLD,
+                self.max_table_sensor_force_norm_smoothed > table_force_threshold,
                 ones,
                 zeros,
             )

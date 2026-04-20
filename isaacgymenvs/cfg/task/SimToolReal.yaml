@@ -178,6 +178,11 @@ env:
   init_tyler_curriculum_scale: 0.0
   VISUALIZE_PD_TARGET_AS_BLUE_ROBOT: False
   withTableForceSensor: False
+  # Newtons on the smoothed table+hole sensor. An episode resets when the
+  # peak-so-far crosses this. Only active when withTableForceSensor=True.
+  # NOTE: at the default TGS num_position_iterations=8, the sensor reads
+  # ~8× the physical force, so 100 N here ≈ 12.5 N real.
+  tableForceResetThreshold: 100.0
   curriculumSuccessRatio: 0.6
   resetWhenDropped: False
   timeToUpdateTylerCurriculum: 5
