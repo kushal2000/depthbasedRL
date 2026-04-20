@@ -110,6 +110,7 @@ BASE_OVERRIDES = {
     # Eval-only: disable the 100 N force-reset trigger so we can observe
     # the full peak force during insertion. Training keeps the default.
     "task.env.tableForceResetThreshold": 1.0e6,
+    "task.env.retractDistanceThreshold": 0.5,
 }
 
 
@@ -205,6 +206,9 @@ def _create_env(config_path, headless, device, overrides):
 
 
 def _sim_get_state(env, obs, joint_lower, joint_upper):
+    # Refresh contact-force tensor so _diag_net_contact_force is current.
+    if hasattr(env, "_diag_net_contact_force"):
+        env.gym.refresh_net_contact_force_tensor(env.sim)
     obs_np = obs[0].cpu().numpy()
     joint_pos = 0.5 * (obs_np[:N_ACT] + 1.0) * (joint_upper - joint_lower) + joint_lower
     return (
@@ -230,6 +234,14 @@ def _sim_get_state(env, obs, joint_lower, joint_upper):
         env.table_sensor_forces_smoothed[0, :3].cpu().numpy()
         if hasattr(env, "table_sensor_forces_smoothed")
         else np.zeros(3, dtype=np.float32),
+        # Raw (unsmoothed) force — used to detect smoothing artifacts.
+        env.table_sensor_forces_raw[0, :3].cpu().numpy()
+        if hasattr(env, "table_sensor_forces_raw")
+        else np.zeros(3, dtype=np.float32),
+        # Net contact force felt by the peg body (sim-frame, world-aligned in IG).
+        # Tells us what the environment is pushing on the peg with.
+        (env._diag_net_contact_force[env._diag_peg_body_idx_sim].cpu().numpy()
+         if hasattr(env, "_diag_net_contact_force") else np.zeros(3, dtype=np.float32)),
     )
 
 
@@ -330,6 +342,29 @@ def sim_worker(conn, config_path, checkpoint_path, scene_idx, tol_slot_idx,
         joint_upper = env.arm_hand_dof_upper_limits[:N_ACT].cpu().numpy()
         env.set_env_state(torch.load(checkpoint_path, map_location=device)[0]["env_state"])
         policy = RlPlayer(OBS_DIM, N_ACT, config_path, checkpoint_path, device, env.num_envs)
+
+        # --- DIAGNOSTIC: peg runtime mass / inertia ---
+        try:
+            peg_actor_h = env.objects[0]  # list of per-env object actor handles (env.py:2230)
+            peg_body_props = env.gym.get_actor_rigid_body_properties(env.envs[0], peg_actor_h)
+            for i, p in enumerate(peg_body_props):
+                print(f"[diag] peg body {i}: mass={p.mass:.6f} kg com=({p.com.x:.4f},{p.com.y:.4f},{p.com.z:.4f})")
+            print(f"[diag] peg body count: {len(peg_body_props)}  total peg mass: {sum(p.mass for p in peg_body_props):.6f} kg")
+        except Exception as e:
+            print(f"[diag] peg mass probe failed: {e}")
+
+        # --- DIAGNOSTIC: acquire net contact force tensor for peg body ---
+        try:
+            from isaacgym import gymtorch
+            ncf = env.gym.acquire_net_contact_force_tensor(env.sim)
+            env._diag_net_contact_force = gymtorch.wrap_tensor(ncf)  # (num_rigid_bodies, 3)
+            env._diag_peg_body_idx_sim = env.gym.get_actor_rigid_body_index(
+                env.envs[0], peg_actor_h, 0, gymapi.DOMAIN_SIM,
+            )
+            print(f"[diag] peg_body_idx_sim={env._diag_peg_body_idx_sim} "
+                  f"ncf_tensor_shape={tuple(env._diag_net_contact_force.shape)}")
+        except Exception as e:
+            print(f"[diag] net contact force setup failed: {e}")
 
         obs = _sim_reset(env, device)
         init_state = _sim_get_state(env, obs, joint_lower, joint_upper)
@@ -671,6 +706,7 @@ class PegMultiInitDemo:
         self._btn_pause.name = "Pause"
         self._md_status.content = "**Status:** Running episode..."
         self._md_retract.content = "**Retract:** --"
+        self._peak_force = 0.0  # reset per-episode peak
         self._send("run")
 
     def _cmd_pause(self):
@@ -752,12 +788,27 @@ class PegMultiInitDemo:
                 force_mag = float(np.linalg.norm(force_vec))
                 if force_mag > self._peak_force:
                     self._peak_force = force_mag
-                self._md_force.content = (
-                    f"**Table force:** {force_mag:.2f} N  "
+                force_line = (
+                    f"**Table force (smoothed):** {force_mag:.2f} N  "
                     f"&nbsp;(peak this episode: **{self._peak_force:.2f} N**)  \n"
                     f"&nbsp;[fx, fy, fz] = "
                     f"[{force_vec[0]:+.2f}, {force_vec[1]:+.2f}, {force_vec[2]:+.2f}] N"
                 )
+                if len(state) >= 16:
+                    raw_vec = np.asarray(state[15], dtype=np.float32)
+                    raw_mag = float(np.linalg.norm(raw_vec))
+                    force_line += (
+                        f"  \n**Raw force:** {raw_mag:.2f} N  "
+                        f"&nbsp;[{raw_vec[0]:+.2f}, {raw_vec[1]:+.2f}, {raw_vec[2]:+.2f}] N"
+                    )
+                if len(state) >= 17:
+                    peg_ncf = np.asarray(state[16], dtype=np.float32)
+                    peg_ncf_mag = float(np.linalg.norm(peg_ncf))
+                    force_line += (
+                        f"  \n**Peg net contact:** {peg_ncf_mag:.2f} N  "
+                        f"&nbsp;[{peg_ncf[0]:+.2f}, {peg_ncf[1]:+.2f}, {peg_ncf[2]:+.2f}] N"
+                    )
+                self._md_force.content = force_line
                 self._update_force_arrow(force_vec, force_mag)
         elif tag == "done":
             goal_pct, steps, retract_ok = msg[1], msg[2], msg[3]

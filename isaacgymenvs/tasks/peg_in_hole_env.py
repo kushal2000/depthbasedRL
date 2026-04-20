@@ -245,6 +245,58 @@ class PegInHoleEnv(SimToolReal):
             self._pih_env_scene_idx = (combo_ids // K).astype(np.int64)
             self._pih_env_tol_slot_idx = (combo_ids % K).astype(np.int64)
 
+        # ── Optional override: per-scene tightest-tolerance slot ──
+        # Ablation knob. When True, override each env's tol_slot to the
+        # slot whose pool-index yields the minimum tolerance value for
+        # that env's scene. Used to ablate within-scene tolerance
+        # variation (each scene still has its own tightest value, but
+        # the policy never sees the multi-tolerance axis).
+        if cfg["env"].get("forceTightestTolPerScene", False):
+            per_scene_tightest_slot = np.argmin(
+                tol_pool_m[scene_tol_indices], axis=1
+            ).astype(np.int64)  # (N,)
+            self._pih_env_tol_slot_idx = per_scene_tightest_slot[self._pih_env_scene_idx]
+            print(
+                f"[PegInHoleEnv] forceTightestTolPerScene=True — tol_slot "
+                f"overridden to per-scene tightest (min "
+                f"{tol_pool_m[scene_tol_indices[np.arange(N), per_scene_tightest_slot]].min()*1000:.3f} mm, "
+                f"max {tol_pool_m[scene_tol_indices[np.arange(N), per_scene_tightest_slot]].max()*1000:.3f} mm)."
+            )
+
+        # ── Optional override: restrict tol_slot pool to the N tightest
+        # slots per scene. When tightestNTolSlotsPerScene = N (1..K),
+        # each env's tol_slot is round-robin-assigned from the N tightest
+        # slots for that env's scene. -1 (default) = disabled / use all K.
+        # Ignored if forceTightestTolPerScene is already True (that's the
+        # N=1 case).
+        tightest_n = int(cfg["env"].get("tightestNTolSlotsPerScene", -1))
+        if (
+            tightest_n > 0
+            and tightest_n < K
+            and not cfg["env"].get("forceTightestTolPerScene", False)
+        ):
+            # (N, K) actual tolerance value per (scene, slot).
+            actual_tols_per_scene = tol_pool_m[scene_tol_indices]
+            # (N, tightest_n) — the N tightest slot indices per scene,
+            # sorted ascending by tolerance value.
+            tightest_slots_per_scene = np.argsort(actual_tols_per_scene, axis=1)[:, :tightest_n]
+            # For each env: pick its slot by round-robin within its
+            # scene's tightest-N pool.
+            env_pick_idx = np.arange(num_envs) % tightest_n
+            self._pih_env_tol_slot_idx = tightest_slots_per_scene[
+                self._pih_env_scene_idx, env_pick_idx
+            ].astype(np.int64)
+            # Report the tolerance range actually seen by training.
+            seen_tols = actual_tols_per_scene[
+                np.arange(N)[:, None], tightest_slots_per_scene
+            ]
+            print(
+                f"[PegInHoleEnv] tightestNTolSlotsPerScene={tightest_n}/{K} — "
+                f"tol_slot pool restricted to per-scene tightest-{tightest_n} "
+                f"(seen tol range {seen_tols.min()*1000:.3f} – "
+                f"{seen_tols.max()*1000:.3f} mm)."
+            )
+
         # Per-env scene URDF paths (relative to repo_root/assets).
         self._pih_scene_urdfs = []
         for env_i in range(num_envs):

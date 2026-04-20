@@ -84,6 +84,18 @@ BASE_OVERRIDES = {
     "task.env.torqueProbRange": [0.0001, 0.0001],
     "task.env.linVelImpulseProbRange": [0.0001, 0.0001],
     "task.env.angVelImpulseProbRange": [0.0001, 0.0001],
+    # Disable the env-side debug viser (each sim_worker subprocess would
+    # otherwise spawn its own viser server and the port numbers drift).
+    "task.env.viserViz": False,
+    # Enable the table+hole force sensor so the peak insertion force can be
+    # observed during eval. NOTE: with the default TGS
+    # num_position_iterations=8, the reported force is ~8× the physical
+    # value (see peg_multi_init_eval.py comments for the diagnostic
+    # walkthrough). Interpret readings accordingly.
+    "task.env.withTableForceSensor": True,
+    # Eval-only: disable the 100 N force-reset trigger so we can see the
+    # full peak force during insertion. Training keeps the default.
+    "task.env.tableForceResetThreshold": 1.0e6,
 }
 
 _TOL_DIR_RE = re.compile(r"^hole_tol([0-9p]+)mm$")
@@ -144,7 +156,7 @@ def _create_fabrica_env(config_path, headless, device, overrides):
     cfg.task_name = "FabricaEnv"
     fabrica_defaults = {
         "enableRetract": True,
-        "retractDistanceThreshold": 0.1,
+        "retractDistanceThreshold": 0.5,
         "retractRewardScale": 1.0,
         "retractSuccessBonus": 0.0,
         "multiPart": False,
@@ -171,6 +183,19 @@ def _sim_get_state(env, obs, joint_lower, joint_upper):
         bool(env.retract_phase[0].item()),
         bool(env.retract_succeeded[0].item()),
         float(env.curr_fingertip_distances[0].mean().item()),
+        # Diagnostic: max keypoint distance, current success tolerance,
+        # near-goal-step counter, progress_buf, max_episode_length, reset_buf.
+        float(env.keypoints_max_dist[0].item()),
+        float(env.success_tolerance * env.keypoint_scale),
+        int(env.near_goal_steps[0].item()) if hasattr(env, "near_goal_steps") else 0,
+        int(env.progress_buf[0].item()),
+        int(env.max_episode_length),
+        bool(env.reset_buf[0].item()),
+        # Table force sensor (covers table + hole body since they're one
+        # URDF). World-frame 3-vector [fx, fy, fz] in Newtons; smoothed.
+        env.table_sensor_forces_smoothed[0, :3].cpu().numpy()
+        if hasattr(env, "table_sensor_forces_smoothed")
+        else np.zeros(3, dtype=np.float32),
     )
 
 
@@ -466,11 +491,15 @@ class PegInHoleDemo:
         with self.server.gui.add_folder("Status", expand_by_default=True):
             self._md_task = self.server.gui.add_markdown("**Task:** --")
             self._md_prog = self.server.gui.add_markdown("**Progress:** --")
+            self._md_diag = self.server.gui.add_markdown("**Goal dist:** --")
             self._md_retract = self.server.gui.add_markdown("**Retract:** --")
+            self._md_force = self.server.gui.add_markdown("**Table force:** --")
             self._md_stats = self.server.gui.add_markdown("**Stats:** No episodes yet")
             self._md_obj = self.server.gui.add_markdown("**Object Pos:** --")
             self._md_dist = self.server.gui.add_markdown("**Dist to Goal:** --")
             self._md_reward = self.server.gui.add_markdown("**Cum Reward:** --")
+
+        self._peak_force = 0.0
 
     def _tol_from_label(self, label: str) -> Optional[str]:
         if not label.endswith(" mm"):
@@ -665,6 +694,7 @@ class PegInHoleDemo:
         self._btn_pause.name = "Pause"
         self._md_status.content = "**Status:** Running episode..."
         self._md_retract.content = "**Retract:** --"
+        self._peak_force = 0.0
         self._send("run")
 
     def _cmd_pause(self):
@@ -747,6 +777,32 @@ class PegInHoleDemo:
                     self._md_retract.content = f"**Retract:** SUCCESS (hand dist: {mean_ft_dist:.3f}m)"
                 elif retract_phase:
                     self._md_retract.content = f"**Retract:** IN PROGRESS (hand dist: {mean_ft_dist:.3f}m)"
+            if len(state) >= 14:
+                kp_max_dist = state[8]
+                tol_m = state[9]
+                near_steps = state[10]
+                progress = state[11]
+                max_ep_len = state[12]
+                reset_pending = state[13]
+                in_tol = "✓" if kp_max_dist <= tol_m else "✗"
+                self._md_diag.content = (
+                    f"**Goal dist:** {kp_max_dist*1000:.1f} mm {in_tol}  "
+                    f"&nbsp;(tol {tol_m*1000:.1f} mm)  "
+                    f"&nbsp;near-goal-steps: **{near_steps}**  \n"
+                    f"**progress_buf:** {progress}/{max_ep_len}  "
+                    f"&nbsp;reset_buf: **{reset_pending}**"
+                )
+            if len(state) >= 15:
+                force_vec = np.asarray(state[14], dtype=np.float32)
+                force_mag = float(np.linalg.norm(force_vec))
+                if force_mag > self._peak_force:
+                    self._peak_force = force_mag
+                self._md_force.content = (
+                    f"**Table force:** {force_mag:.2f} N  "
+                    f"&nbsp;(peak this episode: **{self._peak_force:.2f} N**)  \n"
+                    f"&nbsp;[fx, fy, fz] = "
+                    f"[{force_vec[0]:+.2f}, {force_vec[1]:+.2f}, {force_vec[2]:+.2f}] N"
+                )
 
         elif tag == "done":
             goal_pct, steps = msg[1], msg[2]
