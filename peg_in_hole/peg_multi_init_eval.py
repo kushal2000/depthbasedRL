@@ -102,6 +102,14 @@ BASE_OVERRIDES = {
     "task.env.linVelImpulseProbRange": [0.0001, 0.0001],
     "task.env.angVelImpulseProbRange": [0.0001, 0.0001],
     "task.env.viserViz": False,
+    # Enable the table force sensor so we can read contact forces on the
+    # table+hole body during insertion. Sensor is on body_idx=0 of the
+    # scene URDF, which contains table + hole boxes — so this measures
+    # the combined contact force the peg applies to the hole fixture.
+    "task.env.withTableForceSensor": True,
+    # Eval-only: disable the 100 N force-reset trigger so we can observe
+    # the full peak force during insertion. Training keeps the default.
+    "task.env.tableForceResetThreshold": 1.0e6,
 }
 
 
@@ -185,6 +193,11 @@ def _create_env(config_path, headless, device, overrides):
         "retractSuccessTolerance": 0.005,
         "forceSceneTolCombo": None,
         "forcePegIdx": None,
+        # Older checkpoints (pre-2026-04-20) don't have this; default 0.
+        "goalXyObsNoise": 0.0,
+        # Older checkpoints also don't have this; default preserves the
+        # old hardcoded 100 N threshold.
+        "tableForceResetThreshold": 100.0,
     }
     for k, v in pih_defaults.items():
         OmegaConf.update(cfg, f"task.env.{k}", v, force_add=True)
@@ -203,6 +216,20 @@ def _sim_get_state(env, obs, joint_lower, joint_upper):
         bool(env.retract_phase[0].item()),
         bool(env.retract_succeeded[0].item()),
         float(env.curr_fingertip_distances[0].mean().item()),
+        # Diagnostic: max keypoint distance, current success tolerance,
+        # near-goal-step counter, progress_buf (for max_episode_length),
+        # reset_buf (shows if reset is pending).
+        float(env.keypoints_max_dist[0].item()),
+        float(env.success_tolerance * env.keypoint_scale),
+        int(env.near_goal_steps[0].item()) if hasattr(env, "near_goal_steps") else 0,
+        int(env.progress_buf[0].item()),
+        int(env.max_episode_length),
+        bool(env.reset_buf[0].item()),
+        # Table force sensor (covers table + hole body since they're one URDF).
+        # World-frame 3-vector [fx, fy, fz] in Newtons; smoothed exponentially.
+        env.table_sensor_forces_smoothed[0, :3].cpu().numpy()
+        if hasattr(env, "table_sensor_forces_smoothed")
+        else np.zeros(3, dtype=np.float32),
     )
 
 
@@ -217,6 +244,16 @@ def _sim_episode(conn, env, policy, joint_lower, joint_upper, device):
     import torch  # noqa: F401
     policy.reset()
     obs = _sim_reset(env, device)
+
+    # Latch retract_ok and peak successes across the episode — both get
+    # zeroed on the same frame the env resets, so reading them after the
+    # final step sees stale values.
+    retract_ok = False
+    peak_successes = 0
+    max_goals_seen = max(1, int(
+        env.env_max_goals[0].item() if hasattr(env, "env_max_goals")
+        else env.max_consecutive_successes
+    ))
 
     step, done, paused = 0, False, False
     while not done:
@@ -245,19 +282,28 @@ def _sim_episode(conn, env, policy, joint_lower, joint_upper, device):
         done = done_tensor[0].item()
         step += 1
 
-        conn.send((
-            "state", state,
-            int(env.successes[0].item()),
-            int(env.env_max_goals[0].item()) if hasattr(env, "env_max_goals") else env.max_consecutive_successes,
-            step,
-        ))
+        # Latch episode-level stats BEFORE the reset zeroes them.
+        cur_succ = int(env.successes[0].item())
+        cur_max = int(env.env_max_goals[0].item()) if hasattr(env, "env_max_goals") else env.max_consecutive_successes
+        if cur_succ > peak_successes:
+            peak_successes = cur_succ
+        if cur_max > max_goals_seen:
+            max_goals_seen = cur_max
+        # env.retract_succeeded is cleared by _compute_resets on the same frame
+        # the reset fires, so reading it post-step loses the signal. Use the
+        # extras dict, which is populated in compute_kuka_reward BEFORE
+        # _compute_resets runs (see peg_in_hole_env.py compute_kuka_reward tail).
+        if env.extras.get("retract_success_ratio", 0.0) > 0.5:
+            retract_ok = True
+
+        conn.send(("state", state, cur_succ, cur_max, step, retract_ok))
 
         elapsed = _time.time() - t0
         if (sleep := CONTROL_DT - elapsed) > 0:
             _time.sleep(sleep)
 
-    goal_pct = 100 * int(env.successes[0].item()) / max(1, int(env.env_max_goals[0].item()))
-    conn.send(("done", goal_pct, step, bool(env.retract_succeeded[0].item())))
+    goal_pct = 100 * peak_successes / max(1, max_goals_seen)
+    conn.send(("done", goal_pct, step, retract_ok))
     return obs
 
 
@@ -392,9 +438,15 @@ class PegMultiInitDemo:
         with self.server.gui.add_folder("Status", expand_by_default=True):
             self._md_task = self.server.gui.add_markdown("**Task:** --")
             self._md_prog = self.server.gui.add_markdown("**Progress:** --")
+            self._md_diag = self.server.gui.add_markdown("**Goal dist:** --")
             self._md_retract = self.server.gui.add_markdown("**Retract:** --")
+            self._md_force = self.server.gui.add_markdown("**Table force:** --")
             self._md_stats = self.server.gui.add_markdown("**Stats:** No episodes yet")
             self._md_tol_value = self.server.gui.add_markdown("**Tol value:** --")
+
+        # Dynamic force arrow (created per-Load in _setup_scene_objects).
+        self._force_arrow = None
+        self._peak_force = 0.0
 
         # peg dropdown can change mid-run (state only, no subprocess restart)
         self._dd_peg.on_update(lambda _: self._apply_peg_change())
@@ -502,6 +554,38 @@ class PegMultiInitDemo:
         for kp in self._obj_keypoints + self._goal_keypoints:
             kp.visible = visible
 
+    def _update_force_arrow(self, force_vec, force_mag):
+        """Render a 3D arrow at the hole pointing along the table's reaction
+        force. Arrow length is scaled so 1 N → 1 mm, clamped to [2mm, 20cm]."""
+        if self._obj_frame is None:  # Scene not loaded yet
+            return
+        scene_idx = int(self._dd_scene.value)
+        hole_x, hole_y, _ = self.scenes["hole_positions"][scene_idx]
+        origin = (float(hole_x), float(hole_y), TABLE_Z + HOLE_SCENE_Z + 0.06)
+
+        # Length in meters: 1 N per mm, clamped.
+        length = max(0.002, min(0.2, float(force_mag) * 0.001))
+        direction = force_vec / (force_mag + 1e-6)
+        tip = (
+            origin[0] + float(direction[0]) * length,
+            origin[1] + float(direction[1]) * length,
+            origin[2] + float(direction[2]) * length,
+        )
+        color = (255, 0, 0) if force_mag > 50 else (255, 165, 0) if force_mag > 10 else (80, 200, 120)
+
+        if self._force_arrow is not None:
+            try:
+                self._force_arrow.remove()
+            except Exception:
+                pass
+        self._force_arrow = self.server.scene.add_spline_catmull_rom(
+            "/force_arrow",
+            positions=np.array([origin, tip], dtype=np.float32),
+            color=color,
+            line_width=5.0,
+            tension=0.0,
+        )
+
     # ── Subprocess management ────────────────────────────────────
 
     def _kill_subprocess(self):
@@ -540,6 +624,7 @@ class PegMultiInitDemo:
         self._md_task.content = f"**Task:** {label}"
         self._md_retract.content = "**Retract:** --"
         self.ep_count = 0
+        self._peak_force = 0.0
         self._md_stats.content = "**Stats:** No episodes yet"
 
         self.robot.update_cfg(DEFAULT_DOF_POS)
@@ -629,6 +714,8 @@ class PegMultiInitDemo:
             print("[launcher] Environment ready")
         elif tag == "state":
             state, successes, max_succ, step = msg[1], msg[2], msg[3], msg[4]
+            # Latched retract_ok (extras-based) piggy-backed as 6th arg when present.
+            latched_retract = msg[5] if len(msg) > 5 else False
             self._update_viz(state)
             pct = 100 * successes / max_succ if max_succ > 0 else 0
             self._md_prog.content = (
@@ -637,10 +724,41 @@ class PegMultiInitDemo:
             )
             if len(state) >= 8:
                 retract_phase, retract_ok, mean_ft_dist = state[5], state[6], state[7]
+                # Prefer the latched retract_ok from extras (pre-reset-clear).
+                retract_ok = retract_ok or latched_retract
                 if retract_ok:
                     self._md_retract.content = f"**Retract:** SUCCESS (hand dist {mean_ft_dist:.3f}m)"
                 elif retract_phase:
                     self._md_retract.content = f"**Retract:** IN PROGRESS (hand dist {mean_ft_dist:.3f}m)"
+                else:
+                    self._md_retract.content = f"**Retract:** not yet (hand dist {mean_ft_dist:.3f}m)"
+            if len(state) >= 14:
+                kp_max_dist = state[8]
+                tol_m = state[9]
+                near_steps = state[10]
+                progress = state[11]
+                max_ep_len = state[12]
+                reset_pending = state[13]
+                in_tol = "✓" if kp_max_dist <= tol_m else "✗"
+                self._md_diag.content = (
+                    f"**Goal dist:** {kp_max_dist*1000:.1f} mm {in_tol}  "
+                    f"&nbsp;(tol {tol_m*1000:.1f} mm)  "
+                    f"&nbsp;near-goal-steps: **{near_steps}**  \n"
+                    f"**progress_buf:** {progress}/{max_ep_len}  "
+                    f"&nbsp;reset_buf: **{reset_pending}**"
+                )
+            if len(state) >= 15:
+                force_vec = np.asarray(state[14], dtype=np.float32)
+                force_mag = float(np.linalg.norm(force_vec))
+                if force_mag > self._peak_force:
+                    self._peak_force = force_mag
+                self._md_force.content = (
+                    f"**Table force:** {force_mag:.2f} N  "
+                    f"&nbsp;(peak this episode: **{self._peak_force:.2f} N**)  \n"
+                    f"&nbsp;[fx, fy, fz] = "
+                    f"[{force_vec[0]:+.2f}, {force_vec[1]:+.2f}, {force_vec[2]:+.2f}] N"
+                )
+                self._update_force_arrow(force_vec, force_mag)
         elif tag == "done":
             goal_pct, steps, retract_ok = msg[1], msg[2], msg[3]
             self._episode_running = False
