@@ -51,7 +51,7 @@ SCENES_PATH="assets/urdf/peg_in_hole/scenes/scenes.npz"
 
 WANDB_PROJECT="PEG_IN_HOLE_TRAINING"
 WANDB_GROUP="peg_multi_init_states"
-EXPERIMENT_TAG="peg_multi_init_no_dr"
+EXPERIMENT_TAG="peg_multi_init_no_dr_dense"
 
 # ╔══════════════════════════════════════════════════════════════╗
 # ║         END CONFIG — generally don't edit below here        ║

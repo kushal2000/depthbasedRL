@@ -12,56 +12,46 @@
 #SBATCH -e /dev/null
 
 # ╔══════════════════════════════════════════════════════════════╗
-# ║  Peg-in-Hole Multi-Init, Multi-Goal, Multi-Tolerance        ║
-# ║  Uses scenes.npz (100 holes × 10 pegs × 10 tolerances).     ║
-# ║  Mirrors beam_multi_init_states/beam_multi_init.sub but      ║
-# ║  targets PegInHoleEnv — (scene, tol_slot) fixed per env,     ║
-# ║  peg_idx resampled every reset.                              ║
+# ║  Peg-in-Hole Multi-Init, Multi-Goal, Multi-Tolerance — NO DR ║
+# ║  Same scenes.npz as peg_multi_init.sub, delays/noise OFF.    ║
 # ╚══════════════════════════════════════════════════════════════╝
 
-# ── Goal mode (dense / preInsertAndFinal / finalGoalOnly) ─────
-GOAL_MODE="dense"
+GOAL_MODE="preInsertAndFinal"
 
-# ── Training Details ──────────────────────────────────────────
 CHECKPOINT="/share/portal/kk837/depthbasedRL/pretrained_policy/model.pth"
 NUM_ENVS=24576
 MINIBATCH_SIZE=98304
 SEED=0
 
-# ── Final Goal Tolerance Curriculum ──────────────────────────
 FINAL_GOAL_TOLERANCE_CURRICULUM=False
 FINAL_GOAL_TOLERANCE_INITIAL=0.01
 FINAL_GOAL_TOLERANCE_TARGET=0.01
 FINAL_GOAL_TOLERANCE_DECREMENT=0.001
 
-# ── Domain Randomization ─────────────────────────────────────
+# No domain randomization
 FORCE_SCALE=0
 TORQUE_SCALE=0
-USE_OBS_DELAY=True
-USE_ACTION_DELAY=True
-USE_OBJECT_STATE_DELAY_NOISE=True
-OBJECT_STATE_XYZ_NOISE_STD=0.01
-OBJECT_STATE_ROTATION_NOISE_DEG=5.0
-OBJECT_SCALE_NOISE="[0.9,1.1]"
+USE_OBS_DELAY=False
+USE_ACTION_DELAY=False
+USE_OBJECT_STATE_DELAY_NOISE=False
+OBJECT_STATE_XYZ_NOISE_STD=0.0
+OBJECT_STATE_ROTATION_NOISE_DEG=0.0
+OBJECT_SCALE_NOISE="[1.0,1.0]"
 
-# ── Lift reward ablation (peg is already flat on table) ──────
 LIFTING_REW_SCALE=0.0
 LIFTING_BONUS=0.0
 
-# ── Retract Config ─────────────────────────────────────────────
 ENABLE_RETRACT=True
 RETRACT_REWARD_SCALE=1.0
 RETRACT_DISTANCE_THRESHOLD=0.1
 RETRACT_SUCCESS_BONUS=1000.0
 RETRACT_SUCCESS_TOLERANCE=0.005
 
-# ── Scenes source ─────────────────────────────────────────────
 SCENES_PATH="assets/urdf/peg_in_hole/scenes/scenes.npz"
 
-# ── Weights & Biases ─────────────────────────────────────────
 WANDB_PROJECT="PEG_IN_HOLE_TRAINING"
 WANDB_GROUP="peg_multi_init_states"
-EXPERIMENT_TAG="peg_multi_init_dr"
+EXPERIMENT_TAG="peg_multi_init_no_dr_preinsfinal"
 
 # ╔══════════════════════════════════════════════════════════════╗
 # ║         END CONFIG — generally don't edit below here        ║
@@ -71,10 +61,8 @@ set -euo pipefail
 
 REPO_ROOT="/share/portal/kk837/depthbasedRL"
 
-# ── Derived: viser port (unique per SLURM job) ────────────────
 VISER_PORT=$((8082 + (SLURM_JOB_ID % 900)))
 
-# ── Derived: experiment name & logging ───────────────────────
 DATETIME=$(date +"%Y-%m-%d_%H-%M-%S")
 EXPERIMENT_NAME="${EXPERIMENT_TAG}_${DATETIME}"
 scontrol update JobId="$SLURM_JOB_ID" JobName="$EXPERIMENT_NAME"
@@ -82,13 +70,11 @@ HYDRA_RUN_DIR="${REPO_ROOT}/train_dir/${WANDB_PROJECT}/${WANDB_GROUP}/${EXPERIME
 mkdir -p "$HYDRA_RUN_DIR"
 exec > "${HYDRA_RUN_DIR}/slurm.log" 2> "${HYDRA_RUN_DIR}/slurm.err"
 
-# ── Derived: checkpoint arg ──────────────────────────────────
 CHECKPOINT_ARG=""
 if [ -n "$CHECKPOINT" ]; then
     CHECKPOINT_ARG="checkpoint=$CHECKPOINT"
 fi
 
-# ── GPU monitoring (background) ─────────────────────────────
 echo "=== Initial GPU State ==="
 nvidia-smi
 echo ""
@@ -105,7 +91,6 @@ GPU_LOG="${HYDRA_RUN_DIR}/gpu_usage.log"
 GPU_MONITOR_PID=$!
 trap "kill $GPU_MONITOR_PID 2>/dev/null" EXIT
 
-# ── Launch training ──────────────────────────────────────────
 cd "$REPO_ROOT"
 source .venv/bin/activate
 
