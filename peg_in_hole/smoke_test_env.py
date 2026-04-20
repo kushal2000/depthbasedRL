@@ -46,6 +46,11 @@ def main(cfg):
     cfg.headless = True
     cfg.capture_video = False
 
+    # Disable other obs randomization so our goal-noise signal is clean.
+    cfg.task.env.useObsDelay = False
+    cfg.task.env.useObjectStateDelayNoise = False
+    cfg.task.env.jointVelocityObsNoiseStd = 0.0
+
     cfg_dict = omegaconf_to_dict(cfg.task)
     env_cls = isaacgym_task_map[cfg.task.name]
     env = env_cls(
@@ -110,8 +115,61 @@ def main(cfg):
     assert "retract_rew" in env.rewards_episode
     print("[smoke] PASS: retract_phase / retract_succeeded / rewards_episode[retract_rew] initialized")
 
+    # ── Goal-obs XY noise buffer & sampling ──
+    goal_xy_bound = float(env.cfg["env"]["goalXyObsNoise"])
+    assert env.goal_pos_obs_noise.shape == (num_envs, 3)
+    noise_after_reset = env.goal_pos_obs_noise.clone()
+    assert noise_after_reset[:, 0:2].abs().max().item() <= goal_xy_bound + 1e-9, (
+        f"XY noise out of bound: {noise_after_reset[:, 0:2].abs().max().item()} > {goal_xy_bound}"
+    )
+    assert noise_after_reset[:, 2].abs().max().item() == 0.0, "Z noise should stay 0"
+    print(f"[smoke] PASS: goal_pos_obs_noise sampled in [-{goal_xy_bound},+{goal_xy_bound}] XY; Z=0")
+
+    # ── obs_buf slice: confirm keypoints_rel_goal delta equals -noise ──
+    # Strategy: call populate_obs_and_states_buffers twice AT THE SAME
+    # physics state, once with noise, once without. Then:
+    #   (a) states_buf must be bit-identical between the two (critic clean).
+    #   (b) obs_buf must differ ONLY in the kp slice.
+    #   (c) diff inside the kp slice must equal -noise (broadcast per kp).
+    actions = torch.zeros(num_envs, num_acts, device="cuda:0")
+    env.step(actions)
+    saved_noise = env.goal_pos_obs_noise.clone()
+    kp_slice = env._goal_kp_obs_slice
+    K = env.num_keypoints
+
+    # Clean obs build (zero noise).
+    env.goal_pos_obs_noise.zero_()
+    env.populate_obs_and_states_buffers()
+    clean_obs = env.obs_buf.clone()
+    clean_states = env.states_buf.clone()
+
+    # Noisy obs build (restore sampled noise).
+    env.goal_pos_obs_noise.copy_(saved_noise)
+    env.populate_obs_and_states_buffers()
+    noisy_obs = env.obs_buf.clone()
+    noisy_states = env.states_buf.clone()
+
+    assert torch.allclose(clean_states, noisy_states, atol=1e-6), (
+        "states_buf differs between noise-on/off — critic got noised!"
+    )
+    print("[smoke] PASS: states_buf identical between noise-on/off (critic clean)")
+
+    diff = noisy_obs - clean_obs
+    # Outside the kp slice: must be zero.
+    outside_mask = torch.ones(diff.shape[-1], dtype=torch.bool, device=diff.device)
+    outside_mask[kp_slice] = False
+    assert diff[:, outside_mask].abs().max().item() == 0.0, (
+        "obs_buf changed outside keypoints_rel_goal slice"
+    )
+    # Inside the kp slice: exactly -noise broadcast over K keypoints.
+    expected = (-saved_noise).unsqueeze(1).expand(num_envs, K, 3).reshape(num_envs, -1)
+    assert torch.allclose(diff[:, kp_slice], expected, atol=1e-6), (
+        "obs_buf kp slice doesn't match expected -noise broadcast"
+    )
+    print("[smoke] PASS: obs_buf delta == -noise, only in keypoints_rel_goal slice")
+
     # ── Step with zero actions ──
-    for i in range(5):
+    for i in range(3):
         actions = torch.zeros(num_envs, num_acts, device="cuda:0")
         obs, rew, done, info = env.step(actions)
         print(f"[smoke] step {i}: rew_mean={rew.mean().item():+.3f}  "

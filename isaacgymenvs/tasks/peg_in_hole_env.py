@@ -49,7 +49,7 @@ from isaacgym import gymapi
 from dextoolbench.objects import NAME_TO_OBJECT
 from isaacgymenvs.tasks.simtoolreal.env import SimToolReal
 from isaacgymenvs.tasks.simtoolreal.utils import populate_dof_properties
-from isaacgymenvs.utils.torch_jit_utils import get_axis_params, to_torch
+from isaacgymenvs.utils.torch_jit_utils import get_axis_params, to_torch, torch_rand_float
 
 
 VALID_GOAL_MODES = ("dense", "preInsertAndFinal", "finalGoalOnly")
@@ -136,6 +136,32 @@ class PegInHoleEnv(SimToolReal):
         self.rewards_episode["retract_rew"] = torch.zeros(
             self.num_envs, dtype=torch.float, device=self.device
         )
+
+        # Per-episode XY jitter on the goal position, observed by the actor
+        # only (see populate_obs_and_states_buffers override below).
+        self.goal_pos_obs_noise = torch.zeros(
+            self.num_envs, 3, dtype=torch.float32, device=self.device,
+        )
+        # Compute obs_buf slice for keypoints_rel_goal (cached once). See
+        # SimToolReal.populate_obs_and_states_buffers (env.py:3153-3291)
+        # for the field layout.
+        n_dof = self.num_hand_arm_dofs
+        nk = self.num_keypoints
+        nft = self.num_fingertips
+        _sz = {
+            "joint_pos": n_dof, "joint_vel": n_dof, "prev_action_targets": n_dof,
+            "palm_pos": 3, "palm_rot": 4, "palm_vel": 6,
+            "object_rot": 4, "object_vel": 6,
+            "fingertip_pos_rel_palm": 3 * nft,
+            "keypoints_rel_palm": 3 * nk, "keypoints_rel_goal": 3 * nk,
+            "object_scales": 3,
+        }
+        _off = 0
+        for _k in self.obs_list:
+            if _k == "keypoints_rel_goal":
+                break
+            _off += _sz[_k]
+        self._goal_kp_obs_slice = slice(_off, _off + 3 * nk)
 
     def _init_peg_in_hole_config(self, cfg):
         """Load scenes.npz, truncate goals per goal_mode, build per-env indexing."""
@@ -641,6 +667,16 @@ class PegInHoleEnv(SimToolReal):
             self.object_init_state[env_ids, 0:2] = poses[:, 0:2]
             self.object_init_state[env_ids, 3:7] = poses[:, 3:7]
 
+            # Per-episode XY jitter on the goal position (observed by actor
+            # only). When goalXyObsNoise=0, torch_rand_float(-0, +0, ...)
+            # returns zero, so no gate is needed.
+            self.goal_pos_obs_noise[env_ids, 0:2] = torch_rand_float(
+                -self.cfg["env"]["goalXyObsNoise"],
+                self.cfg["env"]["goalXyObsNoise"],
+                (len(env_ids), 2), device=self.device,
+            )
+            # Z stays 0 (buffer is zero-init'd, never written on this axis).
+
         super().reset_object_pose(env_ids, reset_buf_idxs, tensor_reset)
 
     def _reset_target(self, env_ids, reset_buf_idxs=None, tensor_reset=True, is_first_goal=True):
@@ -897,3 +933,18 @@ class PegInHoleEnv(SimToolReal):
         self.extras["episode_cumulative"] = episode_cumulative
 
         return self.rew_buf, is_success
+
+    # ────────────────────────────────────────────────────────────────
+    # Actor-only goal XY noise (states_buf / critic stays clean).
+    # ────────────────────────────────────────────────────────────────
+
+    def populate_obs_and_states_buffers(self):
+        super().populate_obs_and_states_buffers()
+        # Parent built states_buf (L3225) with clean keypoints_rel_goal and
+        # then built obs_buf (L3289) also clean. Here we post-hoc subtract
+        # the per-episode XY offset from the obs_buf slice that encodes
+        # keypoints_rel_goal — goal shifts by +noise => obs shifts by -noise.
+        # states_buf is untouched → asymmetric critic stays on clean goal.
+        self.obs_buf[:, self._goal_kp_obs_slice].view(
+            self.num_envs, self.num_keypoints, 3
+        ).sub_(self.goal_pos_obs_noise.unsqueeze(1))
