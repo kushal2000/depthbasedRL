@@ -38,7 +38,11 @@ def launch_app():
     from isaaclab.app import AppLauncher
 
     parser = argparse.ArgumentParser()
-    parser.add_argument("--mode", choices=["train", "teacher_eval", "student_eval", "mixed_eval", "camera_debug"], default="train")
+    parser.add_argument(
+        "--mode",
+        choices=["train", "train_online", "teacher_eval", "student_eval", "mixed_eval", "camera_debug"],
+        default="train",
+    )
     parser.add_argument("--task_source", choices=["fabrica", "dextoolbench"], default="dextoolbench")
     parser.add_argument("--assembly", default="beam")
     parser.add_argument("--part_id", default="2")
@@ -71,6 +75,11 @@ def launch_app():
     parser.add_argument("--beta_decay", type=float, default=None)
     parser.add_argument("--eval_interval", type=int, default=None)
     parser.add_argument("--checkpoint_interval", type=int, default=None)
+    parser.add_argument("--online_num_iters", type=int, default=None)
+    parser.add_argument("--online_log_interval", type=int, default=None)
+    parser.add_argument("--online_update_interval", type=int, default=None)
+    parser.add_argument("--episode_length", type=int, default=None)
+    parser.add_argument("--reset_when_dropped", action="store_true")
     parser.add_argument("--capture_frames", action="store_true")
     parser.add_argument("--capture_frame_stride", type=int, default=1)
     parser.add_argument("--wandb", action="store_true")
@@ -122,6 +131,11 @@ class DistillSettings:
     depth_preprocess_mode: str = "clip_divide"
     depth_min_m: float = 0.0
     depth_max_m: float = 5.0
+    episode_length: int = 600
+    reset_when_dropped: bool = False
+    online_num_iters: int = 10000
+    online_log_interval: int = 500
+    online_update_interval: int = 1
 
 
 class BetaScheduler:
@@ -180,6 +194,16 @@ def load_distill_settings(path: Path, args) -> DistillSettings:
         settings.eval_interval = args.eval_interval
     if args.checkpoint_interval is not None:
         settings.checkpoint_interval = args.checkpoint_interval
+    if args.online_num_iters is not None:
+        settings.online_num_iters = args.online_num_iters
+    if args.online_log_interval is not None:
+        settings.online_log_interval = args.online_log_interval
+    if args.online_update_interval is not None:
+        settings.online_update_interval = args.online_update_interval
+    if args.episode_length is not None:
+        settings.episode_length = args.episode_length
+    if args.reset_when_dropped:
+        settings.reset_when_dropped = True
     return settings
 
 
@@ -196,6 +220,14 @@ def validate_distill_settings(settings: DistillSettings):
         raise ValueError(f"Unsupported depth_preprocess_mode={settings.depth_preprocess_mode!r}")
     if settings.depth_max_m <= settings.depth_min_m:
         raise ValueError("depth_max_m must be greater than depth_min_m")
+    if settings.episode_length <= 0:
+        raise ValueError("episode_length must be > 0")
+    if settings.online_num_iters <= 0:
+        raise ValueError("online_num_iters must be > 0")
+    if settings.online_log_interval <= 0:
+        raise ValueError("online_log_interval must be > 0")
+    if settings.online_update_interval <= 0:
+        raise ValueError("online_update_interval must be > 0")
 
 
 def load_camera_pose(path: Path) -> tuple[str, CameraPose, CameraIntrinsics]:
@@ -267,9 +299,10 @@ def compute_subset_progress_metrics(env: IsaacSimDistillEnv, sim_state, mask: np
             "kp_dist": 0.0,
             "near_goal_steps": 0.0,
         }
-    goal_completion = env.goal_idx.astype(np.float32) / len(env.task_spec.goals)
+    progress_goal_idx = np.maximum(env.goal_idx, env.max_goal_idx).astype(np.float32)
+    goal_completion = progress_goal_idx / len(env.task_spec.goals)
     return {
-        "goal_idx": subset_mean(env.goal_idx.astype(np.float32), mask),
+        "goal_idx": subset_mean(progress_goal_idx, mask),
         "goal_completion_ratio": subset_mean(goal_completion, mask),
         "kp_dist": subset_mean(sim_state.kp_dist.astype(np.float32), mask),
         "near_goal_steps": subset_mean(env.near_goal_steps.astype(np.float32), mask),
@@ -374,6 +407,11 @@ def log_csv_row(csv_path: Path, row: dict[str, float | int | str]):
         "action_rmse_window",
         "aux_object_pos_loss_window",
         "aux_object_pos_rmse_m_window",
+        "reset_object_z_low",
+        "reset_time_limit",
+        "reset_max_goals",
+        "reset_hand_far",
+        "reset_dropped_after_lift",
     ]
     csv_path.parent.mkdir(parents=True, exist_ok=True)
     write_header = not csv_path.exists()
@@ -411,6 +449,21 @@ def detach_hidden_state(hidden_state):
         return tuple(detach_hidden_state(item) for item in hidden_state)
     if isinstance(hidden_state, list):
         return [detach_hidden_state(item) for item in hidden_state]
+    return hidden_state
+
+
+def reset_hidden_state(hidden_state, env_ids: np.ndarray):
+    if hidden_state is None or env_ids.size == 0:
+        return hidden_state
+    if isinstance(hidden_state, torch.Tensor):
+        hidden_state = hidden_state.clone()
+        env_ids_t = torch.as_tensor(env_ids, device=hidden_state.device, dtype=torch.long)
+        hidden_state.index_fill_(0, env_ids_t, 0.0)
+        return hidden_state
+    if isinstance(hidden_state, tuple):
+        return tuple(reset_hidden_state(item, env_ids) for item in hidden_state)
+    if isinstance(hidden_state, list):
+        return [reset_hidden_state(item, env_ids) for item in hidden_state]
     return hidden_state
 
 
@@ -515,12 +568,13 @@ def run_episode(
         env.apply_action(targets)
         env.step(render=not _args.headless)
         next_sim_state = env.compute_sim_state()
-        dropped_env_ids = env.reset_dropped_envs(next_sim_state)
-        if dropped_env_ids.size > 0:
-            next_sim_state = env.compute_sim_state()
         if capture_frames and run_dir is not None and (step_i % max(capture_frame_stride, 1) == 0):
             save_camera_debug_step(env, run_dir, step_i)
         finished = env.maybe_advance_goal(next_sim_state)
+        reset_env_ids = env.reset_done_envs(next_sim_state)
+        if reset_env_ids.size > 0:
+            student_hidden = reset_hidden_state(student_hidden, reset_env_ids)
+            next_sim_state = env.compute_sim_state()
 
         if student_out is None:
             action_loss_per_env = torch.zeros(env.num_envs, device=env.device)
@@ -576,6 +630,11 @@ def run_episode(
             "action_loss": subset_mean((total_action_loss_per_env / max(total_steps, 1)).astype(np.float32), train_mask),
             "aux_object_pos_loss": subset_mean((total_aux_loss_per_env / max(total_steps, 1)).astype(np.float32), train_mask),
             "beta": beta_scheduler.value(),
+            "reset_object_z_low": float(env.reset_reason_counts["object_z_low"]),
+            "reset_time_limit": float(env.reset_reason_counts["time_limit"]),
+            "reset_max_goals": float(env.reset_reason_counts["max_goals"]),
+            "reset_hand_far": float(env.reset_reason_counts["hand_far"]),
+            "reset_dropped_after_lift": float(env.reset_reason_counts["dropped_after_lift"]),
         }
     )
     metrics["action_rmse"] = float(np.sqrt(max(metrics["action_loss"], 0.0)))
@@ -591,6 +650,11 @@ def run_episode(
                 "action_loss": subset_mean((total_action_loss_per_env / max(total_steps, 1)).astype(np.float32), monitor_mask),
                 "aux_object_pos_loss": subset_mean((total_aux_loss_per_env / max(total_steps, 1)).astype(np.float32), monitor_mask),
                 "beta": 0.0,
+                "reset_object_z_low": float(env.reset_reason_counts["object_z_low"]),
+                "reset_time_limit": float(env.reset_reason_counts["time_limit"]),
+                "reset_max_goals": float(env.reset_reason_counts["max_goals"]),
+                "reset_hand_far": float(env.reset_reason_counts["hand_far"]),
+                "reset_dropped_after_lift": float(env.reset_reason_counts["dropped_after_lift"]),
             }
         )
         monitor_metrics["action_rmse"] = float(np.sqrt(max(monitor_metrics["action_loss"], 0.0)))
@@ -598,6 +662,168 @@ def run_episode(
             np.sqrt(max(monitor_metrics["aux_object_pos_loss"], 0.0))
         )
     return metrics, monitor_metrics
+
+
+def compute_distill_step(
+    env: IsaacSimDistillEnv,
+    teacher: RlPlayer,
+    student,
+    student_hidden,
+    settings: DistillSettings,
+    train: bool,
+):
+    sim_state = env.compute_sim_state()
+    teacher_obs = env.build_teacher_obs(sim_state)
+    teacher_obs_tensor = torch.from_numpy(teacher_obs).float().to(env.device)
+    with torch.no_grad():
+        teacher_action = teacher.get_normalized_action(teacher_obs_tensor, deterministic_actions=True)
+
+    if _args.student_input == "teacher_obs":
+        if train:
+            student_out, student_hidden = student(teacher_obs_tensor, student_hidden)
+        else:
+            with torch.no_grad():
+                student_out, student_hidden = student(teacher_obs_tensor, student_hidden)
+    else:
+        student_obs = env.build_student_obs(sim_state, camera_modality=env.camera_modality)
+        student_image = stack_student_image(student_obs, env.camera_modality, settings)
+        if train:
+            student_out, student_hidden = student(student_image, student_obs["proprio"], student_hidden)
+        else:
+            with torch.no_grad():
+                student_out, student_hidden = student(student_image, student_obs["proprio"], student_hidden)
+
+    student_action = student_out.action
+    action_loss_per_env = torch.mean((student_action - teacher_action) ** 2, dim=1)
+    aux_pred = student_out.aux.get("object_pos")
+    gt_object_pos = torch.from_numpy(sim_state.object_pos_world_env_frame).float().to(env.device)
+    aux_loss_per_env = (
+        torch.mean((aux_pred - gt_object_pos) ** 2, dim=1)
+        if aux_pred is not None
+        else torch.zeros(env.num_envs, device=env.device)
+    )
+    total_loss = (
+        settings.action_loss_weight * torch.mean(action_loss_per_env)
+        + settings.aux_object_pos_weight * torch.mean(aux_loss_per_env)
+    )
+    return sim_state, student_action, total_loss, action_loss_per_env, aux_loss_per_env, student_hidden
+
+
+def run_online_dagger(
+    env: IsaacSimDistillEnv,
+    teacher: RlPlayer,
+    student,
+    optimizer: torch.optim.Optimizer,
+    settings: DistillSettings,
+    run_dir: Path,
+    wandb_run=None,
+    capture_frames: bool = False,
+    capture_frame_stride: int = 1,
+) -> float:
+    teacher.reset()
+    env.reset()
+    student_hidden = student.initial_state(batch_size=env.num_envs, device=env.device)
+    best_metric = -1.0
+    interval_action_loss = np.zeros(env.num_envs, dtype=np.float64)
+    interval_aux_loss = np.zeros(env.num_envs, dtype=np.float64)
+    interval_start = time.perf_counter()
+    accumulated_loss = None
+    accumulated_steps = 0
+
+    for iter_idx in range(settings.online_num_iters):
+        sim_state, student_action, total_loss, action_loss_per_env, aux_loss_per_env, student_hidden = compute_distill_step(
+            env=env,
+            teacher=teacher,
+            student=student,
+            student_hidden=student_hidden,
+            settings=settings,
+            train=True,
+        )
+        accumulated_loss = total_loss if accumulated_loss is None else accumulated_loss + total_loss
+        accumulated_steps += 1
+        if accumulated_steps >= settings.online_update_interval:
+            optimizer.zero_grad()
+            (accumulated_loss / accumulated_steps).backward()
+            torch.nn.utils.clip_grad_norm_(student.parameters(), 1.0)
+            optimizer.step()
+            student_hidden = detach_hidden_state(student_hidden)
+            accumulated_loss = None
+            accumulated_steps = 0
+
+        targets = compute_joint_pos_targets(
+            actions=student_action.detach().cpu().numpy(),
+            prev_targets=env.prev_targets,
+            hand_moving_average=settings.hand_moving_average,
+            arm_moving_average=settings.arm_moving_average,
+            hand_dof_speed_scale=settings.dof_speed_scale,
+            dt=settings.control_dt,
+        )
+        env.apply_action(targets)
+        env.step(render=not _args.headless)
+        next_sim_state = env.compute_sim_state()
+        if capture_frames and (iter_idx % max(capture_frame_stride, 1) == 0):
+            save_camera_debug_step(env, run_dir, iter_idx)
+        env.maybe_advance_goal(next_sim_state)
+        reset_env_ids = env.reset_done_envs(next_sim_state)
+        if reset_env_ids.size > 0:
+            student_hidden = reset_hidden_state(student_hidden, reset_env_ids)
+
+        action_loss_np = action_loss_per_env.detach().cpu().numpy()
+        aux_loss_np = aux_loss_per_env.detach().cpu().numpy()
+        interval_action_loss += action_loss_np
+        interval_aux_loss += aux_loss_np
+
+        should_log = (iter_idx + 1) % settings.online_log_interval == 0 or iter_idx == settings.online_num_iters - 1
+        if not should_log:
+            continue
+
+        interval_steps = settings.online_log_interval if (iter_idx + 1) % settings.online_log_interval == 0 else ((iter_idx + 1) % settings.online_log_interval)
+        interval_steps = max(interval_steps, 1)
+        final_state = env.compute_sim_state()
+        interval_wall_time = max(time.perf_counter() - interval_start, 1e-9)
+        metrics = env.compute_progress_metrics(final_state)
+        metrics.update(
+            {
+                "episode_steps": float(iter_idx + 1),
+                "episode_wall_time_s": float(interval_wall_time),
+                "env_steps_per_s": float(env.num_envs * interval_steps / interval_wall_time),
+                "action_loss": float(np.mean(interval_action_loss / interval_steps)),
+                "aux_object_pos_loss": float(np.mean(interval_aux_loss / interval_steps)),
+                "beta": 0.0,
+                "reset_object_z_low": float(env.reset_reason_counts["object_z_low"]),
+                "reset_time_limit": float(env.reset_reason_counts["time_limit"]),
+                "reset_max_goals": float(env.reset_reason_counts["max_goals"]),
+                "reset_hand_far": float(env.reset_reason_counts["hand_far"]),
+                "reset_dropped_after_lift": float(env.reset_reason_counts["dropped_after_lift"]),
+            }
+        )
+        metrics["action_rmse"] = float(np.sqrt(max(metrics["action_loss"], 0.0)))
+        metrics["aux_object_pos_rmse_m"] = float(np.sqrt(max(metrics["aux_object_pos_loss"], 0.0)))
+        _log(
+            f"[online iter {iter_idx + 1}] goal_completion_ratio={metrics['goal_completion_ratio']:.3f}, "
+            f"goal_idx={metrics['goal_idx']:.2f}, action_rmse={metrics['action_rmse']:.3f}, "
+            f"pos_rmse_cm={100.0 * metrics['aux_object_pos_rmse_m']:.2f}, env_steps_s={metrics['env_steps_per_s']:.0f}"
+        )
+        record_metrics(
+            run_dir,
+            {"episode": iter_idx + 1, "mode": "train_online", **metrics},
+            wandb_run=wandb_run,
+            step=iter_idx + 1,
+        )
+        if capture_frames:
+            save_camera_debug(env, run_dir)
+        save_checkpoint(run_dir / "checkpoints" / "student_latest.pt", student, optimizer, iter_idx + 1, best_metric)
+        selection_metric = metrics["goal_completion_ratio"]
+        if selection_metric >= best_metric:
+            best_metric = selection_metric
+            save_checkpoint(run_dir / "checkpoints" / "student_best.pt", student, optimizer, iter_idx + 1, best_metric)
+        if (iter_idx + 1) % max(settings.checkpoint_interval * settings.online_log_interval, 1) == 0:
+            save_checkpoint(run_dir / "checkpoints" / f"student_iter_{iter_idx + 1}.pt", student, optimizer, iter_idx + 1, best_metric)
+        interval_action_loss[:] = 0
+        interval_aux_loss[:] = 0
+        interval_start = time.perf_counter()
+
+    return best_metric
 
 
 def _make_grid(images: list[np.ndarray]) -> np.ndarray:
@@ -786,6 +1012,8 @@ def main():
         depth_preprocess_mode=settings.depth_preprocess_mode,
         depth_min_m=settings.depth_min_m,
         depth_max_m=settings.depth_max_m,
+        episode_length=settings.episode_length,
+        reset_when_dropped=settings.reset_when_dropped,
     )
     teacher_inference_batch_size = 128 if args.mode == "teacher_eval" else 32
     teacher = RlPlayer(
@@ -820,6 +1048,29 @@ def main():
         env.step(render=not args.headless)
         save_camera_debug(env, run_dir)
         _log(f"Saved camera debug outputs under {run_dir / 'camera_debug'}")
+        if wandb_run is not None:
+            wandb_run.finish()
+        force_exit(0)
+
+    if args.mode == "train_online":
+        if student is None or optimizer is None:
+            raise RuntimeError("train_online requires a student and optimizer")
+        _log(
+            f"Online DAgger config: iters={settings.online_num_iters}, "
+            f"log_interval={settings.online_log_interval}, update_interval={settings.online_update_interval}, beta=0.0"
+        )
+        best_metric = run_online_dagger(
+            env=env,
+            teacher=teacher,
+            student=student,
+            optimizer=optimizer,
+            settings=settings,
+            run_dir=run_dir,
+            wandb_run=wandb_run,
+            capture_frames=args.capture_frames,
+            capture_frame_stride=args.capture_frame_stride,
+        )
+        _log(f"Online DAgger complete. best_goal_completion_ratio={best_metric:.3f}")
         if wandb_run is not None:
             wandb_run.finish()
         force_exit(0)

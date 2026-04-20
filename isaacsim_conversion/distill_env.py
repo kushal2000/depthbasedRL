@@ -85,6 +85,8 @@ class IsaacSimDistillEnv:
         depth_preprocess_mode: str = "clip_divide",
         depth_min_m: float = 0.0,
         depth_max_m: float = 5.0,
+        episode_length: int = 600,
+        reset_when_dropped: bool = False,
     ):
         self.task_spec = task_spec
         self.camera_modality = camera_modality
@@ -105,6 +107,8 @@ class IsaacSimDistillEnv:
         self.depth_preprocess_mode = depth_preprocess_mode
         self.depth_min_m = float(depth_min_m)
         self.depth_max_m = float(depth_max_m)
+        self.episode_length = int(episode_length)
+        self.reset_when_dropped = bool(reset_when_dropped)
         if self.depth_preprocess_mode not in {"clip_divide", "window_normalize", "metric"}:
             raise ValueError(f"Unsupported depth_preprocess_mode={self.depth_preprocess_mode!r}")
         if self.depth_max_m <= self.depth_min_m:
@@ -114,7 +118,17 @@ class IsaacSimDistillEnv:
         self.object_scales_batch = np.repeat(self.task_spec.object_scales.astype(np.float32), self.num_envs, axis=0)
         self.camera_data_types = self._data_types_for_modality(camera_modality)
         self.goal_idx = np.zeros(self.num_envs, dtype=np.int32)
+        self.max_goal_idx = np.zeros(self.num_envs, dtype=np.int32)
         self.near_goal_steps = np.zeros(self.num_envs, dtype=np.int32)
+        self.progress_buf = np.zeros(self.num_envs, dtype=np.int32)
+        self.lifted_object = np.zeros(self.num_envs, dtype=bool)
+        self.reset_reason_counts = {
+            "object_z_low": 0,
+            "time_limit": 0,
+            "max_goals": 0,
+            "hand_far": 0,
+            "dropped_after_lift": 0,
+        }
         self.goal_pose = np.repeat(self.task_spec.goals[0][None], self.num_envs, axis=0).astype(np.float32)
         self.current_start_pose = np.repeat(self.task_spec.start_pose[None], self.num_envs, axis=0).astype(np.float32)
         self.prev_targets: np.ndarray | None = None
@@ -607,13 +621,20 @@ class IsaacSimDistillEnv:
         return torch.tensor(world_pose, dtype=torch.float32, device=self.device)
 
     def reset(self):
+        for key in self.reset_reason_counts:
+            self.reset_reason_counts[key] = 0
+        self.max_goal_idx[:] = 0
         self._reset_envs(torch.arange(self.num_envs, device=self.device, dtype=torch.long))
 
-    def _reset_envs(self, env_ids: torch.Tensor):
+    def _reset_envs(self, env_ids: torch.Tensor, reset_reasons: dict[str, np.ndarray] | None = None):
         env_ids = env_ids.to(device=self.device, dtype=torch.long)
         if env_ids.numel() == 0:
             return
         env_ids_np = env_ids.detach().cpu().numpy()
+        if reset_reasons is not None:
+            for key, mask in reset_reasons.items():
+                if key in self.reset_reason_counts:
+                    self.reset_reason_counts[key] += int(np.count_nonzero(mask))
         root_state = self.robot.data.default_root_state.clone()
         root_state[env_ids, :3] += self.env_origins[env_ids]
         self.robot.write_root_pose_to_sim(root_state[env_ids, :7], env_ids=env_ids)
@@ -645,6 +666,8 @@ class IsaacSimDistillEnv:
             self.prev_targets[env_ids_np] = self._sim_to_gym_order(joint_pos_sim)[env_ids_np]
         self.goal_idx[env_ids_np] = 0
         self.near_goal_steps[env_ids_np] = 0
+        self.progress_buf[env_ids_np] = 0
+        self.lifted_object[env_ids_np] = False
         self.goal_pose[env_ids_np] = np.repeat(self.task_spec.goals[0][None], len(env_ids_np), axis=0).astype(np.float32)
 
     def apply_action(self, targets: np.ndarray):
@@ -658,6 +681,7 @@ class IsaacSimDistillEnv:
         for _ in range(PHYSICS_SUBSTEPS):
             self.sim.step(render=render)
         self.scene.update(PHYSICS_DT)
+        self.progress_buf += 1
         if self.camera is not None and self._camera_mount_mode() == "wrist":
             self._apply_camera_world_poses()
         if self.camera is not None:
@@ -695,6 +719,8 @@ class IsaacSimDistillEnv:
         )
 
     def maybe_advance_goal(self, sim_state: SimState) -> bool:
+        lifted_now = sim_state.object_pose[:, 2] > (self.current_start_pose[:, 2] + 0.1)
+        self.lifted_object |= lifted_now
         for env_id in range(self.num_envs):
             if self.goal_idx[env_id] >= len(self.task_spec.goals):
                 continue
@@ -705,29 +731,74 @@ class IsaacSimDistillEnv:
             if self.near_goal_steps[env_id] < self.task_spec.success_steps:
                 continue
             self.goal_idx[env_id] += 1
+            self.max_goal_idx[env_id] = max(self.max_goal_idx[env_id], self.goal_idx[env_id])
             self.near_goal_steps[env_id] = 0
             if self.goal_idx[env_id] < len(self.task_spec.goals):
                 self.goal_pose[env_id] = self.task_spec.goals[self.goal_idx[env_id]]
         return bool(np.all(self.goal_idx >= len(self.task_spec.goals)))
 
+    def compute_reset_masks(self, sim_state: SimState) -> dict[str, np.ndarray]:
+        object_z_low = sim_state.object_pose[:, 2] < 0.1
+        time_limit = self.progress_buf >= self.episode_length - 1
+        max_goals = self.goal_idx >= len(self.task_spec.goals)
+        hand_far = self._compute_hand_far_mask()
+        dropped_after_lift = (
+            (sim_state.object_pose[:, 2] < self.current_start_pose[:, 2])
+            & self.lifted_object
+            if self.reset_when_dropped
+            else np.zeros(self.num_envs, dtype=bool)
+        )
+        return {
+            "object_z_low": object_z_low,
+            "time_limit": time_limit,
+            "max_goals": max_goals,
+            "hand_far": hand_far,
+            "dropped_after_lift": dropped_after_lift,
+        }
+
+    def _compute_hand_far_mask(self) -> np.ndarray:
+        body_state = self.robot.data.body_state_w
+        fingertip_state = body_state[:, self.fingertip_body_indices]
+        fingertip_pos = fingertip_state[:, :, :3] - self.env_origins.unsqueeze(1)
+        object_pos = self.object_rigid.data.root_pos_w - self.env_origins
+        distances = torch.linalg.norm(fingertip_pos - object_pos.unsqueeze(1), dim=-1)
+        return (torch.max(distances, dim=-1).values > 1.5).detach().cpu().numpy()
+
+    def reset_done_envs(self, sim_state: SimState) -> np.ndarray:
+        reset_masks = self.compute_reset_masks(sim_state)
+        done_mask = np.zeros(self.num_envs, dtype=bool)
+        for mask in reset_masks.values():
+            done_mask |= mask
+        done_env_ids = np.where(done_mask)[0].astype(np.int64)
+        if done_env_ids.size == 0:
+            return done_env_ids
+        reason_subset = {key: mask[done_env_ids] for key, mask in reset_masks.items()}
+        self._reset_envs(torch.tensor(done_env_ids, device=self.device, dtype=torch.long), reset_reasons=reason_subset)
+        return done_env_ids
+
     def task_finished(self, sim_state: SimState) -> bool:
         return bool(np.all(self.goal_idx >= len(self.task_spec.goals)))
 
     def compute_progress_metrics(self, sim_state: SimState) -> dict[str, float]:
-        goal_completion = self.goal_idx.astype(np.float32) / len(self.task_spec.goals)
+        progress_goal_idx = np.maximum(self.goal_idx, self.max_goal_idx)
+        goal_completion = progress_goal_idx.astype(np.float32) / len(self.task_spec.goals)
         return {
-            "goal_idx": float(np.mean(self.goal_idx)),
+            "goal_idx": float(np.mean(progress_goal_idx)),
             "goal_completion_ratio": float(np.mean(goal_completion)),
             "kp_dist": float(np.mean(sim_state.kp_dist)),
             "near_goal_steps": float(np.mean(self.near_goal_steps)),
         }
 
     def reset_dropped_envs(self, sim_state: SimState) -> np.ndarray:
-        dropped_env_ids = np.where(sim_state.object_pose[:, 2] < 0.1)[0].astype(np.int64)
+        reset_masks = {"object_z_low": sim_state.object_pose[:, 2] < 0.1}
+        dropped_env_ids = np.where(reset_masks["object_z_low"])[0].astype(np.int64)
         if dropped_env_ids.size == 0:
             return dropped_env_ids
         _log(f"Resetting dropped envs: {dropped_env_ids.tolist()}")
-        self._reset_envs(torch.tensor(dropped_env_ids, device=self.device, dtype=torch.long))
+        self._reset_envs(
+            torch.tensor(dropped_env_ids, device=self.device, dtype=torch.long),
+            reset_reasons={"object_z_low": reset_masks["object_z_low"][dropped_env_ids]},
+        )
         return dropped_env_ids
 
     def build_teacher_obs(self, sim_state: SimState) -> np.ndarray:
