@@ -836,6 +836,13 @@ def run_online_dagger(
     wandb_run=None,
     capture_frames: bool = False,
     capture_frame_stride: int = 1,
+    capture_viewer: bool = False,
+    capture_viewer_len: int = 700,
+    capture_viewer_env_id: int = 0,
+    capture_viewer_video: bool = False,
+    capture_viewer_wandb_key: str = "interactive_viewer",
+    capture_viewer_video_wandb_key: str = "rollout_video",
+    capture_viewer_video_fps: int = 60,
 ) -> float:
     teacher.reset()
     env.reset()
@@ -846,6 +853,9 @@ def run_online_dagger(
     interval_start = time.perf_counter()
     accumulated_loss = None
     accumulated_steps = 0
+    viewer_frames: list[dict] = []
+    viewer_video_frames: list[np.ndarray] = []
+    viewer_logged = False
 
     for iter_idx in range(settings.online_num_iters):
         sim_state, student_action, total_loss, action_loss_per_env, aux_loss_per_env, student_hidden = compute_distill_step(
@@ -880,6 +890,25 @@ def run_online_dagger(
         next_sim_state = env.compute_sim_state()
         if capture_frames and (iter_idx % max(capture_frame_stride, 1) == 0):
             save_camera_debug_step(env, run_dir, iter_idx)
+        if capture_viewer and len(viewer_frames) < capture_viewer_len:
+            viewer_frames.append(env.capture_viewer_frame(capture_viewer_env_id, next_sim_state))
+            if capture_viewer_video:
+                rgb_frame = _capture_rgb_frame(env, capture_viewer_env_id)
+                if rgb_frame is not None:
+                    viewer_video_frames.append(rgb_frame)
+            if len(viewer_frames) >= capture_viewer_len and not viewer_logged:
+                _log_viewer_artifacts(
+                    run_dir=run_dir,
+                    mode="train_online",
+                    frames=viewer_frames,
+                    video_frames=viewer_video_frames,
+                    wandb_run=wandb_run,
+                    viewer_key=capture_viewer_wandb_key,
+                    video_key=capture_viewer_video_wandb_key,
+                    video_fps=capture_viewer_video_fps,
+                    num_goals=len(env.task_spec.goals),
+                )
+                viewer_logged = True
         env.maybe_advance_goal(next_sim_state)
         reset_env_ids = env.reset_done_envs(next_sim_state)
         if reset_env_ids.size > 0:
@@ -939,6 +968,19 @@ def run_online_dagger(
         interval_action_loss[:] = 0
         interval_aux_loss[:] = 0
         interval_start = time.perf_counter()
+
+    if capture_viewer and not viewer_logged:
+        _log_viewer_artifacts(
+            run_dir=run_dir,
+            mode="train_online",
+            frames=viewer_frames,
+            video_frames=viewer_video_frames,
+            wandb_run=wandb_run,
+            viewer_key=capture_viewer_wandb_key,
+            video_key=capture_viewer_video_wandb_key,
+            video_fps=capture_viewer_video_fps,
+            num_goals=len(env.task_spec.goals),
+        )
 
     return best_metric
 
@@ -1191,6 +1233,13 @@ def main():
             wandb_run=wandb_run,
             capture_frames=args.capture_frames,
             capture_frame_stride=args.capture_frame_stride,
+            capture_viewer=args.capture_viewer,
+            capture_viewer_len=args.capture_viewer_len,
+            capture_viewer_env_id=args.capture_viewer_env_id,
+            capture_viewer_video=args.capture_viewer_video,
+            capture_viewer_wandb_key=args.capture_viewer_wandb_key,
+            capture_viewer_video_wandb_key=args.capture_viewer_video_wandb_key,
+            capture_viewer_video_fps=args.capture_viewer_video_fps,
         )
         _log(f"Online DAgger complete. best_goal_completion_ratio={best_metric:.3f}")
         if wandb_run is not None:
