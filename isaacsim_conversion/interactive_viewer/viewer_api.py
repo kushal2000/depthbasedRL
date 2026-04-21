@@ -212,22 +212,9 @@ def make_url_robot(
     return robot
 
 
-def _make_table_urdf() -> str:
-    return """<?xml version="1.0"?>
-<robot name="table">
-  <link name="table">
-    <visual>
-      <origin xyz="0 0 0" rpy="0 0 0"/>
-      <geometry>
-        <box size="0.8 1.2 0.05"/>
-      </geometry>
-      <material name="table_gray">
-        <color rgba="0.55 0.55 0.55 1.0"/>
-      </material>
-    </visual>
-  </link>
-</robot>
-"""
+def _read_table_urdf() -> str:
+    table_path = Path(__file__).resolve().parents[2] / "assets" / "urdf" / "table_narrow.urdf"
+    return table_path.read_text(encoding="utf-8")
 
 
 def _check_viewer_urls(urls: list[str], url_check: str) -> set[str]:
@@ -272,7 +259,7 @@ def write_pose_viewer_html(path: Path, payload: dict, *, title: str) -> str:
 
     robots = [
         make_url_robot(name="robot", urdf_url=robot_urdf_url, animated=True),
-        make_embedded_robot(name="table", urdf_text=_make_table_urdf()),
+        make_embedded_robot(name="table", urdf_text=_read_table_urdf()),
         make_url_robot(name="object", urdf_url=object_urdf_url),
         make_url_robot(
             name="goal",
