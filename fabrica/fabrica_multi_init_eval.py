@@ -271,7 +271,7 @@ class MultiInitAssemblyDemo:
         with self.server.gui.add_folder("Status", expand_by_default=True):
             self._md_task = self.server.gui.add_markdown("**Task:** --")
             self._md_prog = self.server.gui.add_markdown("**Progress:** --")
-            self._md_retract = self.server.gui.add_markdown("**Retract:** --")
+            self._md_retract = self.server.gui.add_markdown("**Retract dist:** --")
             self._md_stats = self.server.gui.add_markdown("**Stats:** No episodes yet")
             self._md_obj = self.server.gui.add_markdown("**Object Pos:** --")
             self._md_dist = self.server.gui.add_markdown("**Dist to Goal:** --")
@@ -587,7 +587,7 @@ class MultiInitAssemblyDemo:
         )
         self._md_status.content = f"**Status:** Loading *{label}* ..."
         self._md_task.content = f"**Task:** {label}"
-        self._md_retract.content = "**Retract:** --"
+        self._md_retract.content = "**Retract dist:** --"
 
         if not self._auto_seq_active:
             self.ep_count = 0
@@ -658,7 +658,7 @@ class MultiInitAssemblyDemo:
         self._is_paused = False
         self._btn_pause.name = "Pause"
         self._md_status.content = "**Status:** Running episode..."
-        self._md_retract.content = "**Retract:** --"
+        self._md_retract.content = "**Retract dist:** --"
         self._send("run")
 
     def _cmd_pause(self):
@@ -790,13 +790,14 @@ class MultiInitAssemblyDemo:
             if len(state) >= 8:
                 retract_phase, retract_succeeded, mean_ft_dist = state[5], state[6], state[7]
                 if retract_succeeded:
-                    self._md_retract.content = (
-                        f"**Retract:** SUCCESS (hand dist: {mean_ft_dist:.3f}m)"
-                    )
+                    phase_str = "SUCCESS"
                 elif retract_phase:
-                    self._md_retract.content = (
-                        f"**Retract:** IN PROGRESS (hand dist: {mean_ft_dist:.3f}m)"
-                    )
+                    phase_str = "IN PROGRESS"
+                else:
+                    phase_str = "pre-retract"
+                self._md_retract.content = (
+                    f"**Retract dist:** {mean_ft_dist:.3f} m ({phase_str})"
+                )
 
         elif tag == "done":
             goal_pct, steps = msg[1], msg[2]

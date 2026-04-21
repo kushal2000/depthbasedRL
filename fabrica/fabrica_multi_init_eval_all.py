@@ -45,7 +45,7 @@ from fabrica.fabrica_eval_all import (
 )
 from fabrica.fabrica_multi_init_eval import (
     GOAL_MODES,
-    _GOAL_MODE_OVERRIDE_KEY,
+    _GOAL_MODE_CAMEL,
 )
 
 # scenes.npz / scenes_val.npz filenames per split
@@ -517,9 +517,7 @@ def main():
     t_start = time.time()
     for mode in args.goal_modes:
         mode_overrides = dict(base_overrides)
-        mode_key = _GOAL_MODE_OVERRIDE_KEY.get(mode)
-        if mode_key is not None:
-            mode_overrides[mode_key] = True
+        mode_overrides["task.env.goalMode"] = _GOAL_MODE_CAMEL[mode]
 
         mode_policies = {
             f"{name}__{mode}": paths
