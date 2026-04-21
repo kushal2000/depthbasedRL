@@ -674,6 +674,36 @@ def _log_viewer_artifacts(
         _log(f"Logged interactive viewer artifacts to wandb keys: {list(wandb_payload)}")
 
 
+def _finalize_online_viewer_capture(
+    *,
+    run_dir: Path,
+    frames: list[dict] | None,
+    video_frames: list[np.ndarray] | None,
+    wandb_run,
+    viewer_key: str,
+    video_key: str,
+    video_fps: int,
+    num_goals: int,
+    step: int,
+) -> tuple[list[dict] | None, list[np.ndarray] | None]:
+    if not frames:
+        return None, None
+    _log_viewer_artifacts(
+        run_dir=run_dir,
+        mode="train_online",
+        frames=frames,
+        video_frames=[] if video_frames is None else video_frames,
+        wandb_run=wandb_run,
+        viewer_key=viewer_key,
+        video_key=video_key,
+        video_fps=video_fps,
+        num_goals=num_goals,
+        step=step,
+        artifact_label=f"rollout_step_{step:07d}",
+    )
+    return None, None
+
+
 def run_episode(
     mode: str,
     env: IsaacSimDistillEnv,
@@ -953,10 +983,13 @@ def run_online_dagger(
     interval_start = time.perf_counter()
     accumulated_loss = None
     accumulated_steps = 0
-    viewer_frames: list[dict] = []
-    viewer_video_frames: list[np.ndarray] = []
+    # Interactive viewer capture state machine, mirroring the env.py style:
+    #   None        -> idle / not armed
+    #   []          -> armed and capturing
+    #   [frame, ...] -> actively accumulating a rollout window
+    viewer_frames: list[dict] | None = [] if capture_viewer else None
+    viewer_video_frames: list[np.ndarray] | None = [] if capture_viewer else None
     viewer_interval = None if capture_viewer_interval is None or capture_viewer_interval <= 0 else capture_viewer_interval
-    viewer_capture_active = bool(capture_viewer)
     debug_policy_image_stats_env_ids = parse_env_id_list(
         _args.debug_policy_image_stats_env_ids,
         env.num_envs,
@@ -1002,17 +1035,20 @@ def run_online_dagger(
         next_sim_state = env.compute_sim_state()
         if capture_frames and (iter_idx % max(capture_frame_stride, 1) == 0):
             save_camera_debug_step(env, run_dir, iter_idx)
-        if capture_viewer and viewer_capture_active:
+        if capture_viewer and viewer_frames is None and viewer_interval is not None and (iter_idx + 1) % viewer_interval == 0:
+            viewer_frames = []
+            viewer_video_frames = []
+        if capture_viewer and viewer_frames is not None:
             viewer_frames.append(env.capture_viewer_frame(capture_viewer_env_id, next_sim_state))
             if capture_viewer_video:
                 rgb_frame = _capture_rgb_frame(env, capture_viewer_env_id)
                 if rgb_frame is not None:
+                    assert viewer_video_frames is not None
                     viewer_video_frames.append(rgb_frame)
             if len(viewer_frames) >= capture_viewer_len:
                 iter_step = iter_idx + 1
-                _log_viewer_artifacts(
+                viewer_frames, viewer_video_frames = _finalize_online_viewer_capture(
                     run_dir=run_dir,
-                    mode="train_online",
                     frames=viewer_frames,
                     video_frames=viewer_video_frames,
                     wandb_run=wandb_run,
@@ -1021,11 +1057,7 @@ def run_online_dagger(
                     video_fps=capture_viewer_video_fps,
                     num_goals=len(env.task_spec.goals),
                     step=iter_step,
-                    artifact_label=f"rollout_step_{iter_step:07d}",
                 )
-                viewer_frames = []
-                viewer_video_frames = []
-                viewer_capture_active = False
         env.maybe_advance_goal(next_sim_state)
         reset_env_ids = env.reset_done_envs(next_sim_state)
         if reset_env_ids.size > 0:
@@ -1085,13 +1117,10 @@ def run_online_dagger(
         interval_action_loss[:] = 0
         interval_aux_loss[:] = 0
         interval_start = time.perf_counter()
-        if capture_viewer and not viewer_capture_active and viewer_interval is not None and (iter_idx + 1) % viewer_interval == 0:
-            viewer_capture_active = True
 
-    if capture_viewer and viewer_frames:
-        _log_viewer_artifacts(
+    if capture_viewer and viewer_frames is not None and len(viewer_frames) > 0:
+        _finalize_online_viewer_capture(
             run_dir=run_dir,
-            mode="train_online",
             frames=viewer_frames,
             video_frames=viewer_video_frames,
             wandb_run=wandb_run,
@@ -1100,7 +1129,6 @@ def run_online_dagger(
             video_fps=capture_viewer_video_fps,
             num_goals=len(env.task_spec.goals),
             step=settings.online_num_iters,
-            artifact_label=f"rollout_step_{settings.online_num_iters:07d}",
         )
 
     return best_metric
