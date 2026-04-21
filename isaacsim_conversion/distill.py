@@ -579,10 +579,24 @@ def _capture_rgb_frame(env: IsaacSimDistillEnv, env_id: int) -> np.ndarray | Non
     if env.camera is None:
         return None
     outputs = env.camera.data.output
-    if outputs.get("rgb") is None:
+    if outputs.get("rgb") is not None:
+        rgb = outputs["rgb"][env_id].detach().cpu().numpy()[..., :3]
+        return rgb.astype(np.uint8)
+    if outputs.get("distance_to_image_plane") is None:
         return None
-    rgb = outputs["rgb"][env_id].detach().cpu().numpy()[..., :3]
-    return rgb.astype(np.uint8)
+    depth = outputs["distance_to_image_plane"][env_id].detach().cpu().numpy()
+    if depth.ndim == 3:
+        depth = depth[..., 0]
+    finite_mask = np.isfinite(depth)
+    depth_vis = np.zeros_like(depth, dtype=np.float32)
+    if np.any(finite_mask):
+        finite_depth = depth[finite_mask]
+        depth_min = float(np.min(finite_depth))
+        depth_max = float(np.max(finite_depth))
+        denom = max(depth_max - depth_min, 1e-6)
+        depth_vis[finite_mask] = np.clip((depth[finite_mask] - depth_min) / denom, 0.0, 1.0)
+    depth_img = (depth_vis * 255).astype(np.uint8)
+    return np.repeat(depth_img[..., None], 3, axis=-1)
 
 
 def _pad_video_frames_for_codec(frames: list[np.ndarray]) -> list[np.ndarray]:
