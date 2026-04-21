@@ -733,7 +733,8 @@ class IsaacSimDistillEnv:
         table_pose = np.array([0.0, 0.0, 0.38, 0.0, 0.0, 0.0, 1.0], dtype=np.float32)
         return {
             "env_id": int(env_id),
-            "robot_joint_pos": sim_state.q[env_id].astype(np.float32),
+            "robot_joint_names": list(self.robot.joint_names),
+            "robot_joint_pos": self.robot.data.joint_pos[env_id].detach().cpu().numpy().astype(np.float32),
             "robot_body_names": list(self.robot.body_names),
             "robot_body_positions": body_positions.astype(np.float32),
             "robot_base_pose": robot_base_pose.astype(np.float32),
