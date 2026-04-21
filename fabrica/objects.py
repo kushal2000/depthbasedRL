@@ -7,15 +7,20 @@ from isaacgymenvs.utils.utils import get_repo_root_dir
 
 ASSETS_DIR = get_repo_root_dir() / "assets" / "urdf" / "fabrica"
 
-ALL_ASSEMBLIES = [
-    "beam",
-    "car",
-    "cooling_manifold",
-    "duct",
-    "gamepad",
-    "plumbers_block",
-    "stool_circular",
-]
+def _discover_assemblies():
+    """Return all subdirs of ASSETS_DIR that contain canonical_transforms.json.
+
+    Picks up not just the canonical assembly names (beam, car, …) but also
+    user-generated scaled clones (e.g. beam_2x produced by scale_assembly.py).
+    """
+    return sorted(
+        d.name
+        for d in ASSETS_DIR.iterdir()
+        if d.is_dir() and (d / "canonical_transforms.json").exists()
+    )
+
+
+ALL_ASSEMBLIES = _discover_assemblies()
 
 def _load_assembly_objects(assembly_name):
     """Load Object entries using canonical extents from canonical_transforms.json.

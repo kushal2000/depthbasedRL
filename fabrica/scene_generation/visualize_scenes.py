@@ -1,19 +1,23 @@
 #!/usr/bin/env python3
-"""Viser viewer to inspect generated scenes from ``scenes.npz``.
+"""Viser viewer for single-insertion scenes from ``scenes.npz``.
 
-Loads ``assets/urdf/fabrica/{assembly}/scenes.npz`` and lets you scroll
-through the cached scenes via a dropdown. For each scene, all 5 parts are
-rendered at their sampled start poses on the table; pressing Step Forward
-animates the next part in the assembly order from its start pose along its
-cached trajectory to the fixture pose. Step Back rewinds; Play All cycles
-through every part.
+Loads ``assets/urdf/fabrica/{assembly}/scenes.npz`` (the new single-insertion
+schema with axes ``(P, N, M, ...)``) and lets you scroll through every cached
+``(insertion_part, scene_idx, start_idx)`` combo.
 
-Use this to hand-validate the generated scenes before they're consumed by
-training.
+For the chosen combo, the viewer renders:
+  - the welded **partial-assembly fixture** at the scene's
+    ``partial_assembly_offset`` (parts strictly before ``insertion_part`` in
+    ``assembly_order.steps``);
+  - the **inserting part** at the chosen start pose, animated through its
+    cached trajectory to the final assembled position via Step Forward / Play.
+
+Use this to hand-validate generated scenes before they're consumed by training.
 
 Usage:
-    python fabrica/scene_generation/visualize_scenes.py --assembly beam
-    python fabrica/scene_generation/visualize_scenes.py --assembly beam --port 8086
+    python -m fabrica.scene_generation.visualize_scenes --assembly beam_2x
+    python -m fabrica.scene_generation.visualize_scenes --assembly beam_2x \\
+        --scenes-file scenes_smoke.npz --port 8086
 """
 
 import argparse
@@ -31,7 +35,7 @@ from fabrica.viser_utils import COLORS, SceneManager
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 ASSETS_DIR = REPO_ROOT / "assets" / "urdf" / "fabrica"
 
-# Scene constants (must match generate_scenes.py / step3 for visual alignment)
+# Scene constants (must match generate_scenes.py / step3 for visual alignment).
 TABLE_Z = 0.38             # world center z of the table box
 TABLE_DIM = (0.475, 0.4, 0.3)
 
@@ -40,8 +44,11 @@ def _qxyzw_to_wxyz(q):
     return np.array([q[3], q[0], q[1], q[2]])
 
 
+def _quat_inverse_wxyz(q):
+    return [q[0], -q[1], -q[2], -q[3]]
+
+
 def _slerp(q0, q1, t):
-    """Quaternion slerp in wxyz convention."""
     dot = float(np.dot(q0, q1))
     if dot < 0:
         q1, dot = -q1, -dot
@@ -53,8 +60,7 @@ def _slerp(q0, q1, t):
 
 
 def _interp_waypoints(wps, t):
-    """Linear-with-slerp interpolation across a list of (pos, wxyz) waypoints
-    parameterized by t in [0, 1] over the whole sequence."""
+    """Smoothstep-interpolated walk over a list of (pos, wxyz_quat) waypoints."""
     n = len(wps) - 1
     if n <= 0 or t <= 0:
         return wps[0]
@@ -63,16 +69,19 @@ def _interp_waypoints(wps, t):
     sf = t * n
     si = min(int(sf), n - 1)
     lt = sf - si
-    a = lt * lt * (3.0 - 2.0 * lt)  # smoothstep
+    a = lt * lt * (3.0 - 2.0 * lt)
     pos = (1 - a) * wps[si][0] + a * wps[si + 1][0]
     quat = _slerp(wps[si][1], wps[si + 1][1], a)
     return pos, quat
 
 
 def load_assembly_meta(assembly):
+    """Return (assembly_order_steps, inserts_into, canonical_transforms)."""
     with open(ASSETS_DIR / assembly / "assembly_order.json") as f:
         order = json.load(f)
-    return order["steps"]
+    with open(ASSETS_DIR / assembly / "canonical_transforms.json") as f:
+        ct = json.load(f)
+    return order["steps"], order.get("inserts_into", {}), ct
 
 
 def load_canonical_meshes(assembly, part_ids):
@@ -83,66 +92,83 @@ def load_canonical_meshes(assembly, part_ids):
     return meshes
 
 
-def load_scenes(assembly):
-    path = ASSETS_DIR / assembly / "scenes.npz"
+def load_scenes(assembly, scenes_file="scenes.npz"):
+    path = ASSETS_DIR / assembly / scenes_file
     if not path.exists():
         raise FileNotFoundError(
             f"{path} not found. Run generate_scenes.py --assembly {assembly} first."
         )
-    data = np.load(path)
+    data = np.load(path, allow_pickle=True)
     return {
-        "start_poses": data["start_poses"],     # [num_scenes, num_parts, 7] xyzw
-        "goals": data["goals"],                 # [num_scenes, num_parts, max_len, 7] xyzw
-        "traj_lengths": data["traj_lengths"],   # [num_scenes, num_parts]
+        "insertion_parts": [str(p) for p in data["insertion_parts"].tolist()],
+        "start_poses": data["start_poses"],                 # (P, N, M, 7) xyzw
+        "goals": data["goals"],                              # (P, N, M, T, 7) xyzw
+        "traj_lengths": data["traj_lengths"],                # (P, N, M)
+        "partial_assembly_offsets": data["partial_assembly_offsets"],  # (P, N, 3)
+        "scene_urdf_paths": data["scene_urdf_paths"],        # (P, N) of str
     }
 
 
+def fixture_world_pose(transforms_pid, table_offset_world):
+    """World (pos, wxyz_quat) for a fixture part at the scene's table offset.
+
+    Mirrors ``world_assembled_pose`` in generate_scenes.py — pos = canonical
+    centroid + offset, quat = inverse of assembled_to_canonical.
+    """
+    centroid = np.array(transforms_pid["original_centroid"])
+    pos = centroid + np.array(table_offset_world)
+    a2c = transforms_pid["assembled_to_canonical_wxyz"]
+    quat_wxyz = np.array(_quat_inverse_wxyz(a2c))
+    return pos, quat_wxyz
+
+
 def main():
-    parser = argparse.ArgumentParser(
-        description="Viser viewer for cached scenes (start poses + trajectories).",
-    )
+    parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     parser.add_argument("--assembly", type=str, required=True)
+    parser.add_argument("--scenes-file", type=str, default="scenes.npz",
+                        help="scenes npz filename inside the assembly dir")
     parser.add_argument("--port", type=int, default=8082)
     args = parser.parse_args()
 
-    part_ids = load_assembly_meta(args.assembly)
-    canonical_meshes = load_canonical_meshes(args.assembly, part_ids)
-    scenes = load_scenes(args.assembly)
+    assembly_order, inserts_into, transforms = load_assembly_meta(args.assembly)
+    canonical_meshes = load_canonical_meshes(args.assembly, assembly_order)
+    scenes = load_scenes(args.assembly, args.scenes_file)
 
-    num_scenes = scenes["start_poses"].shape[0]
-    num_parts = scenes["start_poses"].shape[1]
-    print(f"Loaded {num_scenes} scenes for {args.assembly} ({num_parts} parts)")
+    insertion_parts = scenes["insertion_parts"]
+    start_poses = scenes["start_poses"]                  # (P, N, M, 7)
+    goals = scenes["goals"]                              # (P, N, M, T, 7)
+    traj_lengths = scenes["traj_lengths"]                # (P, N, M)
+    partial_offsets = scenes["partial_assembly_offsets"]  # (P, N, 3)
+    P, N, M, _ = start_poses.shape
+    print(f"Loaded {args.scenes_file} for {args.assembly}: "
+          f"P={P} insertion_parts={insertion_parts}, N={N} scenes, M={M} starts")
 
-    # Build per-scene per-part waypoint lists ([(pos, wxyz_quat), ...]) that
-    # start with the start_pose and continue through the cached goals.
-    scene_waypoints = []
-    for s in range(num_scenes):
-        per_part = {}
-        for p_idx, pid in enumerate(part_ids):
-            wps = []
-            sp = scenes["start_poses"][s, p_idx]
-            wps.append((np.array(sp[:3]), _qxyzw_to_wxyz(sp[3:7])))
-            traj_len = int(scenes["traj_lengths"][s, p_idx])
-            for k in range(traj_len):
-                gp = scenes["goals"][s, p_idx, k]
-                wps.append((np.array(gp[:3]), _qxyzw_to_wxyz(gp[3:7])))
-            per_part[pid] = wps
-        scene_waypoints.append(per_part)
+    # Pre-build per-(p_idx, n, m) waypoint sequences (start + cached goals).
+    # Stored as list of (pos, wxyz_quat) tuples.
+    def waypoints_for(p_idx, n, m):
+        wps = []
+        sp = start_poses[p_idx, n, m]
+        wps.append((np.array(sp[:3]), _qxyzw_to_wxyz(sp[3:7])))
+        L = int(traj_lengths[p_idx, n, m])
+        for k in range(L):
+            gp = goals[p_idx, n, m, k]
+            wps.append((np.array(gp[:3]), _qxyzw_to_wxyz(gp[3:7])))
+        return wps
 
-    # --- Viser setup ---
-
+    # ── Viser setup ──
     server = viser.ViserServer(host="0.0.0.0", port=args.port)
-    scene_mgr = SceneManager()
+    scene_mgr = SceneManager()       # for fixture meshes (rebuilt per scene)
+    insert_mgr = SceneManager()      # for inserting part frame (rebuilt per part)
 
     @server.on_client_connect
     def _(client: viser.ClientHandle):
         client.camera.position = (0.0, -1.0, 1.0)
         client.camera.look_at = (0.0, 0.0, 0.5)
 
-    # Static scene
     server.scene.add_grid("/ground", width=2, height=2, cell_size=0.1)
     server.scene.add_frame(
-        "/table", position=(0.0, 0.0, TABLE_Z), wxyz=(1.0, 0.0, 0.0, 0.0), show_axes=False
+        "/table", position=(0.0, 0.0, TABLE_Z), wxyz=(1.0, 0.0, 0.0, 0.0),
+        show_axes=False,
     )
     server.scene.add_box(
         "/table/wood",
@@ -153,7 +179,8 @@ def main():
         opacity=0.7,
     )
     server.scene.add_frame(
-        "/robot", position=(0.0, 0.8, 0.0), wxyz=(1.0, 0.0, 0.0, 0.0), show_axes=False
+        "/robot", position=(0.0, 0.8, 0.0), wxyz=(1.0, 0.0, 0.0, 0.0),
+        show_axes=False,
     )
     robot_urdf = (
         REPO_ROOT
@@ -162,155 +189,215 @@ def main():
     if robot_urdf.exists():
         ViserUrdf(server, robot_urdf, root_node_name="/robot")
 
-    # Dynamic per-part frames + meshes (rebuilt when scene changes)
-    frames = {}      # pid → frame handle
-    current_scene_idx = [0]
-    step = [0]       # how many parts have completed their animation
-    animating = [False]
+    # ── Mutable rendering state ──
+    state = dict(
+        p_idx=0,                # index into insertion_parts
+        n=0,
+        m=0,
+        animating=False,
+        anim_t=0.0,             # current animation parameter [0, 1]
+        insert_frame=None,      # viser frame handle for the inserting part
+    )
 
-    def _set_pose_for_part(pid, pos, wxyz):
-        f = frames[pid]
+    def _set_insert_pose(pos, wxyz):
+        f = state["insert_frame"]
+        if f is None:
+            return
         f.position = tuple(float(v) for v in pos)
         f.wxyz = tuple(float(v) for v in wxyz)
 
-    def show_scene(scene_idx):
+    def render_scene():
+        """Rebuild the fixture meshes + inserting-part frame for the current
+        (insertion_part, scene_idx, start_idx) selection."""
         scene_mgr.clear()
-        frames.clear()
-        step[0] = 0
+        insert_mgr.clear()
 
-        for i, pid in enumerate(part_ids):
-            mesh = canonical_meshes[pid]
-            offset = -np.array(mesh.centroid, dtype=np.float32)
+        p_idx = state["p_idx"]
+        n = state["n"]
+        m = state["m"]
+        p = insertion_parts[p_idx]
 
+        # Fixture parts = everything strictly before `p` in assembly_order.
+        i_in_order = assembly_order.index(p)
+        fixture_pids = assembly_order[:i_in_order]
+        receiver_pid = inserts_into.get(p, "")
+        offset = partial_offsets[p_idx, n]
+
+        # Render each fixture part at its world_assembled_pose for this scene.
+        for fpid in fixture_pids:
+            mesh = canonical_meshes[fpid]
+            pos, q_wxyz = fixture_world_pose(transforms[fpid], offset)
+            color = (240, 90, 90) if fpid == receiver_pid else (160, 160, 160)
             f = server.scene.add_frame(
-                f"/scene/{pid}",
-                wxyz=(1.0, 0.0, 0.0, 0.0),
-                position=(0.0, 0.0, 0.0),
-                show_axes=True,
-                axes_length=0.05,
-                axes_radius=0.0008,
-            )
-            scene_mgr.add(f)
-            mf = server.scene.add_frame(
-                f"/scene/{pid}/centered",
-                position=tuple(float(v) for v in offset),
-                wxyz=(1.0, 0.0, 0.0, 0.0),
+                f"/fixture/{fpid}",
+                position=tuple(float(v) for v in pos),
+                wxyz=tuple(float(v) for v in q_wxyz),
                 show_axes=False,
             )
-            scene_mgr.add(mf)
+            scene_mgr.add(f)
             scene_mgr.add(server.scene.add_mesh_simple(
-                f"/scene/{pid}/centered/mesh",
+                f"/fixture/{fpid}/mesh",
                 vertices=np.array(mesh.vertices, dtype=np.float32),
                 faces=np.array(mesh.faces, dtype=np.uint32),
-                color=COLORS[i % len(COLORS)],
+                color=color,
+                opacity=0.95,
             ))
-            frames[pid] = f
 
-        # Initial pose: all parts at their start
-        wps_for_scene = scene_waypoints[scene_idx]
-        for pid in part_ids:
-            sp = wps_for_scene[pid][0]
-            _set_pose_for_part(pid, sp[0], sp[1])
+        # Inserting part: per-instance frame + mesh, controlled by animation.
+        mesh = canonical_meshes[p]
+        f = server.scene.add_frame(
+            "/insert",
+            position=(0.0, 0.0, 0.0),
+            wxyz=(1.0, 0.0, 0.0, 0.0),
+            show_axes=True, axes_length=0.05, axes_radius=0.0008,
+        )
+        insert_mgr.add(f)
+        insert_mgr.add(server.scene.add_mesh_simple(
+            "/insert/mesh",
+            vertices=np.array(mesh.vertices, dtype=np.float32),
+            faces=np.array(mesh.faces, dtype=np.uint32),
+            color=COLORS[p_idx % len(COLORS)],
+        ))
+        state["insert_frame"] = f
 
+        # Goal ghost (semi-transparent at the cached final waypoint).
+        wps = waypoints_for(p_idx, n, m)
+        gpos, gquat = wps[-1]
+        gf = server.scene.add_frame(
+            "/goal_ghost",
+            position=tuple(float(v) for v in gpos),
+            wxyz=tuple(float(v) for v in gquat),
+            show_axes=False,
+        )
+        insert_mgr.add(gf)
+        insert_mgr.add(server.scene.add_mesh_simple(
+            "/goal_ghost/mesh",
+            vertices=np.array(mesh.vertices, dtype=np.float32),
+            faces=np.array(mesh.faces, dtype=np.uint32),
+            color=(80, 220, 80),
+            opacity=0.35,
+        ))
+
+        # Reset animation to the start pose.
+        state["anim_t"] = 0.0
+        sp_pos, sp_q = wps[0]
+        _set_insert_pose(sp_pos, sp_q)
         _update_status()
-        print(f"Showing scene {scene_idx}.")
 
     def _update_status():
-        n = len(part_ids)
-        if step[0] >= n:
-            status_panel.content = (
-                f"## Scene {current_scene_idx[0]} / {num_scenes - 1}\n\n"
-                f"Step {n}/{n} — assembly complete."
-            )
-        else:
-            status_panel.content = (
-                f"## Scene {current_scene_idx[0]} / {num_scenes - 1}\n\n"
-                f"Step {step[0]}/{n} — next: part {part_ids[step[0]]}\n\n"
-                f"Trajectory length: "
-                f"{int(scenes['traj_lengths'][current_scene_idx[0], step[0]])}"
-            )
-
-    def _set_pose_during_animation(active_idx, t):
-        """For parts before `active_idx` show them at their final pose; for the
-        active part interpolate; for parts after, show them at the start."""
-        wps_for_scene = scene_waypoints[current_scene_idx[0]]
-        for i, pid in enumerate(part_ids):
-            wps = wps_for_scene[pid]
-            if i < active_idx:
-                pos, q = wps[-1]
-            elif i == active_idx and t > 0:
-                pos, q = _interp_waypoints(wps, t)
-            else:
-                pos, q = wps[0]
-            _set_pose_for_part(pid, pos, q)
+        p_idx = state["p_idx"]
+        n = state["n"]
+        m = state["m"]
+        p = insertion_parts[p_idx]
+        i_in_order = assembly_order.index(p)
+        fixture_pids = assembly_order[:i_in_order]
+        receiver = inserts_into.get(p, "")
+        offset = partial_offsets[p_idx, n]
+        L = int(traj_lengths[p_idx, n, m])
+        status_panel.content = (
+            f"## insertion_part `{p}` (idx {p_idx}/{P-1})\n"
+            f"### scene `{n}/{N-1}` · start `{m}/{M-1}`\n"
+            f"- fixture: `{fixture_pids}` (receiver `{receiver}`)\n"
+            f"- partial_assembly_offset: "
+            f"`({offset[0]:+.3f}, {offset[1]:+.3f}, {offset[2]:+.3f})`\n"
+            f"- trajectory length: `{L}`\n"
+            f"- anim_t: `{state['anim_t']:.2f}`"
+        )
 
     def step_fwd():
-        if animating[0] or step[0] >= len(part_ids):
+        if state["animating"]:
             return
-        animating[0] = True
+        state["animating"] = True
+        wps = waypoints_for(state["p_idx"], state["n"], state["m"])
         nf = max(1, int(dur_slider.value * 30))
+        t0 = state["anim_t"]
+        t1 = min(1.0, t0 + 1.0 / max(1, len(wps) - 1))  # advance by ~1 waypoint
         for fi in range(nf + 1):
-            _set_pose_during_animation(step[0], fi / nf)
+            t = t0 + (t1 - t0) * fi / nf
+            pos, q = _interp_waypoints(wps, t)
+            _set_insert_pose(pos, q)
             time.sleep(1.0 / 30)
-        step[0] += 1
-        _set_pose_during_animation(step[0], 0.0)
+        state["anim_t"] = t1
         _update_status()
-        animating[0] = False
+        state["animating"] = False
 
     def step_back():
-        if animating[0] or step[0] <= 0:
+        if state["animating"]:
             return
-        animating[0] = True
-        step[0] -= 1
+        state["animating"] = True
+        wps = waypoints_for(state["p_idx"], state["n"], state["m"])
         nf = max(1, int(dur_slider.value * 30))
+        t0 = state["anim_t"]
+        t1 = max(0.0, t0 - 1.0 / max(1, len(wps) - 1))
         for fi in range(nf + 1):
-            _set_pose_during_animation(step[0], 1.0 - fi / nf)
+            t = t0 + (t1 - t0) * fi / nf
+            pos, q = _interp_waypoints(wps, t)
+            _set_insert_pose(pos, q)
             time.sleep(1.0 / 30)
-        _set_pose_during_animation(step[0], 0.0)
+        state["anim_t"] = t1
         _update_status()
-        animating[0] = False
+        state["animating"] = False
 
     def play_all():
-        if animating[0]:
+        if state["animating"]:
             return
-        while step[0] < len(part_ids):
-            step_fwd()
-            if step[0] < len(part_ids):
-                time.sleep(0.3)
+        state["animating"] = True
+        wps = waypoints_for(state["p_idx"], state["n"], state["m"])
+        total_frames = max(2, int(dur_slider.value * 30))
+        t0 = state["anim_t"]
+        for fi in range(total_frames + 1):
+            t = t0 + (1.0 - t0) * fi / total_frames
+            pos, q = _interp_waypoints(wps, t)
+            _set_insert_pose(pos, q)
+            time.sleep(1.0 / 30)
+        state["anim_t"] = 1.0
+        _update_status()
+        state["animating"] = False
 
-    def reset():
-        if animating[0]:
+    def reset_anim():
+        if state["animating"]:
             return
-        step[0] = 0
-        wps_for_scene = scene_waypoints[current_scene_idx[0]]
-        for pid in part_ids:
-            sp = wps_for_scene[pid][0]
-            _set_pose_for_part(pid, sp[0], sp[1])
+        wps = waypoints_for(state["p_idx"], state["n"], state["m"])
+        sp_pos, sp_q = wps[0]
+        _set_insert_pose(sp_pos, sp_q)
+        state["anim_t"] = 0.0
         _update_status()
 
-    # GUI
-    dropdown = server.gui.add_dropdown(
-        "Scene", options=[str(i) for i in range(num_scenes)], initial_value="0"
+    # ── GUI ──
+    dd_part = server.gui.add_dropdown(
+        "Insertion part", options=insertion_parts, initial_value=insertion_parts[0],
     )
+    sl_scene = server.gui.add_slider("Scene idx", 0, max(0, N - 1), 1, 0)
+    sl_start = server.gui.add_slider("Start idx", 0, max(0, M - 1), 1, 0)
     dur_slider = server.gui.add_slider(
-        "Duration (s)", min=0.2, max=3.0, step=0.1, initial_value=1.0
+        "Duration (s)", 0.2, 5.0, 0.1, 1.5,
     )
     status_panel = server.gui.add_markdown("")
-    server.gui.add_button("Play All").on_click(lambda _: play_all())
+    server.gui.add_button("Play (start → goal)").on_click(lambda _: play_all())
     server.gui.add_button("Step Forward").on_click(lambda _: step_fwd())
     server.gui.add_button("Step Back").on_click(lambda _: step_back())
-    server.gui.add_button("Reset").on_click(lambda _: reset())
+    server.gui.add_button("Reset to start").on_click(lambda _: reset_anim())
 
-    def _on_scene_change(_):
-        current_scene_idx[0] = int(dropdown.value)
-        show_scene(current_scene_idx[0])
+    def _on_part(_):
+        state["p_idx"] = insertion_parts.index(dd_part.value)
+        render_scene()
 
-    dropdown.on_update(_on_scene_change)
+    def _on_scene(_):
+        state["n"] = int(sl_scene.value)
+        render_scene()
 
-    show_scene(0)
+    def _on_start(_):
+        state["m"] = int(sl_start.value)
+        render_scene()
+
+    dd_part.on_update(_on_part)
+    sl_scene.on_update(_on_scene)
+    sl_start.on_update(_on_start)
+
+    render_scene()
 
     print(f"\nOpen http://localhost:{args.port}")
-    print("Use the Scene dropdown to switch between cached scenes; Play All animates each part in assembly order.")
+    print("Pick (insertion part, scene, start) — Play animates the inserting part.")
     print("Ctrl+C to quit.\n")
     try:
         while True:
