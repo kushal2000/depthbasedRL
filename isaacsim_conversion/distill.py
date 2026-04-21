@@ -90,6 +90,9 @@ def launch_app():
     parser.add_argument("--capture_viewer_video", action="store_true")
     parser.add_argument("--capture_viewer_video_wandb_key", default="rollout_video")
     parser.add_argument("--capture_viewer_video_fps", type=int, default=60)
+    parser.add_argument("--debug_policy_image_stats", action="store_true")
+    parser.add_argument("--debug_policy_image_stats_stride", type=int, default=100)
+    parser.add_argument("--debug_policy_image_stats_env_ids", default="0")
     parser.add_argument("--wandb", action="store_true")
     parser.add_argument("--wandb_project", default="depthbasedRL-isaacsim-distill")
     parser.add_argument("--wandb_entity", default=None)
@@ -328,6 +331,64 @@ def stack_student_image(student_obs: dict[str, torch.Tensor], modality: str, set
     else:
         raise ValueError(f"Unsupported modality: {modality}")
     return resize_image(image, settings.image_height, settings.image_width)
+
+
+def parse_env_id_list(value: str, num_envs: int) -> list[int]:
+    env_ids = []
+    for part in value.split(","):
+        part = part.strip()
+        if not part:
+            continue
+        env_id = int(part)
+        if env_id < 0:
+            env_id = num_envs + env_id
+        if env_id < 0 or env_id >= num_envs:
+            raise ValueError(f"debug env id {env_id} out of range for num_envs={num_envs}")
+        env_ids.append(env_id)
+    return sorted(set(env_ids))
+
+
+def tensor_image_stats(image: torch.Tensor, env_ids: list[int], prefix: str) -> dict[str, float]:
+    stats: dict[str, float] = {}
+    with torch.no_grad():
+        for env_id in env_ids:
+            img = image[env_id].detach().float()
+            stats[f"{prefix}/env{env_id}/mean"] = float(img.mean().item())
+            stats[f"{prefix}/env{env_id}/std"] = float(img.std(unbiased=False).item())
+            stats[f"{prefix}/env{env_id}/min"] = float(img.min().item())
+            stats[f"{prefix}/env{env_id}/max"] = float(img.max().item())
+            stats[f"{prefix}/env{env_id}/bright_frac"] = float((img > 0.86).float().mean().item())
+            stats[f"{prefix}/env{env_id}/dark_frac"] = float((img < 0.14).float().mean().item())
+    return stats
+
+
+def append_debug_policy_image_stats(
+    run_dir: Path,
+    iter_idx: int,
+    env_ids: list[int],
+    student_obs: dict[str, torch.Tensor],
+    student_image: torch.Tensor,
+    modality: str,
+):
+    row: dict[str, float | int | str] = {
+        "iter": iter_idx,
+        "modality": modality,
+        "env_ids": ",".join(str(env_id) for env_id in env_ids),
+    }
+    images = student_obs["images"]
+    if "rgb" in images:
+        row.update(tensor_image_stats(images["rgb"], env_ids, "raw_rgb"))
+    if "depth" in images:
+        row.update(tensor_image_stats(images["depth"], env_ids, "raw_depth"))
+    row.update(tensor_image_stats(student_image, env_ids, "policy_image"))
+    path = run_dir / "policy_image_stats.csv"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    exists = path.exists()
+    with path.open("a", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=list(row.keys()))
+        if not exists:
+            writer.writeheader()
+        writer.writerow(row)
 
 
 def build_student(args, env: IsaacSimDistillEnv, settings: DistillSettings):
@@ -788,6 +849,10 @@ def compute_distill_step(
     student_hidden,
     settings: DistillSettings,
     train: bool,
+    run_dir: Path | None = None,
+    iter_idx: int | None = None,
+    debug_policy_image_stats: bool = False,
+    debug_policy_image_stats_env_ids: list[int] | None = None,
 ):
     sim_state = env.compute_sim_state()
     teacher_obs = env.build_teacher_obs(sim_state)
@@ -804,6 +869,15 @@ def compute_distill_step(
     else:
         student_obs = env.build_student_obs(sim_state, camera_modality=env.camera_modality)
         student_image = stack_student_image(student_obs, env.camera_modality, settings)
+        if debug_policy_image_stats and run_dir is not None and iter_idx is not None:
+            append_debug_policy_image_stats(
+                run_dir=run_dir,
+                iter_idx=iter_idx,
+                env_ids=debug_policy_image_stats_env_ids or [0],
+                student_obs=student_obs,
+                student_image=student_image,
+                modality=env.camera_modality,
+            )
         if train:
             student_out, student_hidden = student(student_image, student_obs["proprio"], student_hidden)
         else:
@@ -856,6 +930,10 @@ def run_online_dagger(
     viewer_frames: list[dict] = []
     viewer_video_frames: list[np.ndarray] = []
     viewer_logged = False
+    debug_policy_image_stats_env_ids = parse_env_id_list(
+        _args.debug_policy_image_stats_env_ids,
+        env.num_envs,
+    ) if _args.debug_policy_image_stats else []
 
     for iter_idx in range(settings.online_num_iters):
         sim_state, student_action, total_loss, action_loss_per_env, aux_loss_per_env, student_hidden = compute_distill_step(
@@ -865,6 +943,13 @@ def run_online_dagger(
             student_hidden=student_hidden,
             settings=settings,
             train=True,
+            run_dir=run_dir,
+            iter_idx=iter_idx + 1,
+            debug_policy_image_stats=(
+                _args.debug_policy_image_stats
+                and ((iter_idx + 1) == 1 or (iter_idx + 1) % max(_args.debug_policy_image_stats_stride, 1) == 0)
+            ),
+            debug_policy_image_stats_env_ids=debug_policy_image_stats_env_ids,
         )
         accumulated_loss = total_loss if accumulated_loss is None else accumulated_loss + total_loss
         accumulated_steps += 1

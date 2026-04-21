@@ -52,6 +52,7 @@ if [[ -n "${DISTILL_EXTRA_ARGS:-}" ]]; then
   read -r -a EXTRA_ARGS <<< "$DISTILL_EXTRA_ARGS"
 fi
 CAMERA_BACKEND="${CAMERA_BACKEND:-tiled}"
+IMAGE_TILED_MAX_ENVS="${IMAGE_TILED_MAX_ENVS:-512}"
 
 echo "Hostname: $(hostname)"
 nvidia-smi || true
@@ -60,10 +61,15 @@ echo "Commit: $(git rev-parse HEAD)"
 echo "Run config: $DISTILL_CONFIG"
 echo "Camera config: $CAMERA_CONFIG"
 echo "Camera backend: $CAMERA_BACKEND"
+echo "Image tiled max envs: $IMAGE_TILED_MAX_ENVS"
 echo "Extra args: ${EXTRA_ARGS[*]:-<none>}"
 
 SELECTED_ENVS=""
 for N in "${ENV_COUNTS[@]}"; do
+  if [[ "$STUDENT_INPUT" == "camera" && "$CAMERA_BACKEND" == "tiled" && "$N" -gt "$IMAGE_TILED_MAX_ENVS" ]]; then
+    echo "SKIP_PREFLIGHT job=$JOB_NAME num_envs=$N: camera+tiled capped at IMAGE_TILED_MAX_ENVS=$IMAGE_TILED_MAX_ENVS due to high-env image corruption"
+    continue
+  fi
   PREFLIGHT_DIR="distillation_runs/${JOB_NAME}_preflight_${N}env"
   rm -rf "$PREFLIGHT_DIR"
   echo "=== ONLINE PREFLIGHT job=$JOB_NAME num_envs=$N ==="
