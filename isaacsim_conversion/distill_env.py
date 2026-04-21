@@ -374,6 +374,9 @@ class IsaacSimDistillEnv:
         from isaaclab.sim import PhysxCfg, SimulationCfg, SimulationContext
         from isaaclab.sim.converters import UrdfConverter, UrdfConverterCfg
 
+        # IsaacLab's default ground plane is 100m x 100m. With many envs at
+        # env_spacing=4.0, far envs can render off-plane as a white background,
+        # which corrupts camera policy inputs while physics still runs.
         ground_plane_cfg = sim_utils.GroundPlaneCfg(size=(self.ground_plane_size, self.ground_plane_size))
         ground_plane_cfg.func("/World/GroundPlane", ground_plane_cfg)
         sim_cfg = SimulationCfg(
