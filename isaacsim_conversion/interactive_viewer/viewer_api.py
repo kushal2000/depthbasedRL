@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from pathlib import Path
 from typing import Tuple
+import time
+import urllib.request
 
 import numpy as np
 
@@ -11,6 +13,7 @@ from .viewer_common import DEFAULT_TEMPLATE_PATH, render_template
 Vec3 = Tuple[float, float, float]
 Quat = Tuple[float, float, float, float]
 ColorRGB = Tuple[float, float, float]
+DEFAULT_GITHUB_RAW_BASE = "https://raw.githubusercontent.com/tylerlum/simtoolreal/6809a978753e950913a7588bbeaef07d16f10b56/"
 
 
 def _as_2d_float_array(values, *, name: str, width: int | None = None) -> np.ndarray:
@@ -227,15 +230,35 @@ def _make_table_urdf() -> str:
 """
 
 
+def _check_viewer_urls(urls: list[str], url_check: str) -> set[str]:
+    if url_check == "skip":
+        print("[viewer] URL check skipped; browser mesh loading may fail silently.")
+        return set()
+    failed: set[str] = set()
+    for url in dict.fromkeys(urls):
+        print(f"[viewer] URL check ({url_check}) -> {url}")
+        t0 = time.monotonic()
+        try:
+            req = urllib.request.Request(url, method="HEAD")
+            urllib.request.urlopen(req, timeout=10)
+            print(f"[viewer]   PASSED ({time.monotonic() - t0:.2f}s)")
+        except Exception as exc:
+            failed.add(url)
+            msg = f"[viewer]   FAILED ({time.monotonic() - t0:.2f}s): {exc}"
+            if url_check == "error":
+                raise ValueError(msg) from exc
+            print(msg)
+    return failed
+
+
 def write_pose_viewer_html(path: Path, payload: dict, *, title: str) -> str:
     """Write a mesh-based HTML viewer for Isaac Sim distillation rollout payloads."""
     del title  # The SimToolReal template reads the title from embedded trajectory data.
-    github_raw_base = payload.get(
-        "github_raw_base",
-        "https://raw.githubusercontent.com/tylerlum/simtoolreal/9a661cb79f811afdad1817548f9b79d1e50e70cd/",
-    )
+    github_raw_base = payload.get("github_raw_base", DEFAULT_GITHUB_RAW_BASE)
     if not github_raw_base.endswith("/"):
         github_raw_base += "/"
+    url_check = payload.get("url_check", "warn")
+    print(f"[viewer] GitHub raw base: {github_raw_base}")
 
     robot_urdf_url = (
         github_raw_base
@@ -245,6 +268,7 @@ def write_pose_viewer_html(path: Path, payload: dict, *, title: str) -> str:
         github_raw_base
         + "assets/urdf/dextoolbench/hammer/claw_hammer/claw_hammer.urdf"
     )
+    _check_viewer_urls([robot_urdf_url, object_urdf_url], url_check)
 
     robots = [
         make_url_robot(name="robot", urdf_url=robot_urdf_url, animated=True),
