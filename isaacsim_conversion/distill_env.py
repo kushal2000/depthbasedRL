@@ -203,11 +203,17 @@ class IsaacSimDistillEnv:
             from isaaclab.sensors import CameraCfg, TiledCameraCfg
 
             camera_types = list(self.camera_data_types)
-            camera_cfg_cls = TiledCameraCfg if self.camera_backend == "tiled" and self._camera_mount_mode() == "world" else CameraCfg
-            spawn_camera_at_static_pose = self.camera_backend == "tiled" and self._camera_mount_mode() == "world"
-            camera_offset_pos = self.camera_pose.pos if spawn_camera_at_static_pose else (0.0, 0.0, 0.0)
-            camera_offset_rot = self.camera_pose.quat_wxyz if spawn_camera_at_static_pose else (1.0, 0.0, 0.0, 0.0)
-            camera_offset_convention = self.camera_pose.convention if spawn_camera_at_static_pose else "ros"
+            camera_cfg_cls = TiledCameraCfg if self.camera_backend == "tiled" else CameraCfg
+            camera_mount = self._camera_mount_mode()
+            spawn_tiled_at_parent_pose = self.camera_backend == "tiled" and camera_mount in {"world", "wrist"}
+            camera_offset_pos = self.camera_pose.pos if spawn_tiled_at_parent_pose else (0.0, 0.0, 0.0)
+            camera_offset_rot = self.camera_pose.quat_wxyz if spawn_tiled_at_parent_pose else (1.0, 0.0, 0.0, 0.0)
+            camera_offset_convention = self.camera_pose.convention if spawn_tiled_at_parent_pose else "ros"
+            if self.camera_backend == "tiled" and camera_mount == "wrist":
+                camera_link_name = self.camera_pose.link_name or "iiwa14_link_7"
+                camera_prim_path = f"{{ENV_REGEX_NS}}/Robot/{camera_link_name}/DistillCamera"
+            else:
+                camera_prim_path = "{ENV_REGEX_NS}/DistillCamera"
 
             @configclass
             class DistillSceneCfg(InteractiveSceneCfg):
@@ -272,7 +278,7 @@ class IsaacSimDistillEnv:
                 )
 
                 camera = camera_cfg_cls(
-                    prim_path="{ENV_REGEX_NS}/DistillCamera",
+                    prim_path=camera_prim_path,
                     update_period=0,
                     update_latest_camera_pose=True,
                     height=self.camera_intrinsics.height,
@@ -285,9 +291,11 @@ class IsaacSimDistillEnv:
                         clipping_range=self.camera_intrinsics.clipping_range,
                     ),
                     offset=camera_cfg_cls.OffsetCfg(
-                        # TiledCamera render products do not reliably pick up poses
-                        # written after initialization, so static world cameras are
-                        # spawned directly at the per-env local camera pose.
+                        # Static world TiledCamera render products do not reliably
+                        # pick up poses written after initialization, so spawn them
+                        # at the per-env local camera pose. Tiled wrist cameras are
+                        # spawned under the wrist link with the configured local
+                        # offset so articulation motion drives the camera transform.
                         pos=camera_offset_pos,
                         rot=camera_offset_rot,
                         convention=camera_offset_convention,
@@ -571,7 +579,7 @@ class IsaacSimDistillEnv:
             env_origins = self.env_origins[env_ids].detach().cpu().numpy()
             positions = env_origins + np.asarray(self.camera_pose.pos, dtype=np.float32)[None, :]
             orientations = np.repeat(np.asarray(self.camera_pose.quat_wxyz, dtype=np.float32)[None, :], len(env_ids_np), axis=0)
-        if self.camera_backend == "tiled" and self._camera_mount_mode() == "world":
+        if self.camera_backend == "tiled":
             self.camera_world_pos[env_ids_np] = positions
             self.camera_world_quat_wxyz[env_ids_np] = orientations
             return
@@ -692,6 +700,10 @@ class IsaacSimDistillEnv:
         self.progress_buf += 1
         if self.camera is not None and self._camera_mount_mode() == "wrist":
             self._apply_camera_world_poses()
+            if self.camera_backend != "tiled":
+                # Standard cameras are moved explicitly; push those dynamic wrist
+                # poses before forcing a render/update.
+                self.scene.write_data_to_sim()
         if self.camera is not None:
             self.sim.render()
             self.camera.update(PHYSICS_DT, force_recompute=True)
