@@ -16,7 +16,8 @@ import yaml
 from deployment.rl_player import RlPlayer
 from isaacgymenvs.utils.observation_action_utils_sharpa import compute_joint_pos_targets
 from isaacsim_conversion.distill_env import IsaacSimDistillEnv
-from isaacsim_conversion.isaacsim_env import _log
+from isaacsim_conversion.isaacsim_env import CONTROL_DT, _log
+from isaacsim_conversion.interactive_viewer import write_pose_viewer_html
 from isaacsim_conversion.student_policy import (
     MLPPolicy,
     MLPRecurrentPolicy,
@@ -82,6 +83,13 @@ def launch_app():
     parser.add_argument("--reset_when_dropped", action="store_true")
     parser.add_argument("--capture_frames", action="store_true")
     parser.add_argument("--capture_frame_stride", type=int, default=1)
+    parser.add_argument("--capture_viewer", action="store_true")
+    parser.add_argument("--capture_viewer_len", type=int, default=700)
+    parser.add_argument("--capture_viewer_env_id", type=int, default=0)
+    parser.add_argument("--capture_viewer_wandb_key", default="interactive_viewer")
+    parser.add_argument("--capture_viewer_video", action="store_true")
+    parser.add_argument("--capture_viewer_video_wandb_key", default="rollout_video")
+    parser.add_argument("--capture_viewer_video_fps", type=int, default=60)
     parser.add_argument("--wandb", action="store_true")
     parser.add_argument("--wandb_project", default="depthbasedRL-isaacsim-distill")
     parser.add_argument("--wandb_entity", default=None)
@@ -502,6 +510,81 @@ def wandb_log(run, payload: dict[str, float | int | str], step: int | None = Non
     wandb.log(payload, step=step)
 
 
+def _capture_rgb_frame(env: IsaacSimDistillEnv, env_id: int) -> np.ndarray | None:
+    if env.camera is None:
+        return None
+    outputs = env.camera.data.output
+    if outputs.get("rgb") is None:
+        return None
+    rgb = outputs["rgb"][env_id].detach().cpu().numpy()[..., :3]
+    return rgb.astype(np.uint8)
+
+
+def _pad_video_frames_for_codec(frames: list[np.ndarray]) -> list[np.ndarray]:
+    padded = []
+    for frame in frames:
+        h, w = frame.shape[:2]
+        pad_h = h % 2
+        pad_w = w % 2
+        if pad_h == 0 and pad_w == 0:
+            padded.append(frame)
+            continue
+        padded.append(np.pad(frame, ((0, pad_h), (0, pad_w), (0, 0)), mode="edge"))
+    return padded
+
+
+def _log_viewer_artifacts(
+    *,
+    run_dir: Path,
+    mode: str,
+    frames: list[dict],
+    video_frames: list[np.ndarray],
+    wandb_run,
+    viewer_key: str,
+    video_key: str,
+    video_fps: int,
+    num_goals: int,
+):
+    if not frames:
+        return
+    timestamps = np.arange(len(frames), dtype=np.float32) * CONTROL_DT
+    payload = {
+        "title": f"{mode} rollout",
+        "mode": mode,
+        "env_id": frames[0]["env_id"],
+        "num_goals": num_goals,
+        "timestamps": timestamps.tolist(),
+        "robot_body_names": frames[0]["robot_body_names"],
+        "robot_body_positions": np.stack([f["robot_body_positions"] for f in frames]).tolist(),
+        "object_poses": np.stack([f["object_pose"] for f in frames]).tolist(),
+        "goal_poses": np.stack([f["goal_pose"] for f in frames]).tolist(),
+        "table_poses": np.stack([f["table_pose"] for f in frames]).tolist(),
+        "goal_idx": [int(f["goal_idx"]) for f in frames],
+        "kp_dist": [float(f["kp_dist"]) for f in frames],
+    }
+    viewer_path = run_dir / "interactive_viewer" / f"{mode}_rollout.html"
+    html_text = write_pose_viewer_html(viewer_path, payload, title=f"{mode} rollout")
+    _log(f"Saved interactive viewer: {viewer_path}")
+
+    video_path = None
+    if video_frames:
+        import imageio.v2 as iio
+
+        video_path = run_dir / "interactive_viewer" / f"{mode}_rollout.mp4"
+        video_path.parent.mkdir(parents=True, exist_ok=True)
+        iio.mimsave(video_path, _pad_video_frames_for_codec(video_frames), fps=video_fps, macro_block_size=1)
+        _log(f"Saved rollout video: {video_path}")
+
+    if wandb_run is not None:
+        import wandb
+
+        wandb_payload = {viewer_key: wandb.Html(html_text)}
+        if video_path is not None:
+            wandb_payload[video_key] = wandb.Video(str(video_path), fps=video_fps, format="mp4")
+        wandb_run.log(wandb_payload)
+        _log(f"Logged interactive viewer artifacts to wandb keys: {list(wandb_payload)}")
+
+
 def run_episode(
     mode: str,
     env: IsaacSimDistillEnv,
@@ -513,6 +596,14 @@ def run_episode(
     run_dir: Path | None = None,
     capture_frames: bool = False,
     capture_frame_stride: int = 1,
+    capture_viewer: bool = False,
+    capture_viewer_len: int = 700,
+    capture_viewer_env_id: int = 0,
+    capture_viewer_video: bool = False,
+    wandb_run=None,
+    capture_viewer_wandb_key: str = "interactive_viewer",
+    capture_viewer_video_wandb_key: str = "rollout_video",
+    capture_viewer_video_fps: int = 60,
 ) -> tuple[dict[str, float], dict[str, float] | None]:
     episode_start_time = time.perf_counter()
     teacher.reset()
@@ -523,6 +614,10 @@ def run_episode(
     total_steps = 0
     monitor_mask = get_monitor_env_mask(env.num_envs, settings.monitor_num_envs if mode == "train" else 0)
     train_mask = ~monitor_mask if mode == "train" else np.ones(env.num_envs, dtype=bool)
+    viewer_frames: list[dict] = []
+    viewer_video_frames: list[np.ndarray] = []
+    if capture_viewer and run_dir is None:
+        raise ValueError("capture_viewer requires run_dir")
 
     for step_i in range(settings.max_steps):
         sim_state = env.compute_sim_state()
@@ -570,6 +665,12 @@ def run_episode(
         next_sim_state = env.compute_sim_state()
         if capture_frames and run_dir is not None and (step_i % max(capture_frame_stride, 1) == 0):
             save_camera_debug_step(env, run_dir, step_i)
+        if capture_viewer and len(viewer_frames) < capture_viewer_len:
+            viewer_frames.append(env.capture_viewer_frame(capture_viewer_env_id, next_sim_state))
+            if capture_viewer_video:
+                rgb_frame = _capture_rgb_frame(env, capture_viewer_env_id)
+                if rgb_frame is not None:
+                    viewer_video_frames.append(rgb_frame)
         finished = env.maybe_advance_goal(next_sim_state)
         reset_env_ids = env.reset_done_envs(next_sim_state)
         if reset_env_ids.size > 0:
@@ -617,6 +718,19 @@ def run_episode(
             )
         if finished:
             break
+
+    if capture_viewer and run_dir is not None:
+        _log_viewer_artifacts(
+            run_dir=run_dir,
+            mode=mode,
+            frames=viewer_frames,
+            video_frames=viewer_video_frames,
+            wandb_run=wandb_run,
+            viewer_key=capture_viewer_wandb_key,
+            video_key=capture_viewer_video_wandb_key,
+            video_fps=capture_viewer_video_fps,
+            num_goals=len(env.task_spec.goals),
+        )
 
     final_state = env.compute_sim_state()
     episode_wall_time_s = max(time.perf_counter() - episode_start_time, 1e-9)
@@ -982,7 +1096,12 @@ def main():
     camera_modality, camera_pose, camera_intrinsics = load_camera_pose(Path(resolve_repo_path(repo_root, args.camera_config)))
     if args.student_modality:
         camera_modality = args.student_modality
-    enable_camera = args.mode == "camera_debug" or args.capture_frames or args.student_input == "camera"
+    enable_camera = (
+        args.mode == "camera_debug"
+        or args.capture_frames
+        or args.capture_viewer_video
+        or args.student_input == "camera"
+    )
 
     task_spec = load_task_spec(
         repo_root=repo_root,
@@ -1115,6 +1234,14 @@ def main():
             run_dir=run_dir,
             capture_frames=args.capture_frames,
             capture_frame_stride=args.capture_frame_stride,
+            capture_viewer=args.capture_viewer,
+            capture_viewer_len=args.capture_viewer_len,
+            capture_viewer_env_id=args.capture_viewer_env_id,
+            capture_viewer_video=args.capture_viewer_video,
+            wandb_run=wandb_run,
+            capture_viewer_wandb_key=args.capture_viewer_wandb_key,
+            capture_viewer_video_wandb_key=args.capture_viewer_video_wandb_key,
+            capture_viewer_video_fps=args.capture_viewer_video_fps,
         )
         _log(
             f"[episode {episode}] mode={args.mode}, goal_completion_ratio={metrics['goal_completion_ratio']:.3f}, "

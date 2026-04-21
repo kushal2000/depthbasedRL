@@ -17,8 +17,8 @@ checkpoint_interval: 10
 eval_interval: 999
 eval_num_envs: 0
 eval_max_steps: 700
-image_height: 90
-image_width: 160
+image_height: 45
+image_width: 80
 learning_rate: 0.0001
 num_envs: 512
 env_spacing: 4.0

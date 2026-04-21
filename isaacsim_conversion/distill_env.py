@@ -718,6 +718,32 @@ class IsaacSimDistillEnv:
             object_pos_world_env_frame=object_pose[:, :3].copy(),
         )
 
+    def capture_viewer_frame(self, env_id: int, sim_state: SimState | None = None) -> dict[str, np.ndarray | list[str] | int | float]:
+        if env_id < 0 or env_id >= self.num_envs:
+            raise ValueError(f"viewer env_id {env_id} out of range for num_envs={self.num_envs}")
+        if sim_state is None:
+            sim_state = self.compute_sim_state()
+        env_origin = self.env_origins[env_id].detach().cpu().numpy()
+        body_state = self.robot.data.body_state_w[env_id].detach().cpu().numpy()
+        body_positions = body_state[:, :3] - env_origin[None, :]
+        robot_root_state = self.robot.data.root_state_w[env_id].detach().cpu().numpy()
+        robot_base_pose = np.zeros(7, dtype=np.float32)
+        robot_base_pose[:3] = robot_root_state[:3] - env_origin
+        robot_base_pose[3:] = robot_root_state[3:7][[1, 2, 3, 0]]
+        table_pose = np.array([0.0, 0.0, 0.38, 0.0, 0.0, 0.0, 1.0], dtype=np.float32)
+        return {
+            "env_id": int(env_id),
+            "robot_joint_pos": sim_state.q[env_id].astype(np.float32),
+            "robot_body_names": list(self.robot.body_names),
+            "robot_body_positions": body_positions.astype(np.float32),
+            "robot_base_pose": robot_base_pose.astype(np.float32),
+            "object_pose": sim_state.object_pose[env_id].astype(np.float32),
+            "goal_pose": sim_state.goal_pose[env_id].astype(np.float32),
+            "table_pose": table_pose,
+            "goal_idx": int(sim_state.goal_idx[env_id]),
+            "kp_dist": float(sim_state.kp_dist[env_id]),
+        }
+
     def maybe_advance_goal(self, sim_state: SimState) -> bool:
         lifted_now = sim_state.object_pose[:, 2] > (self.current_start_pose[:, 2] + 0.1)
         self.lifted_object |= lifted_now
