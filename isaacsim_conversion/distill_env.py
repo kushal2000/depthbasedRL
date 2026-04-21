@@ -82,6 +82,7 @@ class IsaacSimDistillEnv:
         object_yaw_noise_deg: float = 20.0,
         enable_camera: bool = True,
         camera_backend: str = "tiled",
+        ground_plane_size: float = 500.0,
         depth_preprocess_mode: str = "clip_divide",
         depth_min_m: float = 0.0,
         depth_max_m: float = 5.0,
@@ -102,8 +103,11 @@ class IsaacSimDistillEnv:
         self.use_real_camera_transform = use_real_camera_transform
         self.enable_camera = enable_camera
         self.camera_backend = camera_backend
+        self.ground_plane_size = float(ground_plane_size)
         if self.camera_backend not in {"tiled", "standard"}:
             raise ValueError(f"Unsupported camera_backend={self.camera_backend!r}")
+        if self.ground_plane_size <= 0:
+            raise ValueError("ground_plane_size must be > 0")
         self.depth_preprocess_mode = depth_preprocess_mode
         self.depth_min_m = float(depth_min_m)
         self.depth_max_m = float(depth_max_m)
@@ -370,7 +374,8 @@ class IsaacSimDistillEnv:
         from isaaclab.sim import PhysxCfg, SimulationCfg, SimulationContext
         from isaaclab.sim.converters import UrdfConverter, UrdfConverterCfg
 
-        sim_utils.GroundPlaneCfg().func("/World/GroundPlane", sim_utils.GroundPlaneCfg())
+        ground_plane_cfg = sim_utils.GroundPlaneCfg(size=(self.ground_plane_size, self.ground_plane_size))
+        ground_plane_cfg.func("/World/GroundPlane", ground_plane_cfg)
         sim_cfg = SimulationCfg(
             dt=PHYSICS_DT,
             render_interval=PHYSICS_SUBSTEPS,

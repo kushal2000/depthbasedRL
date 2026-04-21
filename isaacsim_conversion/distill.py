@@ -65,6 +65,7 @@ def launch_app():
     parser.add_argument("--num_episodes", type=int, default=None)
     parser.add_argument("--num_envs", type=int, default=None)
     parser.add_argument("--env_spacing", type=float, default=None)
+    parser.add_argument("--ground_plane_size", type=float, default=None)
     parser.add_argument("--object_start_mode", choices=["fixed", "randomized"], default=None)
     parser.add_argument(
         "--beta_mode",
@@ -133,6 +134,7 @@ class DistillSettings:
     learning_rate: float = 1e-4
     num_envs: int = 1
     env_spacing: float = 2.0
+    ground_plane_size: float = 500.0
     object_start_mode: str = "fixed"
     object_pos_noise_xyz: tuple[float, float, float] = (0.03, 0.03, 0.01)
     object_yaw_noise_deg: float = 20.0
@@ -191,6 +193,8 @@ def load_distill_settings(path: Path, args) -> DistillSettings:
         settings.num_envs = args.num_envs
     if args.env_spacing is not None:
         settings.env_spacing = args.env_spacing
+    if args.ground_plane_size is not None:
+        settings.ground_plane_size = args.ground_plane_size
     if args.object_start_mode is not None:
         settings.object_start_mode = args.object_start_mode
     if args.beta_mode is not None:
@@ -1254,6 +1258,7 @@ def main():
         enable_camera=enable_camera,
         num_envs=settings.num_envs,
         env_spacing=settings.env_spacing,
+        ground_plane_size=settings.ground_plane_size,
         object_start_mode=settings.object_start_mode,
         object_pos_noise_xyz=settings.object_pos_noise_xyz,
         object_yaw_noise_deg=settings.object_yaw_noise_deg,

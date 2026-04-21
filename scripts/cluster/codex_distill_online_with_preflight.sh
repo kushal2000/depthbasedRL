@@ -52,7 +52,8 @@ if [[ -n "${DISTILL_EXTRA_ARGS:-}" ]]; then
   read -r -a EXTRA_ARGS <<< "$DISTILL_EXTRA_ARGS"
 fi
 CAMERA_BACKEND="${CAMERA_BACKEND:-tiled}"
-IMAGE_TILED_MAX_ENVS="${IMAGE_TILED_MAX_ENVS:-512}"
+IMAGE_TILED_MAX_ENVS="${IMAGE_TILED_MAX_ENVS:-4096}"
+IMAGE_PREFLIGHT_BRIGHT_FRAC_MAX="${IMAGE_PREFLIGHT_BRIGHT_FRAC_MAX:-0.4}"
 
 echo "Hostname: $(hostname)"
 nvidia-smi || true
@@ -62,6 +63,7 @@ echo "Run config: $DISTILL_CONFIG"
 echo "Camera config: $CAMERA_CONFIG"
 echo "Camera backend: $CAMERA_BACKEND"
 echo "Image tiled max envs: $IMAGE_TILED_MAX_ENVS"
+echo "Image preflight bright frac max: $IMAGE_PREFLIGHT_BRIGHT_FRAC_MAX"
 echo "Extra args: ${EXTRA_ARGS[*]:-<none>}"
 
 SELECTED_ENVS=""
@@ -73,6 +75,16 @@ for N in "${ENV_COUNTS[@]}"; do
   PREFLIGHT_DIR="distillation_runs/${JOB_NAME}_preflight_${N}env"
   rm -rf "$PREFLIGHT_DIR"
   echo "=== ONLINE PREFLIGHT job=$JOB_NAME num_envs=$N ==="
+  PREFLIGHT_IMAGE_ARGS=()
+  if [[ "$STUDENT_INPUT" == "camera" ]]; then
+    MID=$((N / 2))
+    LAST=$((N - 1))
+    PREFLIGHT_IMAGE_ARGS=(
+      --debug_policy_image_stats
+      --debug_policy_image_stats_stride 1
+      --debug_policy_image_stats_env_ids "0,1,${MID},${LAST}"
+    )
+  fi
   if timeout 900 ./scripts/run_in_isaacsim_env.sh python isaacsim_conversion/distill.py \
     --mode train_online \
     --headless \
@@ -89,7 +101,27 @@ for N in "${ENV_COUNTS[@]}"; do
     --camera_config "$CAMERA_CONFIG" \
     --teacher_checkpoint pretrained_policy/model.pth \
     --teacher_config pretrained_policy/config.yaml \
-    --run_dir "$PREFLIGHT_DIR"; then
+    --run_dir "$PREFLIGHT_DIR" \
+    "${PREFLIGHT_IMAGE_ARGS[@]}"; then
+    if [[ "$STUDENT_INPUT" == "camera" ]]; then
+      if ! python - "$PREFLIGHT_DIR/policy_image_stats.csv" "$IMAGE_PREFLIGHT_BRIGHT_FRAC_MAX" <<'PY'
+import csv
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+threshold = float(sys.argv[2])
+rows = list(csv.DictReader(path.open()))
+keys = [key for key in rows[-1] if key.startswith("policy_image/env") and key.endswith("/bright_frac")]
+bright = sum(float(rows[-1][key]) for key in keys) / max(len(keys), 1)
+print(f"IMAGE_PREFLIGHT bright_frac={bright:.3f} threshold={threshold:.3f}")
+raise SystemExit(0 if bright <= threshold else 1)
+PY
+      then
+        echo "PREFLIGHT_FAILED job=$JOB_NAME num_envs=$N: policy image bright fraction too high"
+        continue
+      fi
+    fi
     SELECTED_ENVS="$N"
     echo "PREFLIGHT_OK job=$JOB_NAME selected_envs=$SELECTED_ENVS"
     break
