@@ -86,6 +86,7 @@ def launch_app():
     parser.add_argument("--capture_frame_stride", type=int, default=1)
     parser.add_argument("--capture_viewer", action="store_true")
     parser.add_argument("--capture_viewer_len", type=int, default=700)
+    parser.add_argument("--capture_viewer_interval", type=int, default=None)
     parser.add_argument("--capture_viewer_env_id", type=int, default=0)
     parser.add_argument("--capture_viewer_wandb_key", default="interactive_viewer")
     parser.add_argument("--capture_viewer_video", action="store_true")
@@ -623,10 +624,13 @@ def _log_viewer_artifacts(
     video_key: str,
     video_fps: int,
     num_goals: int,
+    step: int | None = None,
+    artifact_label: str | None = None,
 ):
     if not frames:
         return
     timestamps = np.arange(len(frames), dtype=np.float32) * CONTROL_DT
+    artifact_stem = f"{mode}_rollout" if artifact_label is None else f"{mode}_{artifact_label}"
     payload = {
         "title": f"{mode} rollout",
         "mode": mode,
@@ -644,7 +648,7 @@ def _log_viewer_artifacts(
         "goal_idx": [int(f["goal_idx"]) for f in frames],
         "kp_dist": [float(f["kp_dist"]) for f in frames],
     }
-    viewer_path = run_dir / "interactive_viewer" / f"{mode}_rollout.html"
+    viewer_path = run_dir / "interactive_viewer" / f"{artifact_stem}.html"
     html_text = write_pose_viewer_html(viewer_path, payload, title=f"{mode} rollout")
     _log(f"Saved interactive viewer: {viewer_path}")
 
@@ -652,7 +656,7 @@ def _log_viewer_artifacts(
     if video_frames:
         import imageio.v2 as iio
 
-        video_path = run_dir / "interactive_viewer" / f"{mode}_rollout.mp4"
+        video_path = run_dir / "interactive_viewer" / f"{artifact_stem}.mp4"
         video_path.parent.mkdir(parents=True, exist_ok=True)
         iio.mimsave(video_path, _pad_video_frames_for_codec(video_frames), fps=video_fps, macro_block_size=1)
         _log(f"Saved rollout video: {video_path}")
@@ -663,7 +667,10 @@ def _log_viewer_artifacts(
         wandb_payload = {viewer_key: wandb.Html(html_text)}
         if video_path is not None:
             wandb_payload[video_key] = wandb.Video(str(video_path), fps=video_fps, format="mp4")
-        wandb_run.log(wandb_payload)
+        if step is None:
+            wandb_run.log(wandb_payload)
+        else:
+            wandb_run.log(wandb_payload, step=step)
         _log(f"Logged interactive viewer artifacts to wandb keys: {list(wandb_payload)}")
 
 
@@ -930,6 +937,7 @@ def run_online_dagger(
     capture_frame_stride: int = 1,
     capture_viewer: bool = False,
     capture_viewer_len: int = 700,
+    capture_viewer_interval: int | None = None,
     capture_viewer_env_id: int = 0,
     capture_viewer_video: bool = False,
     capture_viewer_wandb_key: str = "interactive_viewer",
@@ -947,7 +955,8 @@ def run_online_dagger(
     accumulated_steps = 0
     viewer_frames: list[dict] = []
     viewer_video_frames: list[np.ndarray] = []
-    viewer_logged = False
+    viewer_interval = None if capture_viewer_interval is None or capture_viewer_interval <= 0 else capture_viewer_interval
+    viewer_capture_active = bool(capture_viewer)
     debug_policy_image_stats_env_ids = parse_env_id_list(
         _args.debug_policy_image_stats_env_ids,
         env.num_envs,
@@ -993,13 +1002,14 @@ def run_online_dagger(
         next_sim_state = env.compute_sim_state()
         if capture_frames and (iter_idx % max(capture_frame_stride, 1) == 0):
             save_camera_debug_step(env, run_dir, iter_idx)
-        if capture_viewer and len(viewer_frames) < capture_viewer_len:
+        if capture_viewer and viewer_capture_active:
             viewer_frames.append(env.capture_viewer_frame(capture_viewer_env_id, next_sim_state))
             if capture_viewer_video:
                 rgb_frame = _capture_rgb_frame(env, capture_viewer_env_id)
                 if rgb_frame is not None:
                     viewer_video_frames.append(rgb_frame)
-            if len(viewer_frames) >= capture_viewer_len and not viewer_logged:
+            if len(viewer_frames) >= capture_viewer_len:
+                iter_step = iter_idx + 1
                 _log_viewer_artifacts(
                     run_dir=run_dir,
                     mode="train_online",
@@ -1010,8 +1020,12 @@ def run_online_dagger(
                     video_key=capture_viewer_video_wandb_key,
                     video_fps=capture_viewer_video_fps,
                     num_goals=len(env.task_spec.goals),
+                    step=iter_step,
+                    artifact_label=f"rollout_step_{iter_step:07d}",
                 )
-                viewer_logged = True
+                viewer_frames = []
+                viewer_video_frames = []
+                viewer_capture_active = False
         env.maybe_advance_goal(next_sim_state)
         reset_env_ids = env.reset_done_envs(next_sim_state)
         if reset_env_ids.size > 0:
@@ -1071,8 +1085,10 @@ def run_online_dagger(
         interval_action_loss[:] = 0
         interval_aux_loss[:] = 0
         interval_start = time.perf_counter()
+        if capture_viewer and not viewer_capture_active and viewer_interval is not None and (iter_idx + 1) % viewer_interval == 0:
+            viewer_capture_active = True
 
-    if capture_viewer and not viewer_logged:
+    if capture_viewer and viewer_frames:
         _log_viewer_artifacts(
             run_dir=run_dir,
             mode="train_online",
@@ -1083,6 +1099,8 @@ def run_online_dagger(
             video_key=capture_viewer_video_wandb_key,
             video_fps=capture_viewer_video_fps,
             num_goals=len(env.task_spec.goals),
+            step=settings.online_num_iters,
+            artifact_label=f"rollout_step_{settings.online_num_iters:07d}",
         )
 
     return best_metric
@@ -1339,6 +1357,9 @@ def main():
             capture_frame_stride=args.capture_frame_stride,
             capture_viewer=args.capture_viewer,
             capture_viewer_len=args.capture_viewer_len,
+            capture_viewer_interval=(
+                args.capture_viewer_interval if args.capture_viewer_interval is not None else settings.online_log_interval
+            ),
             capture_viewer_env_id=args.capture_viewer_env_id,
             capture_viewer_video=args.capture_viewer_video,
             capture_viewer_wandb_key=args.capture_viewer_wandb_key,
