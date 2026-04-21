@@ -44,25 +44,32 @@ from fabrica.fabrica_eval import (
 
 sys.setrecursionlimit(max(sys.getrecursionlimit(), 10000))
 
-ALL_ASSEMBLIES = [
-    "beam", "car", "cooling_manifold", "duct",
-    "gamepad", "plumbers_block", "stool_circular",
-]
+def _discover_fabrica_assemblies() -> List[str]:
+    """All directories under assets/urdf/fabrica/ that carry
+    canonical_transforms.json (picks up both `beam` and user-generated
+    clones like `beam_2x`)."""
+    return sorted(
+        d.name for d in ASSETS_DIR.iterdir()
+        if d.is_dir() and (d / "canonical_transforms.json").exists()
+    )
 
-SPLIT_FILES = {
-    "train": "scenes.npz",
-    "val": "scenes_val.npz",
-}
+
+ALL_ASSEMBLIES = _discover_fabrica_assemblies()
+
+SCENES_FILENAME = "scenes.npz"  # single-insertion schema has no train/val split
 
 # Goal modes map to config overrides read by FabricaEnv:
-#   dense                 -> full dense trajectory (no flag)
-#   final_only            -> finalGoalOnly=True     (single insertion goal)
-#   pre_insert_and_final  -> preInsertAndFinal=True (pre-insert + insert, 2 goals)
+#   dense                 -> full dense trajectory
+#   final_only            -> finalGoalOnly     (single insertion goal)
+#   pre_insert_and_final  -> preInsertAndFinal (pre-insert + insert, 2 goals)
+# The client-side names are kept kebab/snake for backwards compat with existing
+# UI / CLI; the values pushed to task.env.goalMode are camelCase.
 GOAL_MODES = ["dense", "final_only", "pre_insert_and_final"]
 
-_GOAL_MODE_OVERRIDE_KEY = {
-    "final_only": "task.env.finalGoalOnly",
-    "pre_insert_and_final": "task.env.preInsertAndFinal",
+_GOAL_MODE_CAMEL = {
+    "dense": "dense",
+    "final_only": "finalGoalOnly",
+    "pre_insert_and_final": "preInsertAndFinal",
 }
 
 
@@ -85,53 +92,57 @@ def apply_goal_mode(goals: List[List[float]], mode: str) -> List[List[float]]:
 # Scene data loading
 # ===================================================================
 
-def _assemblies_with_scenes(split: str) -> List[str]:
-    """Return assemblies that have the requested split file."""
-    fname = SPLIT_FILES[split]
-    out = []
-    for a in ALL_ASSEMBLIES:
-        if (ASSETS_DIR / a / fname).exists():
-            out.append(a)
-    return out
+def _assemblies_with_scenes() -> List[str]:
+    """Return assemblies that have a scenes.npz on disk."""
+    return [a for a in ALL_ASSEMBLIES if (ASSETS_DIR / a / SCENES_FILENAME).exists()]
 
 
-def _load_scenes(assembly: str, split: str) -> Optional[dict]:
-    """Load scenes.npz / scenes_val.npz for an assembly.
+def _load_scenes(assembly: str) -> Optional[dict]:
+    """Load scenes.npz / scenes_val.npz for an assembly (single-insertion schema).
 
     Returns a dict with:
-      - start_poses  : (num_scenes, num_parts, 7)  xyz + xyzw quat
-      - goals        : (num_scenes, num_parts, max_traj_len, 7) xyz + xyzw quat
-      - traj_lengths : (num_scenes, num_parts) int
-      - assembly_order : list[str] (part ids in scenes.npz part-axis order)
+      - insertion_parts          : list[str]             — trainable parts (length P)
+      - start_poses              : (P, N, M, 7)          — xyz + xyzw quat
+      - goals                    : (P, N, M, T, 7)
+      - traj_lengths             : (P, N, M)
+      - partial_assembly_offsets : (P, N, 3)
+      - scene_urdf_paths         : (P, N) of str         — relative to assets/
+      - assembly_order           : list[str]             — full steps from JSON
+                                                            (used for fixture rendering)
+      - inserts_into             : dict[str, str]        — receiver per insertion part
     """
-    fname = SPLIT_FILES[split]
-    path = ASSETS_DIR / assembly / fname
+    path = ASSETS_DIR / assembly / SCENES_FILENAME
     if not path.exists():
         return None
 
-    data = np.load(str(path))
+    data = np.load(str(path), allow_pickle=True)
     order_path = ASSETS_DIR / assembly / "assembly_order.json"
-    assembly_order = json.loads(order_path.read_text())["steps"]
+    order_json = json.loads(order_path.read_text())
 
     return {
-        "start_poses": data["start_poses"],
-        "goals": data["goals"],
-        "traj_lengths": data["traj_lengths"],
-        "assembly_order": assembly_order,
+        "insertion_parts": [str(p) for p in data["insertion_parts"].tolist()],
+        "start_poses": data["start_poses"],                             # (P, N, M, 7)
+        "goals": data["goals"],                                          # (P, N, M, T, 7)
+        "traj_lengths": data["traj_lengths"],                            # (P, N, M)
+        "partial_assembly_offsets": data["partial_assembly_offsets"],    # (P, N, 3)
+        "scene_urdf_paths": data["scene_urdf_paths"],                    # (P, N)
+        "assembly_order": order_json["steps"],                           # full chain
+        "inserts_into": order_json.get("inserts_into", {}),
     }
 
 
-def _scene_start_and_goals(scenes: dict, scene_idx: int, part_id: str
+def _scene_start_and_goals(scenes: dict, scene_idx: int, part_id: str,
+                           start_idx: int = 0
                            ) -> Tuple[List[float], List[List[float]]]:
-    """Extract (start_pose, goals) for a specific (scene_idx, part_id).
+    """Extract (start_pose, goals) for a specific (scene_idx, part_id, start_idx).
 
-    Slices ``goals`` to the valid per-(scene, part) trajectory length.
+    Slices ``goals`` to the valid per-(p, n, m) trajectory length.
     """
-    order = scenes["assembly_order"]
-    p_idx = order.index(part_id)
-    start = scenes["start_poses"][scene_idx, p_idx].tolist()
-    L = int(scenes["traj_lengths"][scene_idx, p_idx])
-    goals = scenes["goals"][scene_idx, p_idx, :L].tolist()
+    ins_parts = scenes["insertion_parts"]
+    p_idx = ins_parts.index(part_id)
+    start = scenes["start_poses"][p_idx, scene_idx, start_idx].tolist()
+    L = int(scenes["traj_lengths"][p_idx, scene_idx, start_idx])
+    goals = scenes["goals"][p_idx, scene_idx, start_idx, :L].tolist()
     return start, goals
 
 
@@ -177,11 +188,11 @@ class MultiInitAssemblyDemo:
         # Pending context (set at load time)
         self._pending_assembly = ""
         self._pending_part = ""
-        self._pending_split = ""
         self._pending_scene_idx = 0
+        self._pending_start_idx = 0
 
-        # Per-(assembly, split) scene caches
-        self._scene_cache: Dict[Tuple[str, str], dict] = {}
+        # Per-assembly scene caches
+        self._scene_cache: Dict[str, dict] = {}
 
         # Auto-sequence state (run all parts in a scene)
         self._auto_seq_active = False
@@ -219,18 +230,18 @@ class MultiInitAssemblyDemo:
                 "Policy", options=list(self.policies.keys()),
                 initial_value=self.initial_policy,
             )
-            self._dd_split = self.server.gui.add_dropdown(
-                "Split", options=["train", "val"], initial_value="train",
-            )
-            assemblies = [self._PH] + _assemblies_with_scenes("train")
+            assemblies = [self._PH] + _assemblies_with_scenes()
             self._dd_assembly = self.server.gui.add_dropdown(
                 "Assembly", options=assemblies, initial_value=self._PH,
+            )
+            self._dd_part = self.server.gui.add_dropdown(
+                "Insertion Part", options=[self._PH], initial_value=self._PH,
             )
             self._dd_scene = self.server.gui.add_dropdown(
                 "Scene Index", options=[self._PH], initial_value=self._PH,
             )
-            self._dd_part = self.server.gui.add_dropdown(
-                "Part", options=[self._PH], initial_value=self._PH,
+            self._dd_start = self.server.gui.add_dropdown(
+                "Start Index", options=[self._PH], initial_value=self._PH,
             )
             self._dd_goal_mode = self.server.gui.add_dropdown(
                 "Goal Mode", options=GOAL_MODES, initial_value=self.goal_mode,
@@ -238,7 +249,6 @@ class MultiInitAssemblyDemo:
             self._btn_load = self.server.gui.add_button("Load Environment")
             self._btn_load.on_click(lambda _: self._load_env())
             self._md_status = self.server.gui.add_markdown("**Status:** Ready")
-            self._dd_split.on_update(lambda _: self._on_split_change())
             self._dd_assembly.on_update(lambda _: self._on_assembly_change())
             self._dd_scene.on_update(lambda _: self._on_scene_change())
 
@@ -267,49 +277,43 @@ class MultiInitAssemblyDemo:
             self._md_dist = self.server.gui.add_markdown("**Dist to Goal:** --")
             self._md_reward = self.server.gui.add_markdown("**Cum Reward:** --")
 
-    def _on_split_change(self):
-        split = self._dd_split.value
-        assemblies = [self._PH] + _assemblies_with_scenes(split)
-        self._dd_assembly.options = assemblies
-        self._dd_assembly.value = self._PH
-        self._dd_scene.options = [self._PH]
-        self._dd_scene.value = self._PH
-        self._dd_part.options = [self._PH]
-        self._dd_part.value = self._PH
-
-    def _get_scenes(self, assembly: str, split: str) -> Optional[dict]:
-        key = (assembly, split)
-        if key not in self._scene_cache:
-            scenes = _load_scenes(assembly, split)
+    def _get_scenes(self, assembly: str) -> Optional[dict]:
+        if assembly not in self._scene_cache:
+            scenes = _load_scenes(assembly)
             if scenes is None:
                 return None
-            self._scene_cache[key] = scenes
-        return self._scene_cache[key]
+            self._scene_cache[assembly] = scenes
+        return self._scene_cache[assembly]
 
     def _on_assembly_change(self):
         assembly = self._dd_assembly.value
-        split = self._dd_split.value
         if assembly == self._PH:
             self._dd_scene.options = [self._PH]
             self._dd_scene.value = self._PH
             self._dd_part.options = [self._PH]
             self._dd_part.value = self._PH
+            self._dd_start.options = [self._PH]
+            self._dd_start.value = self._PH
             return
-        scenes = self._get_scenes(assembly, split)
+        scenes = self._get_scenes(assembly)
         if scenes is None:
             self._md_status.content = (
-                f"**Status:** No {SPLIT_FILES[split]} for assembly '{assembly}'."
+                f"**Status:** No {SCENES_FILENAME} for assembly '{assembly}'."
             )
             return
-        num_scenes = scenes["start_poses"].shape[0]
-        self._dd_scene.options = [str(i) for i in range(num_scenes)]
-        self._dd_scene.value = "0"
-        # Part options come from assembly_order (all 5 parts for beam)
-        self._dd_part.options = [f"Part {p}" for p in scenes["assembly_order"]]
+        # New (P, N, M) schema: P = insertion parts, N = scenes per part,
+        # M = start poses per (part, scene).
+        P, N, M = scenes["start_poses"].shape[:3]
+        # Insertion part options (4 parts for beam; `insertion_parts` excludes base).
+        self._dd_part.options = [f"Part {p}" for p in scenes["insertion_parts"]]
         self._dd_part.value = self._dd_part.options[0]
+        self._dd_scene.options = [str(i) for i in range(N)]
+        self._dd_scene.value = "0"
+        self._dd_start.options = [str(i) for i in range(M)]
+        self._dd_start.value = "0"
 
     def _on_scene_change(self):
-        # No-op: scene index change doesn't cascade; user re-clicks Load.
+        # No-op: scene change doesn't cascade; user re-clicks Load.
         pass
 
     # -- Static viser scene --------------------------------------------
@@ -372,45 +376,56 @@ class MultiInitAssemblyDemo:
         self._dyn.clear()
         self._obj_frame = self._goal_frame = None
 
-    def _setup_scene_objects(self, assembly: str, scene_idx: int, part_id: str):
-        """Populate viser with active + completed + future parts for this scene.
+    def _setup_scene_objects(self, assembly: str, scene_idx: int, part_id: str,
+                             start_idx: int = 0):
+        """Populate viser with the partial-assembly fixture + active inserting part.
 
-        Uses this specific scene's start_poses and goal trajectories —
-        completed parts at their final goal pose, future parts at their
-        start pose for this scene.
+        Single-insertion schema: the "fixture" is the chain of parts strictly
+        before `part_id` in the full assembly_order, placed at
+        partial_assembly_offsets[p_idx, scene_idx]. The receiver (per
+        inserts_into) is highlighted. There are no "future parts" — only one
+        dynamic inserting part per scene.
         """
         self._clear_dynamic()
         from fabrica.objects import FABRICA_NAME_TO_OBJECT
 
-        scenes = self._get_scenes(assembly, self._pending_split)
+        scenes = self._get_scenes(assembly)
         assembly_order = scenes["assembly_order"]
-        part_id_to_idx = {pid: i for i, pid in enumerate(assembly_order)}
-        active_i = part_id_to_idx[part_id]
+        inserts_into = scenes["inserts_into"]
+        receiver_pid = inserts_into.get(part_id, "")
+        ins_parts = scenes["insertion_parts"]
+        p_idx = ins_parts.index(part_id)
+        full_part_idx = {pid: i for i, pid in enumerate(assembly_order)}
+        active_i = full_part_idx[part_id]
 
         object_name = f"{assembly}_{part_id}"
         obj_urdf = FABRICA_NAME_TO_OBJECT[object_name].urdf_path
 
-        # Completed parts (before active in assembly order) -- at goal pose
-        # for this scene (last valid goal waypoint).
-        for cpid in assembly_order[:active_i]:
+        # Fixture parts (everything strictly before `part_id` in assembly_order),
+        # positioned at the scene's partial_assembly_offset via world_assembled_pose.
+        from fabrica.benchmark_processing.step3_generate_trajectories import (
+            quat_inverse_wxyz,
+        )
+        ct_path = ASSETS_DIR / assembly / "canonical_transforms.json"
+        transforms = json.loads(ct_path.read_text())
+        table_offset = scenes["partial_assembly_offsets"][p_idx, scene_idx]
+        for fpid in assembly_order[:active_i]:
+            centroid = np.array(transforms[fpid]["original_centroid"])
+            pos = (centroid + table_offset).tolist()
+            a2c = transforms[fpid]["assembled_to_canonical_wxyz"]
+            quat_wxyz = quat_inverse_wxyz(a2c)
+            # Pack into an xyzw pose (the format _add_context_part expects).
+            pose = [pos[0], pos[1], pos[2],
+                    quat_wxyz[1], quat_wxyz[2], quat_wxyz[3], quat_wxyz[0]]
+            opacity = 1.0 if fpid == receiver_pid else 0.85
             self._add_context_part(
-                assembly, cpid, part_id_to_idx,
-                pose=self._final_goal(scenes, scene_idx, cpid),
-                opacity=1.0,
-                frame_name=f"/completed_{cpid}",
+                assembly, fpid, full_part_idx,
+                pose=pose,
+                opacity=opacity,
+                frame_name=f"/fixture_{fpid}",
             )
 
-        # Future parts (after active in assembly order) -- at scene start pose.
-        for fpid in assembly_order[active_i + 1:]:
-            start, _ = _scene_start_and_goals(scenes, scene_idx, fpid)
-            self._add_context_part(
-                assembly, fpid, part_id_to_idx,
-                pose=start,
-                opacity=0.3,
-                frame_name=f"/future_{fpid}",
-            )
-
-        # Active part (live-updated by sim state)
+        # Active (inserting) part — live-updated by sim state.
         self._obj_frame = self.server.scene.add_frame(
             "/object", show_axes=True, axes_length=0.1, axes_radius=0.001,
         )
@@ -422,7 +437,7 @@ class MultiInitAssemblyDemo:
             mesh_color_override=color_override,
         )
 
-        # Goal ghost (live-updated by sim state)
+        # Goal ghost — live-updated by sim state.
         self._goal_frame = self.server.scene.add_frame(
             "/goal", show_axes=True, axes_length=0.1, axes_radius=0.001,
         )
@@ -433,11 +448,10 @@ class MultiInitAssemblyDemo:
         )
 
     def _final_goal(self, scenes: dict, scene_idx: int,
-                    part_id: str) -> List[float]:
-        order = scenes["assembly_order"]
-        p_idx = order.index(part_id)
-        L = int(scenes["traj_lengths"][scene_idx, p_idx])
-        return scenes["goals"][scene_idx, p_idx, L - 1].tolist()
+                    part_id: str, start_idx: int = 0) -> List[float]:
+        p_idx = scenes["insertion_parts"].index(part_id)
+        L = int(scenes["traj_lengths"][p_idx, scene_idx, start_idx])
+        return scenes["goals"][p_idx, scene_idx, start_idx, L - 1].tolist()
 
     def _add_context_part(self, assembly: str, pid: str,
                           part_id_to_idx: Dict[str, int],
@@ -510,9 +524,9 @@ class MultiInitAssemblyDemo:
         self._episode_running = False
         self._is_paused = False
 
-    def _load_env(self, assembly=None, part_id=None, scene_idx=None, split=None):
+    def _load_env(self, assembly=None, part_id=None, scene_idx=None,
+                  start_idx=None):
         assembly = assembly if assembly is not None else self._dd_assembly.value
-        split = split if split is not None else self._dd_split.value
 
         if part_id is None:
             part_display = self._dd_part.value
@@ -527,33 +541,49 @@ class MultiInitAssemblyDemo:
                 return
             scene_idx = int(self._dd_scene.value)
 
-        scenes = self._get_scenes(assembly, split)
+        if start_idx is None:
+            if self._dd_start.value == self._PH:
+                start_idx = 0
+            else:
+                start_idx = int(self._dd_start.value)
+
+        scenes = self._get_scenes(assembly)
         if scenes is None:
             self._md_status.content = (
-                f"**Status:** No {SPLIT_FILES[split]} for '{assembly}'."
+                f"**Status:** No {SCENES_FILENAME} for '{assembly}'."
             )
             return
-        if scene_idx < 0 or scene_idx >= scenes["start_poses"].shape[0]:
+        P, N, M = scenes["start_poses"].shape[:3]
+        if scene_idx < 0 or scene_idx >= N:
             self._md_status.content = (
-                f"**Status:** Scene index {scene_idx} out of range."
+                f"**Status:** Scene index {scene_idx} out of range [0, {N})."
             )
             return
-        if part_id not in scenes["assembly_order"]:
-            self._md_status.content = f"**Status:** Part {part_id} not in scene order."
+        if start_idx < 0 or start_idx >= M:
+            self._md_status.content = (
+                f"**Status:** Start index {start_idx} out of range [0, {M})."
+            )
             return
+        if part_id not in scenes["insertion_parts"]:
+            self._md_status.content = (
+                f"**Status:** Part {part_id} is not in insertion_parts "
+                f"({scenes['insertion_parts']})."
+            )
+            return
+        p_idx = scenes["insertion_parts"].index(part_id)
 
         self._kill_subprocess()
 
         self._pending_assembly = assembly
         self._pending_part = part_id
-        self._pending_split = split
         self._pending_scene_idx = scene_idx
+        self._pending_start_idx = start_idx
 
         goal_mode = self._dd_goal_mode.value
         label = (
             f"{self._dd_policy.value} | "
-            f"{assembly} / scene {scene_idx} [{split}] / "
-            f"Part {part_id} / goals: {goal_mode}"
+            f"{assembly} / scene {scene_idx} / "
+            f"Part {part_id} / start {start_idx} / goals: {goal_mode}"
         )
         self._md_status.content = f"**Status:** Loading *{label}* ..."
         self._md_task.content = f"**Task:** {label}"
@@ -567,19 +597,21 @@ class MultiInitAssemblyDemo:
 
         self.robot.update_cfg(DEFAULT_DOF_POS)
 
-        table_urdf_rel = _table_urdf_rel(assembly, part_id, self.collision_method)
+        # Per-scene fixture URDF (pre-baked by generate_scenes.py, one per (p, n)).
+        table_urdf_rel = str(scenes["scene_urdf_paths"][p_idx, scene_idx])
 
-        # Extract per-scene start + goals and pass as extra overrides that
-        # supersede the pick_place.json values sim_worker normally loads.
-        start_pose, goals = _scene_start_and_goals(scenes, scene_idx, part_id)
+        # The new FabricaEnv loads scenes.npz itself and picks (part, scene, start)
+        # via forcePartIdx / forceSceneIdx / forceStartIdx. Pass those through as
+        # hydra overrides (and goalMode + assemblyName).
         scene_overrides = {
             **self.extra_overrides,
-            "task.env.objectStartPose": start_pose,
-            "task.env.fixedGoalStates": goals,
+            "task.env.assemblyName": assembly,
+            "task.env.scenesFilename": SCENES_FILENAME,
+            "task.env.forcePartIdx": p_idx,
+            "task.env.forceSceneIdx": scene_idx,
+            "task.env.forceStartIdx": start_idx,
+            "task.env.goalMode": _GOAL_MODE_CAMEL[goal_mode],
         }
-        mode_key = _GOAL_MODE_OVERRIDE_KEY.get(goal_mode)
-        if mode_key is not None:
-            scene_overrides[mode_key] = True
 
         # Chain arm state between parts in auto-sequence
         initial_arm_pos = None
@@ -644,15 +676,16 @@ class MultiInitAssemblyDemo:
             self._md_status.content = "**Status:** Auto-sequence cancelled."
 
     def _cmd_run_all(self):
+        """Iterate every insertion part (4 for beam) at the selected scene,
+        using the selected start_idx throughout."""
         assembly = self._dd_assembly.value
-        split = self._dd_split.value
         if assembly == self._PH or self._dd_scene.value == self._PH:
             self._md_status.content = "**Status:** Select assembly and scene first."
             return
         if self._episode_running:
             return
 
-        scenes = self._get_scenes(assembly, split)
+        scenes = self._get_scenes(assembly)
         if scenes is None:
             return
 
@@ -665,13 +698,14 @@ class MultiInitAssemblyDemo:
         self.ep_lengths.clear()
 
         scene_idx = int(self._dd_scene.value)
-        order = scenes["assembly_order"]
-        pid = order[0]
+        start_idx = int(self._dd_start.value) if self._dd_start.value != self._PH else 0
+        insertion_parts = scenes["insertion_parts"]
+        pid = insertion_parts[0]
         self._md_status.content = (
-            f"**Status:** Auto-sequence: step 1/{len(order)} (Part {pid})"
+            f"**Status:** Auto-sequence: step 1/{len(insertion_parts)} (Part {pid})"
         )
         self._load_env(assembly=assembly, part_id=pid,
-                       scene_idx=scene_idx, split=split)
+                       scene_idx=scene_idx, start_idx=start_idx)
 
     # -- Viz updates ----------------------------------------------------
 
@@ -702,6 +736,7 @@ class MultiInitAssemblyDemo:
             init_state = msg[1]
             self._setup_scene_objects(
                 self._pending_assembly, self._pending_scene_idx, self._pending_part,
+                start_idx=getattr(self, "_pending_start_idx", 0),
             )
             if len(init_state) > 3:
                 self._setup_keypoints(init_state[3].shape[0])
@@ -709,11 +744,11 @@ class MultiInitAssemblyDemo:
             self._env_ready = True
 
             if self._auto_seq_active:
-                scenes = self._get_scenes(self._pending_assembly, self._pending_split)
-                order = scenes["assembly_order"] if scenes else []
+                scenes = self._get_scenes(self._pending_assembly)
+                ins_parts = scenes["insertion_parts"] if scenes else []
                 step_num = self._auto_seq_step_idx + 1
                 self._md_status.content = (
-                    f"**Status:** Auto-seq: running step {step_num}/{len(order)} "
+                    f"**Status:** Auto-seq: running step {step_num}/{len(ins_parts)} "
                     f"(Part {self._pending_part})"
                 )
                 self._cmd_run()
@@ -791,22 +826,22 @@ class MultiInitAssemblyDemo:
                 self._auto_seq_results.append(
                     (self._pending_part, goal_pct, steps, retract_ok)
                 )
-                scenes = self._get_scenes(self._pending_assembly, self._pending_split)
-                order = scenes["assembly_order"] if scenes else []
+                scenes = self._get_scenes(self._pending_assembly)
+                ins_parts = scenes["insertion_parts"] if scenes else []
                 self._auto_seq_step_idx += 1
 
-                if self._auto_seq_step_idx < len(order):
-                    next_pid = order[self._auto_seq_step_idx]
+                if self._auto_seq_step_idx < len(ins_parts):
+                    next_pid = ins_parts[self._auto_seq_step_idx]
                     step_num = self._auto_seq_step_idx + 1
                     self._md_status.content = (
                         f"**Status:** Auto-seq: loading step "
-                        f"{step_num}/{len(order)} (Part {next_pid})..."
+                        f"{step_num}/{len(ins_parts)} (Part {next_pid})..."
                     )
                     self._load_env(
                         assembly=self._pending_assembly,
                         part_id=next_pid,
                         scene_idx=self._pending_scene_idx,
-                        split=self._pending_split,
+                        start_idx=getattr(self, "_pending_start_idx", 0),
                     )
                 else:
                     self._auto_seq_active = False

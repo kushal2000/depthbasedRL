@@ -258,6 +258,23 @@ class FabricaEnv(SimToolReal):
         self._si_env_part_idx = (combo_ids // N).astype(np.int64)
         self._si_env_scene_idx = (combo_ids % N).astype(np.int64)
 
+        # ── Optional override: pin all envs to a specific (part, scene) combo.
+        # Used by fabrica_multi_init_eval.py to drive a single (part, scene).
+        force_p = int(cfg["env"].get("forcePartIdx", -1))
+        force_n = int(cfg["env"].get("forceSceneIdx", -1))
+        if force_p >= 0:
+            assert 0 <= force_p < P, f"forcePartIdx={force_p} out of range [0, {P})"
+            self._si_env_part_idx[:] = force_p
+        if force_n >= 0:
+            assert 0 <= force_n < N, f"forceSceneIdx={force_n} out of range [0, {N})"
+            self._si_env_scene_idx[:] = force_n
+        if force_p >= 0 or force_n >= 0:
+            print(
+                f"[FabricaEnv] pinned (part_idx, scene_idx) = "
+                f"({force_p if force_p >= 0 else 'round-robin'}, "
+                f"{force_n if force_n >= 0 else 'round-robin'})"
+            )
+
         # Per-env table URDF path (length num_envs).
         self._mp_env_table_urdfs = [
             str(scene_urdf_paths[self._si_env_part_idx[i], self._si_env_scene_idx[i]])
@@ -812,10 +829,18 @@ class FabricaEnv(SimToolReal):
             # success_ratio metric pairing in compute_kuka_reward).
             self.prev_episode_env_max_goals[env_ids] = self.env_max_goals[env_ids]
 
-            # Sample a fresh start_idx ∈ [0, M) per env.
-            new_start = torch.randint(
-                0, self._si_m_starts, (len(env_ids),), device=self.device
-            )
+            # Sample a fresh start_idx ∈ [0, M) per env, unless pinned by
+            # forceStartIdx (used for eval). forceStartIdx is read every
+            # reset so the eval GUI can change it without rebuilding the env.
+            force_start = int(self.cfg["env"].get("forceStartIdx", -1))
+            if force_start >= 0:
+                new_start = torch.full(
+                    (len(env_ids),), force_start, dtype=torch.long, device=self.device
+                )
+            else:
+                new_start = torch.randint(
+                    0, self._si_m_starts, (len(env_ids),), device=self.device
+                )
             self._si_env_start_idx_t[env_ids] = new_start
 
             part_ids = self._si_env_part_idx_t[env_ids]

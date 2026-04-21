@@ -178,23 +178,36 @@ def _create_fabrica_env(config_path, headless, device, overrides):
     cfg = read_cfg_omegaconf(config_path=config_path, device=device)
     cfg = merge_cfg_with_default_config(cfg)
 
-    # Force FabricaEnv and inject its config keys
+    # Force FabricaEnv and inject its config keys (single-insertion schema).
     OmegaConf.set_struct(cfg, False)
     cfg.task.name = "FabricaEnv"
     cfg.task_name = "FabricaEnv"
     fabrica_defaults = {
+        # Retract
         "enableRetract": True,
         "retractDistanceThreshold": 0.1,
         "retractRewardScale": 1.0,
         "retractSuccessBonus": 0.0,
-        "multiPart": False,
-        "multiInitStates": False,
-        "finalGoalOnly": False,
-        "preInsertAndFinal": False,
-        "objectNames": None,
+        "retractSuccessTolerance": 0.005,
+        # Single-insertion scene source
+        "assemblyName": "beam_2x",
+        "scenesFilename": "scenes.npz",
+        "goalMode": "dense",
+        # Eval: pin to specific (part, scene, start) combo
+        "forcePartIdx": -1,
+        "forceSceneIdx": -1,
+        "forceStartIdx": -1,
+        # Force sensor + goal-XY obs noise
+        "withTableForceSensor": False,
+        "tableForceResetThreshold": 100.0,
+        "goalXyObsNoise": 0.002,
     }
     for k, v in fabrica_defaults.items():
         OmegaConf.update(cfg, f"task.env.{k}", v, force_add=True)
+    print(f"[_create_fabrica_env] fabrica_defaults injected; "
+          f"assemblyName={cfg.task.env.assemblyName!r}, "
+          f"forcePartIdx={cfg.task.env.forcePartIdx}, "
+          f"struct(task.env)={OmegaConf.is_struct(cfg.task.env)}")
 
     return create_env_from_cfg(
         cfg=cfg, headless=headless, overrides=overrides,
@@ -369,12 +382,26 @@ def sim_worker(conn, assembly, part_id, config_path, checkpoint_path, table_urdf
         base_name = f"{assembly}_{part_id}"
         obj_suffix = {"vhacd": "", "sdf": "_sdf", "coacd": "_coacd"}[collision_method]
         object_name = base_name + obj_suffix
+        # Legacy fabrica path used ``trajectories/{pid}/pick_place.json`` to
+        # seed start_pose + fixedGoalStates via overrides. The new
+        # single-insertion FabricaEnv loads everything from ``scenes.npz`` via
+        # forcePartIdx/SceneIdx/StartIdx, so pick_place.json is no longer
+        # required. Load it only if present (to keep the old path working).
         traj_path = ASSETS_DIR / assembly / "trajectories" / part_id / "pick_place.json"
+        traj_overrides: dict = {}
+        if traj_path.exists():
+            with open(traj_path) as f:
+                traj = json.load(f)
+            print(f"[sim_worker] start_pose (from pick_place.json): {traj['start_pose']}")
+            traj_overrides = {
+                "task.env.useFixedGoalStates": True,
+                "task.env.fixedGoalStates": traj["goals"],
+                "task.env.objectStartPose": traj["start_pose"],
+            }
+        else:
+            print(f"[sim_worker] no pick_place.json at {traj_path}; "
+                  f"start/goals will come from scenes.npz via FabricaEnv")
 
-        with open(traj_path) as f:
-            traj = json.load(f)
-
-        print(f"[sim_worker] start_pose: {traj['start_pose']}")
         print(f"[sim_worker] table_urdf: {table_urdf_rel}")
         print(f"[sim_worker] object_name: {object_name}")
         print(f"[sim_worker] task: FabricaEnv (forced)")
@@ -386,11 +413,9 @@ def sim_worker(conn, assembly, part_id, config_path, checkpoint_path, table_urdf
             overrides={
                 **BASE_OVERRIDES,
                 "task.env.objectName": object_name,
-                "task.env.useFixedGoalStates": True,
-                "task.env.fixedGoalStates": traj["goals"],
                 "task.env.asset.table": table_urdf_rel,
                 "task.env.tableResetZ": TABLE_Z,
-                "task.env.objectStartPose": traj["start_pose"],
+                **traj_overrides,
                 **({"task.env.finalGoalSuccessTolerance": final_goal_tolerance}
                    if final_goal_tolerance is not None else {}),
                 **({"task.env.useSDF": True} if collision_method == "sdf" else {}),

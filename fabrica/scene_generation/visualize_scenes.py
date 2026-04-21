@@ -216,6 +216,7 @@ def main():
         n = state["n"]
         m = state["m"]
         p = insertion_parts[p_idx]
+        wps = waypoints_for(p_idx, n, m)
 
         # Fixture parts = everything strictly before `p` in assembly_order.
         i_in_order = assembly_order.index(p)
@@ -260,9 +261,15 @@ def main():
         ))
         state["insert_frame"] = f
 
-        # Goal ghost (semi-transparent at the cached final waypoint).
-        wps = waypoints_for(p_idx, n, m)
-        gpos, gquat = wps[-1]
+        # Goal ghost — semi-transparent mesh at the user-selected trajectory
+        # waypoint (sl_goal). Range 0..L-1 where L = traj length for this
+        # (p, n, m). Slider default is the final waypoint.
+        L = int(traj_lengths[p_idx, n, m])
+        goal_idx = int(min(max(0, sl_goal.value), L - 1))
+        state["goal_idx"] = goal_idx
+        gp_xyzw = goals[p_idx, n, m, goal_idx]                      # (7,) xyzw
+        gpos = gp_xyzw[:3]
+        gquat = _qxyzw_to_wxyz(gp_xyzw[3:7])
         gf = server.scene.add_frame(
             "/goal_ghost",
             position=tuple(float(v) for v in gpos),
@@ -300,7 +307,8 @@ def main():
             f"- fixture: `{fixture_pids}` (receiver `{receiver}`)\n"
             f"- partial_assembly_offset: "
             f"`({offset[0]:+.3f}, {offset[1]:+.3f}, {offset[2]:+.3f})`\n"
-            f"- trajectory length: `{L}`\n"
+            f"- trajectory length: `{L}` · ghost waypoint: "
+            f"`{state.get('goal_idx', L - 1)}/{L - 1}`\n"
             f"- anim_t: `{state['anim_t']:.2f}`"
         )
 
@@ -369,6 +377,14 @@ def main():
     )
     sl_scene = server.gui.add_slider("Scene idx", 0, max(0, N - 1), 1, 0)
     sl_start = server.gui.add_slider("Start idx", 0, max(0, M - 1), 1, 0)
+    # Goal idx within the trajectory for THIS (part, scene, start): 0 is the
+    # first waypoint (lift), -1 (max) is the final assembled pose. The ghost
+    # mesh jumps to the selected waypoint so you can inspect the cached
+    # trajectory one step at a time. Range is clamped per (p, n, m) at render.
+    T_max = int(goals.shape[3])
+    sl_goal = server.gui.add_slider(
+        "Goal idx (ghost)", 0, max(0, T_max - 1), 1, max(0, T_max - 1),
+    )
     dur_slider = server.gui.add_slider(
         "Duration (s)", 0.2, 5.0, 0.1, 1.5,
     )
@@ -390,9 +406,13 @@ def main():
         state["m"] = int(sl_start.value)
         render_scene()
 
+    def _on_goal(_):
+        render_scene()
+
     dd_part.on_update(_on_part)
     sl_scene.on_update(_on_scene)
     sl_start.on_update(_on_start)
+    sl_goal.on_update(_on_goal)
 
     render_scene()
 

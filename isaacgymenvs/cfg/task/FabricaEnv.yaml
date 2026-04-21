@@ -29,6 +29,15 @@ env:
   withTableForceSensor: False          # off during training; eval tool flips to True
   tableForceResetThreshold: 100.0      # only consumed when withTableForceSensor=True
 
+  # ── Eval: pin to a specific (part, scene, start) combo ──────
+  # When any of these are >= 0, all envs use the pinned value instead of
+  # the round-robin assignment. Used by fabrica_multi_init_eval.py to drive
+  # a specific (insertion_part, scene_idx) with a specific start pose.
+  # Leave at -1 for training.
+  forcePartIdx: -1
+  forceSceneIdx: -1
+  forceStartIdx: -1
+
   # ── Goal observation noise ───────────────────────────────────
   # Per-episode XY offset (uniform in ±goalXyObsNoise) applied to every
   # goal waypoint observed by the actor only. Does NOT affect reward,

@@ -26,7 +26,9 @@ GOAL_MODE="preInsertAndFinal"
 GOAL_XY_OBS_NOISE=0.002    # ±2 mm (actor-only; see FabricaEnv.yaml)
 
 # ── Training Details ──────────────────────────────────────────
-CHECKPOINT=""
+# Warm-start from the SimToolReal grasping prior that peg-in-hole trains
+# with. Without this, from-scratch + full DR can't learn the grasp step.
+CHECKPOINT="/share/portal/kk837/depthbasedRL/pretrained_policy/model.pth"
 NUM_ENVS=24576
 MINIBATCH_SIZE=98304
 SEED=0
