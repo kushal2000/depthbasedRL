@@ -8,6 +8,7 @@
 
 #SBATCH --job-name=img80_depth_wrist_v9_u1
 #SBATCH --partition=move
+#SBATCH --nodelist=move4
 #SBATCH --account=move
 #SBATCH --time=24:00:00
 #SBATCH --gres=gpu:1
