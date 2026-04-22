@@ -219,6 +219,22 @@ For camera placement in cloned multi-env scenes:
 - camera translation is authored **env-locally** under each cloned env namespace
 - env origins provide the world translation offset automatically
 
+### Camera eval quirk: use `num_envs=4`, not `1`
+
+When running `distill.py --mode student_eval` with `--student_input camera`,
+we currently default single-env evals to `num_envs=4` unless you explicitly
+pass `--allow_single_env_camera_eval`.
+
+Why:
+
+- in local debugging, otherwise identical single-env camera evals produced
+  noticeably noisier raw wrist/RGB renders than multi-env evals
+- this showed up before preprocessing, so it was not a policy-input logging bug
+- the practical workaround is to evaluate with 4 envs and inspect env 0
+
+This is a renderer workaround, not an intended algorithmic requirement.
+Training configs are unchanged by this guard.
+
 For the real-camera `T_W_C` path, the current implementation uses a ROS optical
 camera convention:
 

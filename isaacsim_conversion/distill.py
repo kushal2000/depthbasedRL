@@ -1426,6 +1426,15 @@ def main():
         and settings.num_envs == 1
         and not args.allow_single_env_camera_eval
     ):
+        # Empirical Isaac Sim/Isaac Lab workaround:
+        # camera-based student evals, especially wrist RGB, render noticeably
+        # noisier in the single-env case than in otherwise identical multi-env
+        # evals. The policy input itself is fine; the raw source render changes.
+        # We therefore bump evals to 4 envs by default and inspect env 0.
+        #
+        # This is intentionally limited to student_eval so training behavior is
+        # unchanged. Pass --allow_single_env_camera_eval to reproduce the raw
+        # single-env behavior when debugging upstream renderer issues.
         _log(
             "Single-env camera student_eval produces noisier wrist/vision renders than multi-env eval in Isaac Sim. "
             "Bumping num_envs from 1 to 4 for evaluation stability. Pass --allow_single_env_camera_eval to disable."
