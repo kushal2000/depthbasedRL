@@ -173,6 +173,15 @@ def load_task_spec(
             repo_root / f"assets/urdf/peg_in_hole/scenes/scene_{peg_scene_idx:04d}/scene_tol{peg_tol_slot_idx:02d}.urdf"
         )
         obj_info = NAME_TO_OBJECT["peg"]
+        start_pose = start_poses[peg_scene_idx, peg_idx].astype(np.float32).copy()
+        table_reset_z = float(env_cfg.get("tableResetZ", 0.38))
+        table_object_z_offset = float(env_cfg.get("tableObjectZOffset", 0.25))
+        start_pose[2] = table_reset_z + table_object_z_offset
+        fixed_size = env_cfg.get("fixedSize")
+        if fixed_size is None:
+            object_scales = np.array([obj_info.scale], dtype=np.float32)
+        else:
+            object_scales = np.array([fixed_size], dtype=np.float32)
         target_tol = env_cfg.get("evalSuccessTolerance")
         if target_tol is None:
             target_tol = env_cfg.get("targetSuccessTolerance", 0.01)
@@ -182,8 +191,8 @@ def load_task_spec(
             table_urdf=table_urdf,
             object_urdf=str(obj_info.urdf_path),
             object_name="peg",
-            object_scales=np.array([obj_info.scale], dtype=np.float32),
-            start_pose=start_poses[peg_scene_idx, peg_idx].astype(np.float32),
+            object_scales=object_scales,
+            start_pose=start_pose,
             goals=[np.array(goal, dtype=np.float32) for goal in goal_seq],
             success_steps=success_steps,
             keypoint_tolerance=float(target_tol),
@@ -201,6 +210,8 @@ def load_task_spec(
                 "traj_len_before_truncation": traj_len,
                 "goal_mode": peg_goal_mode,
                 "num_goals": int(len(goal_seq)),
+                "fixed_size_keypoint_reward": bool(env_cfg.get("fixedSizeKeypointReward", False)),
+                "start_pose_z_world": float(start_pose[2]),
             },
         )
     else:
