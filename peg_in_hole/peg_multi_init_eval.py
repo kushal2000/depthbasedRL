@@ -28,6 +28,7 @@ from __future__ import annotations
 import argparse
 import json
 import multiprocessing
+import os
 import sys
 import time
 import traceback
@@ -44,6 +45,17 @@ sys.setrecursionlimit(max(sys.getrecursionlimit(), 10000))
 REPO_ROOT = Path(__file__).resolve().parent.parent
 ASSETS_DIR = REPO_ROOT / "assets" / "urdf" / "peg_in_hole"
 SCENES_NPZ = ASSETS_DIR / "scenes" / "scenes.npz"
+
+# The viser GUI launches Isaac Gym in a spawned subprocess. Make the repo root
+# explicit in both sys.path and PYTHONPATH so package imports like
+# ``peg_in_hole.objects`` work reliably in the child process as well.
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+os.environ["PYTHONPATH"] = (
+    f"{REPO_ROOT}{os.pathsep}{os.environ['PYTHONPATH']}"
+    if os.environ.get("PYTHONPATH")
+    else str(REPO_ROOT)
+)
 
 TABLE_Z = 0.38
 N_ACT = 29
@@ -322,6 +334,8 @@ def _sim_episode(conn, env, policy, joint_lower, joint_upper, device):
 def sim_worker(conn, config_path, checkpoint_path, scene_idx, tol_slot_idx,
                peg_idx, goal_mode, extra_overrides=None, headless=True):
     try:
+        if str(REPO_ROOT) not in sys.path:
+            sys.path.insert(0, str(REPO_ROOT))
         from isaacgym import gymapi  # noqa: F401 isort:skip
         import torch
         from deployment.rl_player import RlPlayer
