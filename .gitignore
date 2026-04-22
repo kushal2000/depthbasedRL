@@ -138,6 +138,7 @@ celerybeat.pid
 .env
 .envrc
 .venv
+.venv-*
 env/
 venv/
 ENV/
@@ -219,6 +220,9 @@ hardware_rollouts/
 train_dir/
 runs/
 wandb/
+distillation_runs/
+slurm_logs/
+rollout_videos/
 
 # Isaac Gym (proprietary, not redistributable)
 isaacgym

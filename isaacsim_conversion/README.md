@@ -13,16 +13,42 @@ Roll out pretrained Isaac Gym policies in Isaac Sim (via Isaac Lab) for visualiz
 
 ## Installation
 
-All commands assume you're in the repo root: `/share/portal/kk837/depthbasedRL`
+All commands assume you're in the repo root.
+
+This setup intentionally uses a separate environment from the Isaac Gym
+training environment in [docs/installation.md](../docs/installation.md).
+
+- Isaac Gym / training env: Python 3.8, usually `.venv`
+- Isaac Sim conversion env: Python 3.11, `.venv-isaacsim-py311`
+
+Do not delete or repurpose your Isaac Gym environment for this flow.
+
+To suppress the Omniverse EULA prompt in non-interactive runs:
+
+```bash
+export OMNI_KIT_ACCEPT_EULA=YES
+```
+
+The helper script `./scripts/run_in_isaacsim_env.sh` sets this automatically if
+you have not already set it.
+
+It also adds Isaac Lab's bundled source tree to `PYTHONPATH`, which is needed
+for imports such as `isaaclab.sim` in this pip-installed layout.
 
 ### 1. Create Python 3.11 venv
 
 ```bash
-uv venv .venv_isaacsim --python 3.11
-source .venv_isaacsim/bin/activate
+uv venv .venv-isaacsim-py311 --python 3.11
+source .venv-isaacsim-py311/bin/activate
 ```
 
 If Python 3.11 is not available: `uv python install 3.11`
+
+Or use the repo helper:
+
+```bash
+./scripts/setup_isaacsim_uv_env.sh
+```
 
 ### 2. Install PyTorch (CUDA 12.1)
 
@@ -36,7 +62,7 @@ Verify: `python -c "import torch; print(torch.__version__, torch.cuda.is_availab
 
 ```bash
 uv pip install -e ./rl_games/
-uv pip install omegaconf hydra-core "gym==0.23.1" scipy numpy yourdfpy
+uv pip install omegaconf hydra-core "gym==0.23.1" scipy numpy yourdfpy requests tqdm tyro
 ```
 
 **Do NOT** run `uv pip install -e .` — the project's pyproject.toml pins `numpy==1.23.0`, `isaacgym-stubs`, and `warp-lang==0.10.1` which conflict with Python 3.11 / Isaac Sim.
@@ -84,37 +110,257 @@ app.close()
 ## Quick reference: full install from scratch
 
 ```bash
-cd /share/portal/kk837/depthbasedRL
-uv venv .venv_isaacsim --python 3.11
-source .venv_isaacsim/bin/activate
+uv venv .venv-isaacsim-py311 --python 3.11
+source .venv-isaacsim-py311/bin/activate
 uv pip install torch --index-url https://download.pytorch.org/whl/cu121
 uv pip install -e ./rl_games/
-uv pip install omegaconf hydra-core "gym==0.23.1" scipy numpy yourdfpy
+uv pip install omegaconf hydra-core "gym==0.23.1" scipy numpy yourdfpy requests tqdm tyro
 uv pip install "isaaclab[isaacsim,all]==2.3.2.post1" --extra-index-url https://pypi.nvidia.com
 ```
+
+Helper-script equivalent:
+
+```bash
+./scripts/setup_isaacsim_uv_env.sh
+```
+
+## Policy checkpoints and data
+
+The environment setup does not automatically download policy or dataset assets.
+
+- If you want the repo's released pretrained policy, run:
+
+```bash
+./scripts/run_in_isaacsim_env.sh python download_pretrained_policy.py
+```
+
+This creates:
+
+```text
+pretrained_policy/config.yaml
+pretrained_policy/model.pth
+```
+
+- If you want to run a trained Fabrica policy, point `--checkpoint` at
+  `last/model.pth` or `best/model.pth` from your training run and `--config` at
+  the corresponding `config.yaml`.
+- DexToolBench data is documented in the main [README.md](../README.md), but it
+  is not required for the base Fabrica Isaac Sim rollout flow shown below.
 
 ## Usage
 
 ### Smoke test (inference only, no simulator)
 
 ```bash
-source .venv_isaacsim/bin/activate
+source .venv-isaacsim-py311/bin/activate
 PYTHONPATH=. python isaacsim_conversion/test_inference.py
+```
+
+Or without activating:
+
+```bash
+./scripts/run_in_isaacsim_env.sh python isaacsim_conversion/test_inference.py
 ```
 
 ### Full rollout (without video)
 
 ```bash
-source .venv_isaacsim/bin/activate
+source .venv-isaacsim-py311/bin/activate
 PYTHONPATH=. python isaacsim_conversion/rollout.py --headless --max_steps 700 \
     --checkpoint path/to/last/model.pth \
     --config path/to/config.yaml
 ```
 
+### DexToolBench rollout example
+
+```bash
+./scripts/run_in_isaacsim_env.sh python isaacsim_conversion/rollout.py \
+    --task_source dextoolbench \
+    --object_category hammer \
+    --object_name claw_hammer \
+    --task_name swing_down \
+    --max_steps 700 \
+    --checkpoint pretrained_policy/model.pth \
+    --config pretrained_policy/config.yaml
+```
+
+## Distillation
+
+The repo now includes a first-pass Isaac Sim distillation path for the fixed
+DexToolBench hammer task:
+
+- task: `hammer / claw_hammer / swing_down`
+- teacher: existing low-dimensional Isaac Gym policy
+- student default: mono transformer + recurrence
+- student modality default: `depth`
+- auxiliary head default: `object_pos`
+
+### Frame conventions and DEXTRAH reference
+
+This distillation path now follows the same important env-local convention used
+by DEXTRAH for auxiliary object position:
+
+- DEXTRAH env computes object position as:
+  - `object_pos = object.data.root_pos_w - scene.env_origins`
+- DEXTRAH then exposes that through:
+  - `aux_info["object_pos"]`
+- DEXTRAH's DAgger code consumes that env output directly as the auxiliary
+  supervision target.
+
+This repo mirrors that convention:
+
+- `object_pos` auxiliary target is **env-local world position**
+- it is **not** camera-relative
+- it is **not** robot-relative
+
+For camera placement in cloned multi-env scenes:
+
+- camera rotation is shared across envs
+- camera translation is authored **env-locally** under each cloned env namespace
+- env origins provide the world translation offset automatically
+
+For the real-camera `T_W_C` path, the current implementation uses a ROS optical
+camera convention:
+
+- `convention="ros"`
+- right: `+X`
+- down: `+Y`
+- forward: `+Z`
+
+The source of truth is the raw calibrated transform in
+`isaacsim_conversion/task_utils.py`.
+
+### Camera sanity check
+
+This uses the real-camera-inspired `T_W_R @ T_R_C` pose from the planning work
+and saves RGB/depth snapshots under `distillation_runs/.../camera_debug/`.
+
+```bash
+./scripts/run_in_isaacsim_env.sh python isaacsim_conversion/camera_debug.py \
+    --mode camera_debug \
+    --headless \
+    --camera_config isaacsim_conversion/configs/hammer_camera.yaml
+```
+
+### Teacher-only baseline
+
+```bash
+./scripts/run_in_isaacsim_env.sh python isaacsim_conversion/distill_eval.py \
+    --mode teacher_eval \
+    --headless \
+    --teacher_checkpoint pretrained_policy/model.pth \
+    --teacher_config pretrained_policy/config.yaml
+```
+
+### Student training
+
+```bash
+./scripts/run_in_isaacsim_env.sh python isaacsim_conversion/distill.py \
+    --mode train \
+    --headless \
+    --teacher_checkpoint pretrained_policy/model.pth \
+    --teacher_config pretrained_policy/config.yaml \
+    --camera_config isaacsim_conversion/configs/hammer_camera.yaml \
+    --distill_config isaacsim_conversion/configs/hammer_distill.yaml \
+    --wandb
+```
+
+By default this writes to:
+
+```text
+distillation_runs/<timestamped_run>/
+  resolved_distill_config.yaml
+  metrics.csv
+  checkpoints/student_latest.pt
+  checkpoints/student_best.pt
+  camera_debug/
+```
+
+### Cluster usage
+
+For cluster runs on shared storage, use:
+
+- shared repo clone under `/move/u/$USER/github_repos/depthbasedRL`
+- repo-local Isaac Sim env `.venv-isaacsim-py311`
+- `OMNI_KIT_CACHE_PATH=/tmp/$USER_ov_cache`
+
+Bootstrap on an allocated node with:
+
+```bash
+./scripts/cluster/bootstrap_cluster_isaacsim.sh
+```
+
+Then launch the long teacher-observation distillation run with:
+
+```bash
+sbatch scripts/cluster/sbatch_distill_teacher_obs_l40s.sh
+```
+
+And evaluate a saved student checkpoint with:
+
+```bash
+sbatch --export=CHECKPOINT=distillation_runs/<run>/checkpoints/student_best.pt \
+  scripts/cluster/sbatch_student_eval_l40s.sh
+```
+
+Training defaults in `hammer_distill.yaml` now use:
+
+- depth images
+- `mono_transformer_recurrent`
+- `beta_mode: fixed_decay`
+- `beta_decay: 0.1`
+- randomized object starts
+
+During training, the script now also:
+
+- logs a one-time `teacher_eval_baseline`
+- runs periodic `student_eval` every `eval_interval` episodes
+- writes all of those rows into `metrics.csv`
+- optionally logs them to Weights & Biases with `--wandb`
+
+### Student evaluation
+
+```bash
+./scripts/run_in_isaacsim_env.sh python isaacsim_conversion/distill_eval.py \
+    --mode student_eval \
+    --headless \
+    --student_checkpoint distillation_runs/<run>/checkpoints/student_best.pt \
+    --teacher_checkpoint pretrained_policy/model.pth \
+    --teacher_config pretrained_policy/config.yaml
+```
+
+You can override the beta schedule from the CLI without editing YAML:
+
+```bash
+--beta_mode fixed_decay --beta_start 1.0 --beta_end 0.0 --beta_decay 0.1
+```
+
+### Quick ablations
+
+Disable auxiliary object-position loss:
+
+```bash
+./scripts/run_in_isaacsim_env.sh python isaacsim_conversion/distill.py \
+    --mode train \
+    --headless \
+    --distill_config isaacsim_conversion/configs/hammer_distill.yaml \
+    --student_modality depth
+```
+
+Then set `aux_object_pos_weight: 0.0` in
+`isaacsim_conversion/configs/hammer_distill.yaml`.
+
+Try RGB or RGB-D instead of depth:
+
+```bash
+--student_modality rgb
+--student_modality rgbd
+```
+
 ### Full rollout with video recording
 
 ```bash
-source .venv_isaacsim/bin/activate
+source .venv-isaacsim-py311/bin/activate
 # Kill any lingering Isaac Sim processes first!
 ps aux | grep "python.*isaacsim\|python.*rollout" | grep -v grep | awk '{print $2}' | xargs kill 2>/dev/null
 

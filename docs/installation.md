@@ -11,6 +11,8 @@ curl -LsSf https://astral.sh/uv/install.sh | sh
 ## Main Environment
 
 We use Isaac Gym for policy learning in simulation, which requires Python 3.8.
+This is the existing Isaac Gym environment and should remain separate from the
+Isaac Sim conversion environment.
 
 ```bash
 # Create a virtual environment with Python 3.8
@@ -34,6 +36,15 @@ cd rl_games
 uv pip install -e .
 cd -
 ```
+
+## Isaac Sim Conversion Environment
+
+Use a separate Python 3.11 environment for `isaacsim_conversion`. Do not reuse
+the Isaac Gym `.venv` because the Isaac Sim stack conflicts with root package
+pins used by the Python 3.8 Isaac Gym workflow.
+
+See [isaacsim_conversion/README.md](../isaacsim_conversion/README.md) for the
+full setup and usage instructions.
 
 ## Sim2Real Env
 
