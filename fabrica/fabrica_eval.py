@@ -34,6 +34,14 @@ from fabrica.viser_utils import COLORS
 
 sys.setrecursionlimit(max(sys.getrecursionlimit(), 10000))
 
+# Goal modes map to config overrides read by FabricaEnv.
+# Mirrored in fabrica_multi_init_eval.py to avoid a circular import.
+GOAL_MODES = ["dense", "final_only", "pre_insert_and_final"]
+_GOAL_MODE_OVERRIDE_KEY = {
+    "final_only": "task.env.finalGoalOnly",
+    "pre_insert_and_final": "task.env.preInsertAndFinal",
+}
+
 # ===================================================================
 # Constants (lightweight -- no isaacgym imports)
 # ===================================================================
@@ -170,20 +178,36 @@ def _create_fabrica_env(config_path, headless, device, overrides):
     cfg = read_cfg_omegaconf(config_path=config_path, device=device)
     cfg = merge_cfg_with_default_config(cfg)
 
-    # Force FabricaEnv and inject its config keys
+    # Force FabricaEnv and inject its config keys (single-insertion schema).
     OmegaConf.set_struct(cfg, False)
     cfg.task.name = "FabricaEnv"
     cfg.task_name = "FabricaEnv"
     fabrica_defaults = {
+        # Retract
         "enableRetract": True,
         "retractDistanceThreshold": 0.1,
         "retractRewardScale": 1.0,
         "retractSuccessBonus": 0.0,
-        "multiPart": False,
-        "objectNames": None,
+        "retractSuccessTolerance": 0.005,
+        # Single-insertion scene source
+        "assemblyName": "beam_2x",
+        "scenesFilename": "scenes.npz",
+        "goalMode": "dense",
+        # Eval: pin to specific (part, scene, start) combo
+        "forcePartIdx": -1,
+        "forceSceneIdx": -1,
+        "forceStartIdx": -1,
+        # Force sensor + goal-XY obs noise
+        "withTableForceSensor": False,
+        "tableForceResetThreshold": 100.0,
+        "goalXyObsNoise": 0.002,
     }
     for k, v in fabrica_defaults.items():
         OmegaConf.update(cfg, f"task.env.{k}", v, force_add=True)
+    print(f"[_create_fabrica_env] fabrica_defaults injected; "
+          f"assemblyName={cfg.task.env.assemblyName!r}, "
+          f"forcePartIdx={cfg.task.env.forcePartIdx}, "
+          f"struct(task.env)={OmegaConf.is_struct(cfg.task.env)}")
 
     return create_env_from_cfg(
         cfg=cfg, headless=headless, overrides=overrides,
@@ -265,6 +289,8 @@ def _sim_episode(conn, env, policy, joint_lower, joint_upper, device,
     step, done, paused = 0, False, False
     retract_ok = False  # Track across the episode (reset clears the tensor)
     last_arm_pos = None
+    cum_total = 0.0
+    cum_breakdown: dict = {}
 
     while not done:
         while conn.poll(0):
@@ -297,6 +323,19 @@ def _sim_episode(conn, env, policy, joint_lower, joint_upper, device,
         if env.extras.get("retract_success_ratio", 0) > 0.5:
             retract_ok = True
 
+        # Accumulate per-step reward + per-term breakdown from env.extras
+        cum_total += float(env.rew_buf[0].item())
+        step_ec = env.extras.get("episode_cumulative", {}) or {}
+        for _k, _v in step_ec.items():
+            try:
+                _val = float(_v[0].item()) if hasattr(_v, "__len__") else float(_v.item())
+            except Exception:
+                try:
+                    _val = float(_v)
+                except Exception:
+                    continue
+            cum_breakdown[_k] = cum_breakdown.get(_k, 0.0) + _val
+
         if record_video:
             frame = _capture_frame(env)
             if frame is not None:
@@ -311,6 +350,8 @@ def _sim_episode(conn, env, policy, joint_lower, joint_upper, device,
             env.max_consecutive_successes,
             step,
             float(env.keypoints_max_dist[0].item()),
+            cum_total,
+            dict(cum_breakdown),
         ))
 
         elapsed = time.time() - t0
@@ -341,12 +382,26 @@ def sim_worker(conn, assembly, part_id, config_path, checkpoint_path, table_urdf
         base_name = f"{assembly}_{part_id}"
         obj_suffix = {"vhacd": "", "sdf": "_sdf", "coacd": "_coacd"}[collision_method]
         object_name = base_name + obj_suffix
+        # Legacy fabrica path used ``trajectories/{pid}/pick_place.json`` to
+        # seed start_pose + fixedGoalStates via overrides. The new
+        # single-insertion FabricaEnv loads everything from ``scenes.npz`` via
+        # forcePartIdx/SceneIdx/StartIdx, so pick_place.json is no longer
+        # required. Load it only if present (to keep the old path working).
         traj_path = ASSETS_DIR / assembly / "trajectories" / part_id / "pick_place.json"
+        traj_overrides: dict = {}
+        if traj_path.exists():
+            with open(traj_path) as f:
+                traj = json.load(f)
+            print(f"[sim_worker] start_pose (from pick_place.json): {traj['start_pose']}")
+            traj_overrides = {
+                "task.env.useFixedGoalStates": True,
+                "task.env.fixedGoalStates": traj["goals"],
+                "task.env.objectStartPose": traj["start_pose"],
+            }
+        else:
+            print(f"[sim_worker] no pick_place.json at {traj_path}; "
+                  f"start/goals will come from scenes.npz via FabricaEnv")
 
-        with open(traj_path) as f:
-            traj = json.load(f)
-
-        print(f"[sim_worker] start_pose: {traj['start_pose']}")
         print(f"[sim_worker] table_urdf: {table_urdf_rel}")
         print(f"[sim_worker] object_name: {object_name}")
         print(f"[sim_worker] task: FabricaEnv (forced)")
@@ -358,11 +413,9 @@ def sim_worker(conn, assembly, part_id, config_path, checkpoint_path, table_urdf
             overrides={
                 **BASE_OVERRIDES,
                 "task.env.objectName": object_name,
-                "task.env.useFixedGoalStates": True,
-                "task.env.fixedGoalStates": traj["goals"],
                 "task.env.asset.table": table_urdf_rel,
                 "task.env.tableResetZ": TABLE_Z,
-                "task.env.objectStartPose": traj["start_pose"],
+                **traj_overrides,
                 **({"task.env.finalGoalSuccessTolerance": final_goal_tolerance}
                    if final_goal_tolerance is not None else {}),
                 **({"task.env.useSDF": True} if collision_method == "sdf" else {}),
@@ -414,19 +467,28 @@ def sim_worker(conn, assembly, part_id, config_path, checkpoint_path, table_urdf
 
 class AssemblyDemo:
 
-    def __init__(self, config_path: str, checkpoint_path: str, port: int = 8082,
+    def __init__(self, policies: dict, port: int = 8082,
                  final_goal_tolerance: float = None, collision_method: str = "vhacd",
                  extra_overrides: dict = None, headless: bool = True,
-                 record_video: bool = False, video_dir: str = None):
+                 record_video: bool = False, video_dir: str = None,
+                 goal_mode: str = "dense",
+                 initial_policy: str = None):
+        if goal_mode not in GOAL_MODES:
+            raise ValueError(f"goal_mode must be one of {GOAL_MODES}, got {goal_mode}")
+        if not policies:
+            raise ValueError("policies dict must be non-empty")
+        self.policies = policies
+        if initial_policy is None or initial_policy not in policies:
+            initial_policy = next(iter(policies))
+        self.initial_policy = initial_policy
         self.port = port
-        self.config_path = config_path
-        self.checkpoint_path = checkpoint_path
         self.final_goal_tolerance = final_goal_tolerance
         self.collision_method = collision_method
         self.record_video = record_video
         self.video_dir = video_dir or str(REPO_ROOT / "eval_videos")
         self.extra_overrides = extra_overrides or {}
         self.headless = headless
+        self.goal_mode = goal_mode
         self.server = viser.ViserServer(host="0.0.0.0", port=port)
 
         self._proc = None  # type: Optional[multiprocessing.Process]
@@ -473,12 +535,19 @@ class AssemblyDemo:
 
         _PH = "-- Select --"
         with self.server.gui.add_folder("Assembly Selection", expand_by_default=True):
+            self._dd_policy = self.server.gui.add_dropdown(
+                "Policy", options=list(self.policies.keys()),
+                initial_value=self.initial_policy,
+            )
             assemblies = [_PH] + list(self._assembly_parts.keys())
             self._dd_assembly = self.server.gui.add_dropdown(
                 "Assembly", options=assemblies, initial_value=_PH,
             )
             self._dd_part = self.server.gui.add_dropdown(
                 "Part", options=[_PH], initial_value=_PH,
+            )
+            self._dd_goal_mode = self.server.gui.add_dropdown(
+                "Goal Mode", options=GOAL_MODES, initial_value=self.goal_mode,
             )
             self._btn_load = self.server.gui.add_button("Load Environment")
             self._btn_load.on_click(lambda _: self._load_env())
@@ -508,6 +577,7 @@ class AssemblyDemo:
             self._md_stats = self.server.gui.add_markdown("**Stats:** No episodes yet")
             self._md_obj = self.server.gui.add_markdown("**Object Pos:** --")
             self._md_dist = self.server.gui.add_markdown("**Dist to Goal:** --")
+            self._md_reward = self.server.gui.add_markdown("**Cum Reward:** --")
 
     def _on_assembly_change(self):
         assembly = self._dd_assembly.value
@@ -738,7 +808,12 @@ class AssemblyDemo:
         self._pending_assembly = assembly
         self._pending_part = part_id
 
-        label = f"{assembly} / Part {part_id}"
+        goal_mode = self._dd_goal_mode.value
+        policy_name = self._dd_policy.value
+        config_path, checkpoint_path = self.policies[policy_name]
+        label = (
+            f"{policy_name} | {assembly} / Part {part_id} / goals: {goal_mode}"
+        )
         self._md_status.content = f"**Status:** Loading *{label}* ..."
         self._md_task.content = f"**Task:** {label}"
         self._md_retract.content = "**Retract:** --"
@@ -768,14 +843,19 @@ class AssemblyDemo:
         if self._auto_seq_active and self._auto_seq_step_idx > 0 and self._last_arm_pos is not None:
             initial_arm_pos = self._last_arm_pos
 
+        scene_overrides = dict(self.extra_overrides)
+        mode_key = _GOAL_MODE_OVERRIDE_KEY.get(goal_mode)
+        if mode_key is not None:
+            scene_overrides[mode_key] = True
+
         ctx = multiprocessing.get_context("spawn")
         parent_conn, child_conn = ctx.Pipe()
         self._conn = parent_conn
         self._proc = ctx.Process(
             target=sim_worker,
             args=(child_conn, assembly, part_id,
-                  self.config_path, self.checkpoint_path, table_urdf_rel,
-                  self.final_goal_tolerance, self.collision_method, self.extra_overrides,
+                  config_path, checkpoint_path, table_urdf_rel,
+                  self.final_goal_tolerance, self.collision_method, scene_overrides,
                   self.headless, self.record_video, self.video_dir, initial_arm_pos),
             daemon=True,
         )
@@ -894,6 +974,8 @@ class AssemblyDemo:
         elif tag == "state":
             state, successes, max_succ, step = msg[1], msg[2], msg[3], msg[4]
             dist_to_goal = msg[5] if len(msg) > 5 else None
+            cum_total = msg[6] if len(msg) > 6 else None
+            cum_breakdown = msg[7] if len(msg) > 7 else None
             self._update_viz(state)
             pct = 100 * successes / max_succ if max_succ > 0 else 0
             self._md_prog.content = (
@@ -906,6 +988,20 @@ class AssemblyDemo:
             )
             if dist_to_goal is not None:
                 self._md_dist.content = f"**Dist to Goal:** {dist_to_goal:.4f}"
+            if cum_total is not None:
+                lines = [f"**Cum Reward:** {cum_total:.1f}"]
+                if cum_breakdown:
+                    order = [
+                        "lifting_rew", "lift_bonus_rew",
+                        "keypoint_rew", "bonus_rew",
+                        "fingertip_delta_rew",
+                        "kuka_actions_penalty", "hand_actions_penalty",
+                        "retract_rew",
+                    ]
+                    for _k in order:
+                        if _k in cum_breakdown:
+                            lines.append(f"&nbsp;&nbsp;{_k}: {cum_breakdown[_k]:.1f}")
+                self._md_reward.content = "\n\n".join(lines)
 
             # Retract status from state tuple
             if len(state) >= 8:
@@ -1022,8 +1118,19 @@ class AssemblyDemo:
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Fabrica Assembly Evaluation with Retract")
     parser.add_argument("--port", type=int, default=8080)
-    parser.add_argument("--config-path", type=str, default="pretrained_policy/config.yaml")
-    parser.add_argument("--checkpoint-path", type=str, default="pretrained_policy/model.pth")
+    parser.add_argument("--policies-dir", type=str, default=None,
+                        help="Directory of policy subfolders (each with "
+                             "config.yaml + model.pth). Populates the Policy "
+                             "dropdown. Takes precedence over --config-path; "
+                             "combine with --policies to filter a subset.")
+    parser.add_argument("--policies", nargs="+", default=None,
+                        help="Policy names (filters --policies-dir).")
+    parser.add_argument("--initial-policy", type=str, default=None,
+                        help="Policy name to pre-select in the dropdown.")
+    parser.add_argument("--config-path", type=str, default="pretrained_policy/config.yaml",
+                        help="Single-policy fallback when --policies-dir is not used.")
+    parser.add_argument("--checkpoint-path", type=str, default="pretrained_policy/model.pth",
+                        help="Single-policy fallback when --policies-dir is not used.")
     parser.add_argument("--final-goal-tolerance", type=float, default=None,
                         help="Tighter tolerance for the last subgoal in fixedGoalStates")
     parser.add_argument("--collision", choices=["vhacd", "coacd", "sdf"],
@@ -1035,6 +1142,9 @@ if __name__ == "__main__":
                         help="Record video of each episode from IsaacGym camera")
     parser.add_argument("--video-dir", type=str, default=None,
                         help="Directory for recorded videos (default: eval_videos/)")
+    parser.add_argument("--goal-mode", choices=GOAL_MODES, default="dense",
+                        help="Initial goal-trajectory mode "
+                             "(runtime-changeable via the viser dropdown)")
     parser.add_argument("--override", nargs=2, action="append", default=[],
                         metavar=("KEY", "VALUE"),
                         help="Extra config overrides, e.g. --override task.sim.physx.num_position_iterations 32")
@@ -1064,9 +1174,32 @@ if __name__ == "__main__":
             val = False
         extra_overrides[key] = val
 
+    policies = {}
+    if args.policies_dir is not None:
+        pdir = Path(args.policies_dir)
+        if not pdir.is_absolute():
+            pdir = REPO_ROOT / pdir
+        if not pdir.exists():
+            raise FileNotFoundError(f"--policies-dir not found: {pdir}")
+        name_filter = set(args.policies) if args.policies else None
+        for sub in sorted(pdir.iterdir()):
+            if name_filter is not None and sub.name not in name_filter:
+                continue
+            cfg = sub / "config.yaml"
+            ckpt = sub / "model.pth"
+            if cfg.exists() and ckpt.exists():
+                policies[sub.name] = (str(cfg), str(ckpt))
+        if not policies:
+            raise FileNotFoundError(
+                f"No policy subfolders in {pdir} "
+                f"(each needs config.yaml + model.pth)"
+            )
+    else:
+        name = Path(args.config_path).parent.name or "policy"
+        policies[name] = (_resolve(args.config_path), _resolve(args.checkpoint_path))
+
     AssemblyDemo(
-        config_path=_resolve(args.config_path),
-        checkpoint_path=_resolve(args.checkpoint_path),
+        policies=policies,
         port=args.port,
         final_goal_tolerance=args.final_goal_tolerance,
         collision_method=args.collision,
@@ -1074,4 +1207,6 @@ if __name__ == "__main__":
         headless=not args.no_headless,
         record_video=args.record_video,
         video_dir=args.video_dir,
+        goal_mode=args.goal_mode,
+        initial_policy=args.initial_policy,
     ).run()

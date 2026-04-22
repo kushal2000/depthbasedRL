@@ -137,6 +137,33 @@ env:
   capture_video_len: 600
   capture_video_collision_geometry: True  # Also record a collision-geometry video alongside the visual one
 
+  # Interactive 3D viewer: pose-based, no camera sensors needed (works headless)
+  # Logs wandb.Html alongside the wandb.Video so both can be compared side-by-side
+  capture_viewer: True
+  capture_viewer_freq: 6_000   # same cadence as video
+  capture_viewer_len: 600
+
+  # Base URL for GitHub raw URDF fetching in the interactive viewer.
+  # The browser resolves mesh paths relative to this, so it must point to a commit
+  # where all referenced URDF + mesh files exist and are accessible.
+  #
+  # "" (empty string, default) → auto-derive from `git rev-parse HEAD` so the URL
+  #     always points to your current pushed commit.  Falls back to /main/ if git
+  #     is unavailable.
+  #
+  # Typical overrides:
+  #   main branch:     "https://raw.githubusercontent.com/tylerlum/simtoolreal/main/"
+  #   specific commit: "https://raw.githubusercontent.com/tylerlum/simtoolreal/abc123def456/"
+  #   specific branch: "https://raw.githubusercontent.com/tylerlum/simtoolreal/my-branch/"
+  capture_viewer_github_raw_base: ""
+
+  # What to do when a URDF URL is unreachable (checked with an HTTP HEAD request):
+  #   "warn"  (default) — print a loud warning box but continue; HTML still generated,
+  #                        mesh just won't load in the browser
+  #   "error"           — raise ValueError and abort the capture
+  #   "skip"            — do not check at all (use when no internet access)
+  capture_viewer_url_check: "warn"
+
   turn_off_extra_obs: False
   turn_off_extra_obs_slowly: False
 
@@ -151,6 +178,11 @@ env:
   init_tyler_curriculum_scale: 0.0
   VISUALIZE_PD_TARGET_AS_BLUE_ROBOT: False
   withTableForceSensor: False
+  # Newtons on the smoothed table+hole sensor. An episode resets when the
+  # peak-so-far crosses this. Only active when withTableForceSensor=True.
+  # NOTE: at the default TGS num_position_iterations=8, the sensor reads
+  # ~8× the physical force, so 100 N here ≈ 12.5 N real.
+  tableForceResetThreshold: 100.0
   curriculumSuccessRatio: 0.6
   resetWhenDropped: False
   timeToUpdateTylerCurriculum: 5

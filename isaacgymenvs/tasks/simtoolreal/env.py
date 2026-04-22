@@ -87,6 +87,24 @@ def assert_equals(a, b):
     assert a == b, f"a: {a}, b: {b}"
 
 
+from dataclasses import dataclass as _dataclass
+
+
+@_dataclass
+class ViewerFrame:
+    """One timestep of state for the interactive 3D viewer.
+
+    All poses use Isaac Gym's [x, y, z, qx, qy, qz, qw] layout (xyzw quaternion).
+    This matches viewer_api.py's expected format and Three.js's quaternion.set(x,y,z,w).
+    """
+
+    robot_joint_pos: np.ndarray  # (J,) joint positions in radians
+    robot_base_pose: np.ndarray  # (7,) [x, y, z, qx, qy, qz, qw]
+    object_pose: np.ndarray  # (7,) [x, y, z, qx, qy, qz, qw]
+    goal_pose: Optional[np.ndarray]  # (7,) or None if no goal object
+    table_pose: np.ndarray  # (7,) [x, y, z, qx, qy, qz, qw]
+
+
 class SimToolReal(VecTask):
     def __init__(
         self,
@@ -2300,6 +2318,29 @@ class SimToolReal(VecTask):
 
         self._after_envs_created()
 
+        # Save the URDF text for the object assigned to index_to_view BEFORE the
+        # temp dir is deleted.  _finalize_viewer_capture() uses this to embed the
+        # object inline via make_embedded_robot (safe: these URDFs are pure primitives —
+        # <box>/<cylinder> only, no mesh file references).
+        # index_to_view is set after super().__init__ returns (line 392), so use
+        # getattr with default 0 — it is always 0 at env creation time anyway.
+        viewer_obj_idx = getattr(self, "index_to_view", 0) % len(self.object_asset_files)
+        _obj_path = Path(self.object_asset_files[viewer_obj_idx])
+        self.viewer_object_urdf_text: Optional[str] = (
+            _obj_path.read_text() if _obj_path.exists() else None
+        )
+        if self.viewer_object_urdf_text is not None:
+            print(
+                f"[viewer] Saved object URDF text ({len(self.viewer_object_urdf_text)} bytes) "
+                f"for index_to_view={viewer_obj_idx} "
+                f"(object_asset_files[{viewer_obj_idx}] = {_obj_path.name})"
+            )
+        else:
+            print(
+                f"[viewer] Could not save object URDF text — "
+                f"file not found: {_obj_path}"
+            )
+
         try:
             # by this point we don't need the temporary folder for procedurally generated assets
             tmp_assets_dir.cleanup()
@@ -2473,9 +2514,11 @@ class SimToolReal(VecTask):
         )
 
         if self.with_table_force_sensor:
-            TABLE_FORCE_THRESHOLD = 100.0
+            table_force_threshold = float(
+                self.cfg["env"].get("tableForceResetThreshold", 100.0)
+            )
             table_force_too_high = torch.where(
-                self.max_table_sensor_force_norm_smoothed > TABLE_FORCE_THRESHOLD,
+                self.max_table_sensor_force_norm_smoothed > table_force_threshold,
                 ones,
                 zeros,
             )
@@ -4628,6 +4671,7 @@ class SimToolReal(VecTask):
 
         self._capture_video_if_needed()
         self._viser_viz_step_if_needed()
+        self._capture_viewer_if_needed()
 
         if self.viewer and self.debug_viz:
             # draw axes on target object
@@ -4916,6 +4960,27 @@ class SimToolReal(VecTask):
         #   Case 3: self.video_frames = [np.array(frame) for frame in ...]
         #     * These are image frames that will be assembled into a video when enough frames are capture
         self.video_frames: Optional[List[np.ndarray]] = None
+
+        # self.viewer_state_frames mirrors self.video_frames but stores pose data instead of pixels.
+        # 4-state machine:
+        #   None                → not capturing
+        #   [] + _seen=False    → armed, waiting to observe the episode-ending reset_buf==1
+        #   [] + _seen=True     → reset observed; next step (after reset_idx) is the real ep start
+        #   [ViewerFrame, ...]  → actively capturing; finalized when len == capture_viewer_len
+        self.viewer_state_frames: Optional[List[ViewerFrame]] = None
+        self._viewer_seen_episode_reset: bool = False  # True once reset_buf==1 has been observed while armed
+
+        # Guard: the interactive viewer URDF URL is hardcoded for this robot.
+        # Raise early if a different robot asset is configured.
+        _expected_robot = "urdf/kuka_sharpa_description/iiwa14_left_sharpa_adjusted_restricted.urdf"
+        _configured_robot = self.cfg["env"]["asset"].get("robot", "")
+        if self.cfg["env"].get("capture_viewer", False) and _configured_robot != _expected_robot:
+            raise ValueError(
+                f"capture_viewer=True requires robot asset '{_expected_robot}', "
+                f"but cfg['env']['asset']['robot'] = '{_configured_robot}'. "
+                f"Update the ROBOT_URDF_URL in _finalize_viewer_capture() or set capture_viewer=False."
+            )
+
         self.gym.set_camera_location(
             self.camera_handle, self.envs[self.index_to_view], cam_pos, cam_target
         )
@@ -5168,6 +5233,449 @@ class SimToolReal(VecTask):
         frame = frame.copy()
         frame[:, :, :3] = rgb
         return frame
+
+    # ──────────────────────────────────────────────────────────────────────
+    # Interactive 3D viewer capture (pose-based, no camera sensors needed)
+    # Mirrors the _capture_video_if_needed / _capture_video 3-state machine.
+    # ──────────────────────────────────────────────────────────────────────
+
+    def _capture_viewer_if_needed(self) -> None:
+        if not self.cfg["env"].get("capture_viewer", False):
+            return
+
+        # State 1 → 2: arm the capture when the frequency check fires.
+        if (
+            self.viewer_state_frames is None
+            and self.control_steps % self.cfg["env"]["capture_viewer_freq"] == 0
+        ):
+            print("-" * 80)
+            print(
+                f"At self.control_steps = {self.control_steps}, "
+                "arming interactive viewer capture (waiting for episode reset)"
+            )
+            print("-" * 80)
+            self.viewer_state_frames = []
+            self._viewer_seen_episode_reset = False
+            return
+
+        if self.viewer_state_frames is None:
+            return  # not armed
+
+        # State 2 → 3: observe the episode-ending reset (reset_buf==1 = end of episode,
+        # before reset_idx has been called).  Do NOT capture this frame — it is the
+        # final state of the PREVIOUS episode and would appear as a jarring jump.
+        if (
+            len(self.viewer_state_frames) == 0
+            and not self._viewer_seen_episode_reset
+            and self.reset_buf[self.index_to_view].item() == 1
+        ):
+            self._viewer_seen_episode_reset = True
+            return
+
+        # State 3 → 4 (start): one step after the reset was observed.
+        # pre_physics_step of the CURRENT step already called reset_idx, which set
+        # arm_hand_dof_pos to the new initial configuration.
+        # We do NOT re-check reset_buf here — even if the object falls again immediately
+        # (reset_buf==1 again by the end of this step), we still want to start capturing
+        # from this new-episode initial state.
+        should_start_now = (
+            len(self.viewer_state_frames) == 0
+            and self._viewer_seen_episode_reset
+        )
+        capture_in_progress = len(self.viewer_state_frames) > 0
+
+        if should_start_now or capture_in_progress:
+            self._capture_viewer_frame(capture_in_progress)
+
+    def _capture_viewer_frame(self, capture_in_progress: bool) -> None:
+        assert self.viewer_state_frames is not None
+        if not capture_in_progress:
+            print("-" * 80)
+            print("Starting interactive viewer capture...")
+            print("-" * 80)
+
+        i = self.index_to_view
+        frame = ViewerFrame(
+            robot_joint_pos=self.arm_hand_dof_pos[i].cpu().numpy(),
+            robot_base_pose=self.root_state_tensor[self.robot_indices[i], 0:7].cpu().numpy(),
+            object_pose=self.object_state[i, 0:7].cpu().numpy(),
+            goal_pose=(
+                self.goal_states[i, 0:7].cpu().numpy()
+                if hasattr(self, "goal_object_indices")
+                else None
+            ),
+            table_pose=self.root_state_tensor[self.table_indices[i], 0:7].cpu().numpy(),
+        )
+
+        # Sanity checks
+        J = len(self.joint_names)
+        assert frame.robot_joint_pos.shape == (J,), (
+            f"robot_joint_pos shape {frame.robot_joint_pos.shape} != ({J},)"
+        )
+        for pose_name, pose in [
+            ("robot_base_pose", frame.robot_base_pose),
+            ("object_pose", frame.object_pose),
+            ("table_pose", frame.table_pose),
+        ]:
+            assert pose.shape == (7,), f"{pose_name}.shape {pose.shape} != (7,)"
+            quat_norm = float(np.linalg.norm(pose[3:]))
+            assert abs(quat_norm - 1.0) < 0.05, (
+                f"{pose_name} quaternion norm {quat_norm:.4f} is not ~1.0"
+            )
+        if frame.goal_pose is not None:
+            assert frame.goal_pose.shape == (7,)
+
+        self.viewer_state_frames.append(frame)
+
+        if len(self.viewer_state_frames) == self.cfg["env"]["capture_viewer_len"]:
+            self._finalize_viewer_capture()
+
+    # ──────────────────────────────────────────────────────────────────────────
+    # Viewer URL helpers
+    # ──────────────────────────────────────────────────────────────────────────
+
+    @staticmethod
+    def _get_viewer_github_raw_base(override: str) -> str:
+        """Return the GitHub raw base URL to use for viewer URDF fetching.
+
+        Priority:
+          1. *override* non-empty → use it directly (trailing slash ensured)
+          2. _VIEWER_USE_CURRENT_COMMIT = True → resolve `git rev-parse HEAD`
+          3. default → /main/ (stable; always has all released URDF + mesh files)
+
+        To target your exact pushed commit instead of /main/, flip the flag in code:
+            _VIEWER_USE_CURRENT_COMMIT = True
+        This is intentionally a code change, not a config key, so it's easy to find
+        and review (grep for _VIEWER_USE_CURRENT_COMMIT).
+        """
+        # ── Developer flag ────────────────────────────────────────────────────
+        # Set True when you've added new URDF/mesh files and want the viewer to
+        # fetch from your exact pushed commit rather than /main/.
+        _VIEWER_USE_CURRENT_COMMIT = False
+        # ─────────────────────────────────────────────────────────────────────
+
+        MAIN_BASE = "https://raw.githubusercontent.com/tylerlum/simtoolreal/main/"
+
+        if override:
+            base = override if override.endswith("/") else override + "/"
+            print(
+                f"\n[viewer] GitHub raw base URL — source: config override\n"
+                f"  {base}\n"
+            )
+            return base
+
+        if _VIEWER_USE_CURRENT_COMMIT:
+            try:
+                import subprocess
+                from isaacgymenvs.utils.utils import get_repo_root_dir
+                commit = subprocess.check_output(
+                    ["git", "rev-parse", "HEAD"],
+                    cwd=str(get_repo_root_dir()),
+                    stderr=subprocess.DEVNULL,
+                    text=True,
+                ).strip()
+                base = f"https://raw.githubusercontent.com/tylerlum/simtoolreal/{commit}/"
+                print(
+                    f"\n[viewer] GitHub raw base URL — source: git HEAD commit\n"
+                    f"  commit : {commit}\n"
+                    f"  base   : {base}\n"
+                )
+                return base
+            except Exception as e:
+                print(
+                    f"\n[viewer] _VIEWER_USE_CURRENT_COMMIT=True but could not read git HEAD: {e}\n"
+                    f"  Falling back to /main/: {MAIN_BASE}\n"
+                )
+
+        print(
+            f"\n[viewer] GitHub raw base URL — source: /main/ (default)\n"
+            f"  {MAIN_BASE}\n"
+            f"  Tip: set _VIEWER_USE_CURRENT_COMMIT=True in env.py to target your\n"
+            f"       exact pushed commit (useful when adding new URDF/mesh files).\n"
+        )
+        return MAIN_BASE
+
+    @staticmethod
+    def _check_viewer_urls(urls: list, url_check: str) -> set:
+        """Check that each URL in *urls* is reachable via an HTTP HEAD request.
+
+        Returns the set of URLs that failed (empty if all passed or mode is "skip").
+
+        url_check values:
+          "warn"  — print a loud warning box on failure, continue; caller handles fallback
+          "error" — raise ValueError on first failure
+          "skip"  — skip all checks (no network call); returns empty set
+        """
+        import time
+        import urllib.request
+
+        BORDER = "=" * 72
+        failed: set = set()
+
+        if url_check == "skip":
+            print(
+                f"\n[viewer] URL check SKIPPED (capture_viewer_url_check='skip').\n"
+                f"  URLs will not be validated — mesh loading may silently fail in browser.\n"
+            )
+            return failed
+
+        seen = set()
+        for url in urls:
+            if url in seen:
+                continue
+            seen.add(url)
+
+            print(f"[viewer] URL check ({url_check}) → {url}")
+            t0 = time.monotonic()
+            try:
+                req = urllib.request.Request(url, method="HEAD")
+                urllib.request.urlopen(req, timeout=10)
+                elapsed = time.monotonic() - t0
+                print(f"[viewer]   PASSED  ({elapsed:.2f}s)\n")
+            except Exception as e:
+                elapsed = time.monotonic() - t0
+                failed.add(url)
+                msg = (
+                    f"\n{BORDER}\n"
+                    f"[viewer] URL CHECK FAILED ({elapsed:.2f}s)\n"
+                    f"  URL   : {url}\n"
+                    f"  Error : {e}\n"
+                    f"\n"
+                    f"  Common causes:\n"
+                    f"    - Commit not yet pushed to GitHub\n"
+                    f"    - File doesn't exist at this branch/commit\n"
+                    f"    - No internet access\n"
+                    f"\n"
+                    f"  Fixes:\n"
+                    f"    1. Push your commit:  git push\n"
+                    f"    2. Override the base URL:\n"
+                    f"         task.env.capture_viewer_github_raw_base="
+                    f"https://raw.githubusercontent.com/tylerlum/simtoolreal/main/\n"
+                    f"    3. Disable URL checks (e.g. no internet):\n"
+                    f"         task.env.capture_viewer_url_check=skip\n"
+                    f"{BORDER}\n"
+                )
+                if url_check == "error":
+                    raise ValueError(msg)
+                else:  # "warn"
+                    print(msg)
+
+        return failed
+
+    def _finalize_viewer_capture(self) -> None:
+        import wandb
+
+        from isaacgymenvs.tasks.simtoolreal.interactive_viewer import (
+            create_html,
+            make_embedded_robot,
+            make_url_robot,
+        )
+        from dextoolbench.objects import NAME_TO_OBJECT
+        from isaacgymenvs.utils.utils import get_repo_root_dir
+
+        frames = self.viewer_state_frames
+        assert frames is not None and len(frames) > 0
+        T = len(frames)
+        J = len(self.joint_names)
+
+        robot_joint_positions = np.stack([f.robot_joint_pos for f in frames])  # (T, J)
+        robot_base_poses = np.stack([f.robot_base_pose for f in frames])  # (T, 7)
+        timestamps = np.arange(T, dtype=float) * self.control_dt  # (T,)
+
+        # Shape sanity checks
+        assert robot_joint_positions.shape == (T, J), (
+            f"robot_joint_positions {robot_joint_positions.shape} != ({T}, {J})"
+        )
+        assert robot_base_poses.shape == (T, 7)
+
+        GITHUB_RAW_BASE = self._get_viewer_github_raw_base(
+            self.cfg["env"].get("capture_viewer_github_raw_base", "")
+        )
+        url_check = self.cfg["env"].get("capture_viewer_url_check", "warn")
+
+        # Robot arm URDF (hardcoded for iiwa14_left_sharpa_adjusted_restricted;
+        # a ValueError is raised at __init__ if a different robot asset is configured).
+        ROBOT_URDF_URL = (
+            GITHUB_RAW_BASE
+            + "assets/urdf/kuka_sharpa_description/"
+            + "iiwa14_left_sharpa_adjusted_restricted.urdf"
+        )
+
+        # Determine how to represent the object in the viewer.
+        # Three cases, checked in priority order:
+        #
+        #   Case 1 — Real mesh object in NAME_TO_OBJECT:
+        #     Fetch the URDF from GitHub raw (browser resolves mesh paths relative to it).
+        #
+        #   Case 2 — Procedural primitive object (e.g. handle_head_primitives):
+        #     URDF was saved before the temp dir was deleted (_create_envs).
+        #     Contains only <box>/<cylinder> — no mesh refs — safe to embed inline.
+        #
+        #   Case 3 — Neither (shouldn't happen in normal use):
+        #     HACK fallback: use claw_hammer as a visual stand-in so the viewer
+        #     shows *something* rather than crashing.
+
+        object_name = self.cfg["env"]["objectName"]
+
+        CLAW_HAMMER_FALLBACK_URL = (
+            GITHUB_RAW_BASE
+            + "assets/urdf/dextoolbench/hammer/claw_hammer/claw_hammer.urdf"
+        )
+
+        if object_name in NAME_TO_OBJECT:
+            # ── Case 1: known mesh object ──────────────────────────────────────────
+            rel = NAME_TO_OBJECT[object_name].urdf_path.relative_to(get_repo_root_dir())
+            object_urdf_url = GITHUB_RAW_BASE + rel.as_posix()
+            print(
+                f"[viewer] _finalize_viewer_capture | CASE 1 — mesh object: "
+                f"objectName='{object_name}' found in NAME_TO_OBJECT. "
+                f"Using GitHub raw URL: {object_urdf_url}"
+            )
+            object_robot = make_url_robot(name="object", urdf_url=object_urdf_url)
+            goal_robot = (
+                make_url_robot(
+                    name="goal",
+                    urdf_url=object_urdf_url,
+                    color_override=(0.20, 0.72, 0.31),  # green for goal
+                )
+                if frames[0].goal_pose is not None else None
+            )
+
+        elif getattr(self, "viewer_object_urdf_text", None) is not None:
+            # ── Case 2: procedural primitive (pure <box>/<cylinder>, no mesh refs) ─
+            print(
+                f"[viewer] _finalize_viewer_capture | CASE 2 — procedural primitive: "
+                f"objectName='{object_name}' NOT in NAME_TO_OBJECT. "
+                f"Using stored URDF text ({len(self.viewer_object_urdf_text)} bytes) "
+                f"captured at env creation (assumes only URDF primitives — "
+                f"no mesh files required)."
+            )
+            object_robot = make_embedded_robot(
+                name="object", urdf_text=self.viewer_object_urdf_text
+            )
+            goal_robot = (
+                make_embedded_robot(
+                    name="goal",
+                    urdf_text=self.viewer_object_urdf_text,
+                    color_override=(0.20, 0.72, 0.31),  # green for goal
+                )
+                if frames[0].goal_pose is not None else None
+            )
+
+        else:
+            # ── Case 3: HACK fallback — no URDF available at all ──────────────────
+            print(
+                f"[viewer] _finalize_viewer_capture | CASE 3 — HACK FALLBACK: "
+                f"objectName='{object_name}' NOT in NAME_TO_OBJECT and "
+                f"viewer_object_urdf_text is None (stored URDF was not captured). "
+                f"Using claw_hammer as a visual stand-in — object shape will be WRONG. "
+                f"URL: {CLAW_HAMMER_FALLBACK_URL}"
+            )
+            object_robot = make_url_robot(name="object", urdf_url=CLAW_HAMMER_FALLBACK_URL)
+            goal_robot = (
+                make_url_robot(
+                    name="goal",
+                    urdf_url=CLAW_HAMMER_FALLBACK_URL,
+                    color_override=(0.20, 0.72, 0.31),
+                )
+                if frames[0].goal_pose is not None else None
+            )
+
+        # Table URDF — pure <box> geometry, no mesh refs → safe to embed inline.
+        table_asset_rel = self.cfg["env"]["asset"]["table"]  # e.g. "urdf/table_narrow.urdf"
+        table_urdf_text = (get_repo_root_dir() / "assets" / table_asset_rel).read_text()
+
+        # Collect all URL-based robots and validate them before building the HTML.
+        # Embedded robots (make_embedded_robot) use inline URDF text — no URL check needed.
+        urls_to_check = [ROBOT_URDF_URL]
+        if object_robot.get("urdf_path"):
+            urls_to_check.append(object_robot["urdf_path"])
+        if goal_robot is not None and goal_robot.get("urdf_path"):
+            urls_to_check.append(goal_robot["urdf_path"])
+
+        print(
+            f"\n[viewer] URL check mode: capture_viewer_url_check='{url_check}'\n"
+            f"[viewer] URLs to check ({len(urls_to_check)} URL-based robots, "
+            f"table is embedded inline):"
+        )
+        for u in urls_to_check:
+            print(f"[viewer]   {u}")
+        print()
+        failed_urls = self._check_viewer_urls(urls_to_check, url_check)
+
+        # For any URL that failed the check, swap in the claw_hammer from /main/ so
+        # the viewer still renders something instead of a blank mesh slot.
+        # This URL is hardcoded to /main/ — it is always present and stable.
+        CLAW_HAMMER_MAIN_URL = (
+            "https://raw.githubusercontent.com/tylerlum/simtoolreal/main/"
+            "assets/urdf/dextoolbench/hammer/claw_hammer/claw_hammer.urdf"
+        )
+        for failed_url in failed_urls:
+            if object_robot.get("urdf_path") == failed_url:
+                print(
+                    f"[viewer] Swapping FAILED object URL to claw_hammer fallback\n"
+                    f"  failed URL : {failed_url}\n"
+                    f"  fallback   : {CLAW_HAMMER_MAIN_URL}\n"
+                    f"  (object shape will be WRONG — fix the URL and retry)\n"
+                )
+                object_robot = {**object_robot, "urdf_path": CLAW_HAMMER_MAIN_URL}
+            if goal_robot is not None and goal_robot.get("urdf_path") == failed_url:
+                goal_robot = {**goal_robot, "urdf_path": CLAW_HAMMER_MAIN_URL}
+            if ROBOT_URDF_URL == failed_url:
+                print(
+                    f"[viewer] Swapping FAILED robot URL to claw_hammer fallback\n"
+                    f"  failed URL : {failed_url}\n"
+                    f"  fallback   : {CLAW_HAMMER_MAIN_URL}\n"
+                )
+                ROBOT_URDF_URL = CLAW_HAMMER_MAIN_URL
+
+        # Build robots list.  Every key in object_poses MUST have a matching name here.
+        robots = [
+            make_url_robot(name="robot", urdf_url=ROBOT_URDF_URL, animated=True),
+            make_embedded_robot(name="table", urdf_text=table_urdf_text),
+            object_robot,
+        ]
+        if goal_robot is not None:
+            robots.append(goal_robot)
+
+        # Build object_poses — must have exactly one entry per non-robot, non-animated robot
+        # in the robots list.  Keys must match robot names exactly.
+        object_poses: dict = {
+            "table":  np.stack([f.table_pose  for f in frames]),   # (T, 7)
+            "object": np.stack([f.object_pose for f in frames]),   # (T, 7)
+        }
+        if goal_robot is not None:
+            object_poses["goal"] = np.stack([f.goal_pose for f in frames])     # (T, 7)
+
+        for k, v in object_poses.items():
+            assert v.shape == (T, 7), f"object_poses['{k}'] {v.shape} != ({T}, 7)"
+
+        html = create_html(
+            joint_names=self.joint_names,
+            robot_joint_positions=robot_joint_positions,
+            robots=robots,
+            object_poses=object_poses,
+            robot_base_poses=robot_base_poses,
+            timestamps=timestamps,
+        )
+
+        # Save HTML locally (mirrors how MP4 is saved to videos/)
+        viewer_filename = f"{DATETIME_STR}_viewer_{self.control_steps}.html"
+        videos_dir = Path("videos")
+        videos_dir.mkdir(parents=True, exist_ok=True)
+        viewer_path = videos_dir / viewer_filename
+        viewer_path.write_text(html)
+
+        print("-" * 80)
+        print(f"Interactive viewer: built HTML ({len(html):,} bytes)")
+        print(f"Saved interactive viewer to {viewer_path.resolve()}")
+        if wandb.run is not None:
+            wandb.log({"interactive_viewer": wandb.Html(html)})
+            print("Logged interactive_viewer to wandb")
+        print("-" * 80)
+
+        self.viewer_state_frames = None
+        self._viewer_seen_episode_reset = False
 
     def _draw_transform(
         self, transform: gymapi.Transform, line_length: float = 0.2, env_idx: int = 0

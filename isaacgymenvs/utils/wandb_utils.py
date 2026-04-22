@@ -1,5 +1,6 @@
 import os
 import socket
+from datetime import datetime
 from rl_games.common.algo_observer import AlgoObserver
 
 from isaacgymenvs.utils.utils import retry
@@ -21,7 +22,11 @@ class WandbAlgoObserver(AlgoObserver):
 
         import wandb
 
-        wandb_unique_id = f"uid_{experiment_name}"
+        # Append a datetime stamp so each training run gets its own wandb run
+        # instead of all runs resuming/overwriting the same run.
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        wandb_unique_id = f"{experiment_name}_{timestamp}"
+        display_name = f"{experiment_name}_{timestamp}"
         print(f"Wandb using unique id {wandb_unique_id}")
 
         cfg = self.cfg
@@ -37,7 +42,7 @@ class WandbAlgoObserver(AlgoObserver):
                 notes=cfg.wandb_notes if hasattr(cfg, 'wandb_notes') else '',
                 sync_tensorboard=True,
                 id=wandb_unique_id,
-                name=experiment_name,
+                name=display_name,
                 resume=True,
                 settings=wandb.Settings(start_method='fork'),
             )
@@ -51,6 +56,10 @@ class WandbAlgoObserver(AlgoObserver):
             wandb.define_metric("*", step_metric="global_step")
         except Exception as exc:
             print(f'Could not initialize WandB! {exc}')
+
+        if wandb.run is None:
+            print('WandB run is None — skipping diff artifact and config upload.')
+            return
 
         with open(os.path.join(wandb.run.dir, 'diff.patch'), 'w') as f:
             os.system(f'cd {os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))} && git diff > {f.name}')
