@@ -217,6 +217,12 @@ def _read_table_urdf() -> str:
     return table_path.read_text(encoding="utf-8")
 
 
+def _read_urdf_text(path: str | None) -> str | None:
+    if path is None:
+        return None
+    return Path(path).read_text(encoding="utf-8")
+
+
 def _check_viewer_urls(urls: list[str], url_check: str) -> set[str]:
     if url_check == "skip":
         print("[viewer] URL check skipped; browser mesh loading may fail silently.")
@@ -251,30 +257,60 @@ def write_pose_viewer_html(path: Path, payload: dict, *, title: str) -> str:
         github_raw_base
         + "assets/urdf/kuka_sharpa_description/iiwa14_left_sharpa_adjusted_restricted.urdf"
     )
-    object_urdf_url = (
-        github_raw_base
-        + "assets/urdf/dextoolbench/hammer/claw_hammer/claw_hammer.urdf"
-    )
-    _check_viewer_urls([robot_urdf_url, object_urdf_url], url_check)
+    object_urdf_relpath = payload.get("viewer_object_github_relpath")
+    if object_urdf_relpath is None and payload.get("viewer_object_urdf_path") is None:
+        object_urdf_relpath = "assets/urdf/dextoolbench/hammer/claw_hammer/claw_hammer.urdf"
+    object_urdf_url = github_raw_base + object_urdf_relpath if object_urdf_relpath is not None else None
+    object_urdf_text = _read_urdf_text(payload.get("viewer_object_urdf_path"))
+    table_urdf_text = _read_urdf_text(payload.get("viewer_table_urdf_path")) or _read_table_urdf()
+    urls_to_check = [robot_urdf_url]
+    if object_urdf_url is not None:
+        urls_to_check.append(object_urdf_url)
+    _check_viewer_urls(urls_to_check, url_check)
 
     robots = [
         make_url_robot(name="robot", urdf_url=robot_urdf_url, animated=True),
-        make_embedded_robot(name="table", urdf_text=_read_table_urdf()),
-        make_url_robot(name="object", urdf_url=object_urdf_url),
-        make_url_robot(
-            name="goal",
-            urdf_url=object_urdf_url,
-            color_override=(0.20, 0.72, 0.31),
-        ),
+        make_embedded_robot(name="table", urdf_text=table_urdf_text),
     ]
-    if "predicted_object_poses" in payload:
-        robots.append(
-            make_url_robot(
-                name="predicted_object",
-                urdf_url=object_urdf_url,
-                color_override=(0.16, 0.43, 0.95),
-            )
+    if object_urdf_text is not None:
+        robots.extend(
+            [
+                make_embedded_robot(name="object", urdf_text=object_urdf_text),
+                make_embedded_robot(
+                    name="goal",
+                    urdf_text=object_urdf_text,
+                    color_override=(0.20, 0.72, 0.31),
+                ),
+            ]
         )
+    else:
+        robots.extend(
+            [
+                make_url_robot(name="object", urdf_url=object_urdf_url),
+                make_url_robot(
+                    name="goal",
+                    urdf_url=object_urdf_url,
+                    color_override=(0.20, 0.72, 0.31),
+                ),
+            ]
+        )
+    if "predicted_object_poses" in payload:
+        if object_urdf_text is not None:
+            robots.append(
+                make_embedded_robot(
+                    name="predicted_object",
+                    urdf_text=object_urdf_text,
+                    color_override=(0.16, 0.43, 0.95),
+                )
+            )
+        else:
+            robots.append(
+                make_url_robot(
+                    name="predicted_object",
+                    urdf_url=object_urdf_url,
+                    color_override=(0.16, 0.43, 0.95),
+                )
+            )
 
     object_poses = {
         "table": np.asarray(payload["table_poses"], dtype=float),

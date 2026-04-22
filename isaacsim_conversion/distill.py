@@ -44,13 +44,21 @@ def launch_app():
         choices=["train", "train_online", "teacher_eval", "student_eval", "mixed_eval", "camera_debug"],
         default="train",
     )
-    parser.add_argument("--task_source", choices=["fabrica", "dextoolbench"], default="dextoolbench")
+    parser.add_argument("--task_source", choices=["fabrica", "dextoolbench", "peg_in_hole"], default="dextoolbench")
     parser.add_argument("--assembly", default="beam")
     parser.add_argument("--part_id", default="2")
     parser.add_argument("--collision_method", default="coacd")
     parser.add_argument("--object_category", default="hammer")
     parser.add_argument("--object_name", default="claw_hammer")
     parser.add_argument("--task_name", default="swing_down")
+    parser.add_argument("--peg_scene_idx", type=int, default=50)
+    parser.add_argument("--peg_idx", type=int, default=5)
+    parser.add_argument("--peg_tol_slot_idx", type=int, default=5)
+    parser.add_argument(
+        "--peg_goal_mode",
+        choices=["dense", "preInsertAndFinal", "finalGoalOnly"],
+        default="preInsertAndFinal",
+    )
     parser.add_argument("--teacher_checkpoint", default="pretrained_policy/model.pth")
     parser.add_argument("--teacher_config", default="pretrained_policy/config.yaml")
     parser.add_argument("--student_checkpoint", default=None)
@@ -450,7 +458,14 @@ def ensure_run_dir(repo_root: Path, args, settings: DistillSettings) -> Path:
     if args.run_dir:
         run_dir = Path(resolve_repo_path(repo_root, args.run_dir))
     else:
-        run_name = f"{args.object_category}_{args.object_name}_{args.task_name}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+        if args.task_source == "peg_in_hole":
+            run_name = (
+                f"peg_scene{args.peg_scene_idx:04d}_peg{args.peg_idx:02d}_"
+                f"tol{args.peg_tol_slot_idx:02d}_{args.peg_goal_mode}_"
+                f"{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+            )
+        else:
+            run_name = f"{args.object_category}_{args.object_name}_{args.task_name}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
         run_dir = repo_root / "distillation_runs" / run_name
     (run_dir / "checkpoints").mkdir(parents=True, exist_ok=True)
     (run_dir / "camera_debug").mkdir(parents=True, exist_ok=True)
@@ -672,6 +687,7 @@ def _log_viewer_artifacts(
     video_key: str,
     video_fps: int,
     num_goals: int,
+    task_spec=None,
     step: int | None = None,
     artifact_label: str | None = None,
 ):
@@ -699,6 +715,13 @@ def _log_viewer_artifacts(
     pred_object_poses = [f["predicted_object_pose"] for f in frames if "predicted_object_pose" in f]
     if pred_object_poses:
         payload["predicted_object_poses"] = np.stack(pred_object_poses).tolist()
+    if task_spec is not None:
+        if task_spec.viewer_table_urdf_path is not None:
+            payload["viewer_table_urdf_path"] = task_spec.viewer_table_urdf_path
+        if task_spec.viewer_object_urdf_path is not None:
+            payload["viewer_object_urdf_path"] = task_spec.viewer_object_urdf_path
+        if task_spec.viewer_object_github_relpath is not None:
+            payload["viewer_object_github_relpath"] = task_spec.viewer_object_github_relpath
     viewer_path = run_dir / "interactive_viewer" / f"{artifact_stem}.html"
     html_text = write_pose_viewer_html(viewer_path, payload, title=f"{mode} rollout")
     _log(f"Saved interactive viewer: {viewer_path}")
@@ -735,6 +758,7 @@ def _finalize_online_viewer_capture(
     video_key: str,
     video_fps: int,
     num_goals: int,
+    task_spec,
     step: int,
 ) -> tuple[list[dict] | None, list[np.ndarray] | None]:
     if not frames:
@@ -749,6 +773,7 @@ def _finalize_online_viewer_capture(
         video_key=video_key,
         video_fps=video_fps,
         num_goals=num_goals,
+        task_spec=task_spec,
         step=step,
         artifact_label=f"rollout_step_{step:07d}",
     )
@@ -917,6 +942,7 @@ def run_episode(
             video_key=capture_viewer_video_wandb_key,
             video_fps=capture_viewer_video_fps,
             num_goals=len(env.task_spec.goals),
+            task_spec=env.task_spec,
         )
 
     final_state = env.compute_sim_state()
@@ -1160,6 +1186,7 @@ def run_online_dagger(
                     video_key=capture_viewer_video_wandb_key,
                     video_fps=capture_viewer_video_fps,
                     num_goals=len(env.task_spec.goals),
+                    task_spec=env.task_spec,
                     step=iter_step,
                 )
         env.maybe_advance_goal(next_sim_state)
@@ -1232,6 +1259,7 @@ def run_online_dagger(
             video_key=capture_viewer_video_wandb_key,
             video_fps=capture_viewer_video_fps,
             num_goals=len(env.task_spec.goals),
+            task_spec=env.task_spec,
             step=settings.online_num_iters,
         )
 
@@ -1460,6 +1488,10 @@ def main():
         object_name=args.object_name,
         task_name=args.task_name,
         teacher_config_path=teacher_config,
+        peg_scene_idx=args.peg_scene_idx,
+        peg_idx=args.peg_idx,
+        peg_tol_slot_idx=args.peg_tol_slot_idx,
+        peg_goal_mode=args.peg_goal_mode,
     )
     env = IsaacSimDistillEnv(
         task_spec=task_spec,
@@ -1509,6 +1541,9 @@ def main():
         f"Parallel env config: num_envs={settings.num_envs}, env_spacing={settings.env_spacing}, "
         f"object_start_mode={settings.object_start_mode}"
     )
+    if task_spec.metadata is not None:
+        for key, value in task_spec.metadata.items():
+            _log(f"Task metadata: {key}={value}")
 
     if args.mode == "camera_debug":
         env.reset()
