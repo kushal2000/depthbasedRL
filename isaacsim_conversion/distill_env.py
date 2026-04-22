@@ -18,6 +18,7 @@ from isaacgymenvs.utils.observation_action_utils_sharpa import (
     Q_UPPER_LIMITS_np,
 )
 from isaacgymenvs.utils.torch_jit_utils import quat_rotate, unscale
+from isaacgymenvs.utils.torch_jit_utils import quaternion_to_matrix, matrix_to_quaternion
 from isaacsim_conversion.isaacsim_env import (
     CONTROL_DT,
     DEFAULT_ASSET_FRICTION,
@@ -51,6 +52,32 @@ OBS_LIST = [
 ]
 OBJECT_BASE_SIZE = 0.04
 KEYPOINT_SCALE = 1.5
+
+
+def _axis_angle_to_matrix(axis_angle: torch.Tensor) -> torch.Tensor:
+    angle = torch.linalg.norm(axis_angle, dim=-1, keepdim=True)
+    axis = axis_angle / torch.clamp(angle, min=1e-8)
+    x = axis[:, 0]
+    y = axis[:, 1]
+    z = axis[:, 2]
+    zeros = torch.zeros_like(x)
+    k = torch.stack(
+        (
+            zeros, -z, y,
+            z, zeros, -x,
+            -y, x, zeros,
+        ),
+        dim=-1,
+    ).reshape(-1, 3, 3)
+    eye = torch.eye(3, device=axis_angle.device, dtype=axis_angle.dtype).unsqueeze(0).repeat(axis_angle.shape[0], 1, 1)
+    sin_term = torch.sin(angle).unsqueeze(-1)
+    cos_term = (1.0 - torch.cos(angle)).unsqueeze(-1)
+    outer = axis.unsqueeze(-1) * axis.unsqueeze(-2)
+    rot = eye + sin_term * k + cos_term * (outer - eye)
+    small = (angle.squeeze(-1) < 1e-8)
+    if torch.any(small):
+        rot[small] = eye[small]
+    return rot
 
 
 @dataclass
@@ -88,6 +115,19 @@ class IsaacSimDistillEnv:
         depth_max_m: float = 5.0,
         episode_length: int = 600,
         reset_when_dropped: bool = False,
+        use_obs_delay: bool = False,
+        obs_delay_max: int = 1,
+        use_action_delay: bool = False,
+        action_delay_max: int = 1,
+        use_object_state_delay_noise: bool = False,
+        object_state_delay_max: int = 1,
+        object_state_xyz_noise_std: float = 0.0,
+        object_state_rotation_noise_degrees: float = 0.0,
+        joint_velocity_obs_noise_std: float = 0.0,
+        goal_xy_obs_noise: float = 0.0,
+        object_scale_noise_multiplier_range: tuple[float, float] = (1.0, 1.0),
+        default_asset_friction: float = DEFAULT_ASSET_FRICTION,
+        fingertip_friction: float = FINGERTIP_FRICTION,
     ):
         self.task_spec = task_spec
         self.camera_modality = camera_modality
@@ -113,6 +153,22 @@ class IsaacSimDistillEnv:
         self.depth_max_m = float(depth_max_m)
         self.episode_length = int(episode_length)
         self.reset_when_dropped = bool(reset_when_dropped)
+        self.use_obs_delay = bool(use_obs_delay)
+        self.obs_delay_max = int(max(obs_delay_max, 1))
+        self.use_action_delay = bool(use_action_delay)
+        self.action_delay_max = int(max(action_delay_max, 1))
+        self.use_object_state_delay_noise = bool(use_object_state_delay_noise)
+        self.object_state_delay_max = int(max(object_state_delay_max, 1))
+        self.object_state_xyz_noise_std = float(object_state_xyz_noise_std)
+        self.object_state_rotation_noise_degrees = float(object_state_rotation_noise_degrees)
+        self.joint_velocity_obs_noise_std = float(joint_velocity_obs_noise_std)
+        self.goal_xy_obs_noise = float(goal_xy_obs_noise)
+        self.object_scale_noise_multiplier_range = (
+            float(object_scale_noise_multiplier_range[0]),
+            float(object_scale_noise_multiplier_range[1]),
+        )
+        self.default_asset_friction = float(default_asset_friction)
+        self.fingertip_friction = float(fingertip_friction)
         if self.depth_preprocess_mode not in {"clip_divide", "window_normalize", "metric"}:
             raise ValueError(f"Unsupported depth_preprocess_mode={self.depth_preprocess_mode!r}")
         if self.depth_max_m <= self.depth_min_m:
@@ -120,6 +176,14 @@ class IsaacSimDistillEnv:
         self.action_dim = 29
         self.student_proprio_dim = 29 + 29 + 29 + 1
         self.object_scales_batch = np.repeat(self.task_spec.object_scales.astype(np.float32), self.num_envs, axis=0)
+        success_scales = None
+        if self.task_spec.metadata is not None and self.task_spec.metadata.get("fixed_size_keypoint_reward", False):
+            fixed_size = self.task_spec.metadata.get("fixed_size_scales")
+            if fixed_size is not None:
+                success_scales = np.array([fixed_size], dtype=np.float32)
+        if success_scales is None:
+            success_scales = self.task_spec.object_scales.astype(np.float32)
+        self.success_object_scales_batch = np.repeat(success_scales, self.num_envs, axis=0)
         self.camera_data_types = self._data_types_for_modality(camera_modality)
         self.goal_idx = np.zeros(self.num_envs, dtype=np.int32)
         self.max_goal_idx = np.zeros(self.num_envs, dtype=np.int32)
@@ -136,6 +200,8 @@ class IsaacSimDistillEnv:
         self.goal_pose = np.repeat(self.task_spec.goals[0][None], self.num_envs, axis=0).astype(np.float32)
         self.current_start_pose = np.repeat(self.task_spec.start_pose[None], self.num_envs, axis=0).astype(np.float32)
         self.prev_targets: np.ndarray | None = None
+        self.goal_pos_obs_noise = np.zeros((self.num_envs, 3), dtype=np.float32)
+        self.object_scale_noise_multiplier = np.ones((self.num_envs, 3), dtype=np.float32)
         self.camera_world_pos = np.zeros((self.num_envs, 3), dtype=np.float32)
         self.camera_world_quat_wxyz = np.zeros((self.num_envs, 4), dtype=np.float32)
         self.permutation: np.ndarray | None = None
@@ -144,8 +210,52 @@ class IsaacSimDistillEnv:
         self.inverse_permutation_torch: torch.Tensor | None = None
         self.palm_body_idx: int | None = None
         self.fingertip_body_indices: torch.Tensor | None = None
+        self.obs_queue: torch.Tensor | None = None
+        self.action_queue: torch.Tensor | None = None
+        self.object_state_queue: torch.Tensor | None = None
+        self._obs_queue_needs_reset = np.ones(self.num_envs, dtype=bool)
+        self._action_queue_needs_reset = np.ones(self.num_envs, dtype=bool)
+        self._object_state_queue_needs_reset = np.ones(self.num_envs, dtype=bool)
 
         self._setup_scene()
+
+    def _init_teacher_obs_queues(self):
+        self.obs_queue = torch.zeros(
+            self.num_envs, self.obs_delay_max, 140, dtype=torch.float32, device=self.device
+        )
+        self.action_queue = torch.zeros(
+            self.num_envs, self.action_delay_max, self.action_dim, dtype=torch.float32, device=self.device
+        )
+        self.object_state_queue = torch.zeros(
+            self.num_envs, self.object_state_delay_max, 13, dtype=torch.float32, device=self.device
+        )
+
+    def _update_queue(self, queue: torch.Tensor, current_values: torch.Tensor, needs_reset: np.ndarray) -> torch.Tensor:
+        if queue is None:
+            raise RuntimeError("Queue not initialized")
+        if np.any(needs_reset):
+            env_ids = torch.as_tensor(np.where(needs_reset)[0], device=self.device, dtype=torch.long)
+            queue[env_ids] = current_values[env_ids].unsqueeze(1).repeat(1, queue.shape[1], 1)
+        queue[:, 1:] = queue[:, :-1].clone()
+        queue[:, 0] = current_values.clone()
+        return queue
+
+    def _sample_delta_quat_xyzw(self, input_quat_xyzw: torch.Tensor, delta_rotation_degrees: float) -> torch.Tensor:
+        if delta_rotation_degrees <= 0.0:
+            return input_quat_xyzw.clone()
+        quat_wxyz = torch.cat((input_quat_xyzw[:, 3:], input_quat_xyzw[:, :3]), dim=1)
+        quat_matrix = quaternion_to_matrix(quat_wxyz)
+        delta_rotation_radians = delta_rotation_degrees * np.pi / 180.0
+        random_direction = torch.randn((input_quat_xyzw.shape[0], 3), device=self.device, dtype=torch.float32)
+        random_direction = random_direction / torch.clamp(torch.norm(random_direction, dim=1, keepdim=True), min=1e-8)
+        sampled_rotation_magnitude = torch.empty((input_quat_xyzw.shape[0], 1), device=self.device, dtype=torch.float32).uniform_(
+            -delta_rotation_radians, delta_rotation_radians
+        )
+        sampled_rotation_axis_angles = random_direction * sampled_rotation_magnitude
+        sampled_rotation_matrix = _axis_angle_to_matrix(sampled_rotation_axis_angles)
+        new_matrix = quat_matrix @ sampled_rotation_matrix
+        new_quat_wxyz = matrix_to_quaternion(new_matrix)
+        return torch.cat((new_quat_wxyz[:, 1:], new_quat_wxyz[:, 0:1]), dim=1).clone()
 
     def _camera_mount_mode(self) -> str:
         return getattr(self.camera_pose, "mount", "world")
@@ -451,6 +561,7 @@ class IsaacSimDistillEnv:
             )
         else:
             _log("Distill camera disabled for this run")
+        self._init_teacher_obs_queues()
         self.reset()
 
     def _validate_joint_ordering(self):
@@ -545,8 +656,8 @@ class IsaacSimDistillEnv:
         self._set_collision_offsets(all_collision_paths, contact_offset=0.002, rest_offset=0.0)
 
         default_material_cfg = sim_utils.RigidBodyMaterialCfg(
-            static_friction=DEFAULT_ASSET_FRICTION,
-            dynamic_friction=DEFAULT_ASSET_FRICTION,
+            static_friction=self.default_asset_friction,
+            dynamic_friction=self.default_asset_friction,
             restitution=0.0,
         )
         default_material_path = "/World/PhysicsMaterials/distill_default_asset_material"
@@ -554,8 +665,8 @@ class IsaacSimDistillEnv:
         self._apply_material_to_collision_prims(default_material_path, all_collision_paths)
 
         fingertip_material_cfg = sim_utils.RigidBodyMaterialCfg(
-            static_friction=FINGERTIP_FRICTION,
-            dynamic_friction=FINGERTIP_FRICTION,
+            static_friction=self.fingertip_friction,
+            dynamic_friction=self.fingertip_friction,
             restitution=0.0,
         )
         fingertip_material_path = "/World/PhysicsMaterials/distill_fingertip_material"
@@ -563,7 +674,7 @@ class IsaacSimDistillEnv:
         self._apply_material_to_collision_prims(fingertip_material_path, fingertip_collision_paths)
         _log(
             "Distill physics materials applied "
-            f"(default_friction={DEFAULT_ASSET_FRICTION}, fingertip_friction={FINGERTIP_FRICTION}, "
+            f"(default_friction={self.default_asset_friction}, fingertip_friction={self.fingertip_friction}, "
             f"colliders={len(all_collision_paths)})"
         )
 
@@ -685,12 +796,44 @@ class IsaacSimDistillEnv:
         self.progress_buf[env_ids_np] = 0
         self.lifted_object[env_ids_np] = False
         self.goal_pose[env_ids_np] = np.repeat(self.task_spec.goals[0][None], len(env_ids_np), axis=0).astype(np.float32)
+        if self.goal_xy_obs_noise > 0.0:
+            self.goal_pos_obs_noise[env_ids_np, 0:2] = np.random.uniform(
+                -self.goal_xy_obs_noise,
+                self.goal_xy_obs_noise,
+                size=(len(env_ids_np), 2),
+            ).astype(np.float32)
+        else:
+            self.goal_pos_obs_noise[env_ids_np] = 0.0
+        noise_min, noise_max = self.object_scale_noise_multiplier_range
+        if noise_min == 1.0 and noise_max == 1.0:
+            self.object_scale_noise_multiplier[env_ids_np] = 1.0
+        else:
+            self.object_scale_noise_multiplier[env_ids_np] = np.random.uniform(
+                noise_min,
+                noise_max,
+                size=(len(env_ids_np), 3),
+            ).astype(np.float32)
+        self._obs_queue_needs_reset[env_ids_np] = True
+        self._action_queue_needs_reset[env_ids_np] = True
+        self._object_state_queue_needs_reset[env_ids_np] = True
 
     def apply_action(self, targets: np.ndarray):
         self.prev_targets = targets.copy()
         targets_sim = self._gym_to_sim_order(targets)
         targets_t = torch.tensor(targets_sim, dtype=torch.float32, device=self.device)
         self.robot.set_joint_position_target(targets_t)
+
+    def delay_actions(self, actions: torch.Tensor) -> torch.Tensor:
+        if self.action_queue is None:
+            raise RuntimeError("Action queue not initialized")
+        self._update_queue(self.action_queue, actions, self._action_queue_needs_reset)
+        self._action_queue_needs_reset[:] = False
+        if not self.use_action_delay:
+            return actions
+        delay_index = torch.randint(
+            0, self.action_queue.shape[1], (self.num_envs,), device=self.device
+        )
+        return self.action_queue[torch.arange(self.num_envs, device=self.device), delay_index].clone()
 
     def step(self, render: bool = True):
         self.scene.write_data_to_sim()
@@ -722,8 +865,8 @@ class IsaacSimDistillEnv:
         object_pose[:, :3] = object_pos_w - self.env_origins.cpu().numpy()
         object_pose[:, 3:] = object_quat_w[:, [1, 2, 3, 0]]
 
-        object_kps = _compute_keypoint_positions(object_pose, self.object_scales_batch)
-        goal_kps = _compute_keypoint_positions(self.goal_pose, self.object_scales_batch)
+        object_kps = _compute_keypoint_positions(object_pose, self.success_object_scales_batch)
+        goal_kps = _compute_keypoint_positions(self.goal_pose, self.success_object_scales_batch)
         kp_dist = np.max(np.linalg.norm(object_kps - goal_kps, axis=-1), axis=-1).astype(np.float32)
         return SimState(
             q=q.copy(),
@@ -851,6 +994,8 @@ class IsaacSimDistillEnv:
     def build_teacher_obs(self, sim_state: SimState) -> np.ndarray:
         if self.prev_targets is None:
             raise RuntimeError("Environment must be reset before building teacher observations")
+        if self.obs_queue is None or self.object_state_queue is None:
+            raise RuntimeError("Teacher observation queues not initialized")
         joint_pos = self.robot.data.joint_pos
         joint_vel = self.robot.data.joint_vel
         if self.permutation_torch is not None:
@@ -876,37 +1021,100 @@ class IsaacSimDistillEnv:
         ).reshape(self.num_envs, len(FINGERTIP_LINK_NAMES), 3)
         fingertip_pos_rel_palm = fingertip_pos_offset - palm_center_pos.unsqueeze(1)
 
-        object_pos = self.object_rigid.data.root_pos_w - env_origins
-        object_quat_xyzw = self.object_rigid.data.root_quat_w[:, [1, 2, 3, 0]]
+        object_root_state = self.object_rigid.data.root_state_w
+        object_pos = object_root_state[:, :3] - env_origins
+        object_quat_xyzw = object_root_state[:, 3:7][:, [1, 2, 3, 0]]
+        object_linvel = object_root_state[:, 7:10]
+        object_angvel = object_root_state[:, 10:13]
+        object_state = torch.cat((object_pos, object_quat_xyzw, object_linvel, object_angvel), dim=-1)
+        self.object_state_queue = self._update_queue(
+            self.object_state_queue,
+            object_state,
+            self._object_state_queue_needs_reset,
+        )
+        self._object_state_queue_needs_reset[:] = False
+        observed_object_state = object_state.clone()
+        if self.use_object_state_delay_noise:
+            delay_index = torch.randint(
+                0,
+                self.object_state_queue.shape[1],
+                (self.num_envs,),
+                device=self.device,
+            )
+            observed_object_state = self.object_state_queue[
+                torch.arange(self.num_envs, device=self.device),
+                delay_index,
+            ].clone()
+            if self.object_state_xyz_noise_std > 0.0:
+                observed_object_state[:, :3] += (
+                    torch.randn_like(observed_object_state[:, :3]) * self.object_state_xyz_noise_std
+                )
+            observed_object_state[:, 3:7] = self._sample_delta_quat_xyzw(
+                observed_object_state[:, 3:7],
+                self.object_state_rotation_noise_degrees,
+            )
+        observed_object_pos = observed_object_state[:, :3]
+        observed_object_quat_xyzw = observed_object_state[:, 3:7]
+
         goal_pose_t = torch.tensor(self.goal_pose, dtype=torch.float32, device=self.device)
         object_scales_t = torch.tensor(self.object_scales_batch, dtype=torch.float32, device=self.device)
-        object_keypoint_offsets = self.object_keypoint_offsets_t.repeat(self.num_envs, 1, 1) * object_scales_t.unsqueeze(1)
-        obj_keypoint_pos = object_pos.unsqueeze(1) + quat_rotate(
-            object_quat_xyzw.unsqueeze(1).repeat(1, object_keypoint_offsets.shape[1], 1).reshape(-1, 4),
-            object_keypoint_offsets.reshape(-1, 3),
-        ).reshape(self.num_envs, object_keypoint_offsets.shape[1], 3)
+        object_scale_noise_multiplier_t = torch.tensor(
+            self.object_scale_noise_multiplier,
+            dtype=torch.float32,
+            device=self.device,
+        )
+        object_scales_obs_t = object_scales_t * object_scale_noise_multiplier_t
+        object_keypoint_offsets_obs = (
+            self.object_keypoint_offsets_t.repeat(self.num_envs, 1, 1) * object_scales_obs_t.unsqueeze(1)
+        )
         goal_keypoint_pos = goal_pose_t[:, :3].unsqueeze(1) + quat_rotate(
-            goal_pose_t[:, 3:7].unsqueeze(1).repeat(1, object_keypoint_offsets.shape[1], 1).reshape(-1, 4),
-            object_keypoint_offsets.reshape(-1, 3),
-        ).reshape(self.num_envs, object_keypoint_offsets.shape[1], 3)
-        keypoints_rel_palm = obj_keypoint_pos - palm_center_pos.unsqueeze(1)
-        keypoints_rel_goal = obj_keypoint_pos - goal_keypoint_pos
+            goal_pose_t[:, 3:7].unsqueeze(1).repeat(1, object_keypoint_offsets_obs.shape[1], 1).reshape(-1, 4),
+            object_keypoint_offsets_obs.reshape(-1, 3),
+        ).reshape(self.num_envs, object_keypoint_offsets_obs.shape[1], 3)
+        observed_obj_keypoint_pos = observed_object_pos.unsqueeze(1) + quat_rotate(
+            observed_object_quat_xyzw.unsqueeze(1).repeat(1, object_keypoint_offsets_obs.shape[1], 1).reshape(-1, 4),
+            object_keypoint_offsets_obs.reshape(-1, 3),
+        ).reshape(self.num_envs, object_keypoint_offsets_obs.shape[1], 3)
+        keypoints_rel_palm = observed_obj_keypoint_pos - palm_center_pos.unsqueeze(1)
+        keypoints_rel_goal = observed_obj_keypoint_pos - goal_keypoint_pos
+        if self.goal_xy_obs_noise > 0.0:
+            goal_noise = torch.tensor(self.goal_pos_obs_noise, dtype=torch.float32, device=self.device)
+            keypoints_rel_goal = keypoints_rel_goal - goal_noise.unsqueeze(1)
 
         prev_targets_t = torch.tensor(self.prev_targets, dtype=torch.float32, device=self.device)
+        joint_vel_obs = joint_vel.clone()
+        if self.joint_velocity_obs_noise_std > 0.0:
+            joint_vel_obs = joint_vel_obs + (
+                torch.randn_like(joint_vel_obs) * self.joint_velocity_obs_noise_std
+            )
         obs_dict = {
             "joint_pos": joint_pos_unscaled,
-            "joint_vel": joint_vel,
+            "joint_vel": joint_vel_obs,
             "prev_action_targets": prev_targets_t,
             "palm_pos": palm_center_pos,
             "palm_rot": palm_quat_xyzw,
-            "object_rot": object_quat_xyzw,
+            "object_rot": observed_object_quat_xyzw,
             "fingertip_pos_rel_palm": fingertip_pos_rel_palm.reshape(self.num_envs, -1),
             "keypoints_rel_palm": keypoints_rel_palm.reshape(self.num_envs, -1),
             "keypoints_rel_goal": keypoints_rel_goal.reshape(self.num_envs, -1),
-            "object_scales": object_scales_t,
+            "object_scales": object_scales_obs_t,
         }
         obs = torch.cat([obs_dict[key] for key in OBS_LIST], dim=-1)
-        return obs.detach().cpu().numpy()
+        self.obs_queue = self._update_queue(self.obs_queue, obs, self._obs_queue_needs_reset)
+        self._obs_queue_needs_reset[:] = False
+        obs_out = obs
+        if self.use_obs_delay:
+            delay_index = torch.randint(
+                0,
+                self.obs_queue.shape[1],
+                (self.num_envs,),
+                device=self.device,
+            )
+            obs_out = self.obs_queue[
+                torch.arange(self.num_envs, device=self.device),
+                delay_index,
+            ].clone()
+        return obs_out.detach().cpu().numpy()
 
     def _read_camera_outputs(self) -> dict[str, torch.Tensor]:
         if self.camera is None:

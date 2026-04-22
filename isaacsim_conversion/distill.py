@@ -59,6 +59,7 @@ def launch_app():
         choices=["dense", "preInsertAndFinal", "finalGoalOnly"],
         default="preInsertAndFinal",
     )
+    parser.add_argument("--peg_force_identity_start_quat", action="store_true")
     parser.add_argument("--teacher_checkpoint", default="pretrained_policy/model.pth")
     parser.add_argument("--teacher_config", default="pretrained_policy/config.yaml")
     parser.add_argument("--student_checkpoint", default=None)
@@ -73,6 +74,8 @@ def launch_app():
     parser.add_argument("--num_episodes", type=int, default=None)
     parser.add_argument("--num_envs", type=int, default=None)
     parser.add_argument("--allow_single_env_camera_eval", action="store_true")
+    parser.add_argument("--default_asset_friction_override", type=float, default=None)
+    parser.add_argument("--fingertip_friction_override", type=float, default=None)
     parser.add_argument("--env_spacing", type=float, default=None)
     parser.add_argument("--ground_plane_size", type=float, default=None)
     parser.add_argument("--object_start_mode", choices=["fixed", "randomized"], default=None)
@@ -849,6 +852,7 @@ def run_episode(
             monitor_mask_t = torch.from_numpy(monitor_mask).to(device=env.device, dtype=torch.bool)
             stepping_action = stepping_action.clone()
             stepping_action[monitor_mask_t] = student_action[monitor_mask_t]
+        stepping_action = env.delay_actions(stepping_action)
         targets = compute_joint_pos_targets(
             actions=stepping_action.detach().cpu().numpy(),
             prev_targets=env.prev_targets,
@@ -1138,8 +1142,9 @@ def run_online_dagger(
             accumulated_loss = None
             accumulated_steps = 0
 
+        stepping_action = env.delay_actions(student_action)
         targets = compute_joint_pos_targets(
-            actions=student_action.detach().cpu().numpy(),
+            actions=stepping_action.detach().cpu().numpy(),
             prev_targets=env.prev_targets,
             hand_moving_average=settings.hand_moving_average,
             arm_moving_average=settings.arm_moving_average,
@@ -1492,7 +1497,9 @@ def main():
         peg_idx=args.peg_idx,
         peg_tol_slot_idx=args.peg_tol_slot_idx,
         peg_goal_mode=args.peg_goal_mode,
+        peg_force_identity_start_quat=args.peg_force_identity_start_quat,
     )
+    teacher_env_cfg = (load_yaml(teacher_config).get("task") or {}).get("env") or {}
     env = IsaacSimDistillEnv(
         task_spec=task_spec,
         app=app,
@@ -1513,6 +1520,29 @@ def main():
         depth_max_m=settings.depth_max_m,
         episode_length=settings.episode_length,
         reset_when_dropped=settings.reset_when_dropped,
+        use_obs_delay=bool(teacher_env_cfg.get("useObsDelay", False)),
+        obs_delay_max=int(teacher_env_cfg.get("obsDelayMax", 1)),
+        use_action_delay=bool(teacher_env_cfg.get("useActionDelay", False)),
+        action_delay_max=int(teacher_env_cfg.get("actionDelayMax", 1)),
+        use_object_state_delay_noise=bool(teacher_env_cfg.get("useObjectStateDelayNoise", False)),
+        object_state_delay_max=int(teacher_env_cfg.get("objectStateDelayMax", 1)),
+        object_state_xyz_noise_std=float(teacher_env_cfg.get("objectStateXyzNoiseStd", 0.0)),
+        object_state_rotation_noise_degrees=float(teacher_env_cfg.get("objectStateRotationNoiseDegrees", 0.0)),
+        joint_velocity_obs_noise_std=float(teacher_env_cfg.get("jointVelocityObsNoiseStd", 0.0)),
+        goal_xy_obs_noise=float(teacher_env_cfg.get("goalXyObsNoise", 0.0)),
+        object_scale_noise_multiplier_range=tuple(
+            float(x) for x in teacher_env_cfg.get("objectScaleNoiseMultiplierRange", [1.0, 1.0])
+        ),
+        default_asset_friction=(
+            float(args.default_asset_friction_override)
+            if args.default_asset_friction_override is not None
+            else float(teacher_env_cfg.get("objectFriction", 0.5))
+        ),
+        fingertip_friction=(
+            float(args.fingertip_friction_override)
+            if args.fingertip_friction_override is not None
+            else float(teacher_env_cfg.get("fingerTipFriction", 1.5))
+        ),
     )
     teacher_inference_batch_size = 128 if args.mode == "teacher_eval" else 32
     teacher = RlPlayer(
