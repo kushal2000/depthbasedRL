@@ -600,6 +600,53 @@ def _capture_rgb_frame(env: IsaacSimDistillEnv, env_id: int) -> np.ndarray | Non
     return np.repeat(depth_img[..., None], 3, axis=-1)
 
 
+def _single_channel_to_rgb_u8(channel: np.ndarray) -> np.ndarray:
+    channel = np.clip(channel, 0.0, 1.0)
+    img = (channel * 255.0).round().astype(np.uint8)
+    return np.repeat(img[..., None], 3, axis=-1)
+
+
+def _tensor_chw_to_hwc_u8(image: torch.Tensor) -> np.ndarray:
+    image_np = image.detach().float().cpu().numpy()
+    if image_np.ndim != 3:
+        raise ValueError(f"Expected CHW image tensor, got shape {image_np.shape}")
+    channels = image_np.shape[0]
+    if channels == 1:
+        return _single_channel_to_rgb_u8(image_np[0])
+    if channels == 3:
+        rgb = np.clip(np.transpose(image_np, (1, 2, 0)), 0.0, 1.0)
+        return (rgb * 255.0).round().astype(np.uint8)
+    if channels == 4:
+        rgb = np.clip(np.transpose(image_np[:3], (1, 2, 0)), 0.0, 1.0)
+        depth_rgb = _single_channel_to_rgb_u8(image_np[3])
+        rgb_u8 = (rgb * 255.0).round().astype(np.uint8)
+        return np.concatenate([rgb_u8, depth_rgb], axis=1)
+    raise ValueError(f"Unsupported channel count for visualization: {channels}")
+
+
+def _extract_policy_debug_frames(
+    student_obs: dict[str, torch.Tensor] | None,
+    student_image: torch.Tensor | None,
+    modality: str | None,
+) -> dict[str, list[np.ndarray]]:
+    if student_obs is None or student_image is None or modality is None:
+        return {}
+    outputs: dict[str, list[np.ndarray]] = {"policy_input": []}
+    images = student_obs["images"]
+    num_envs = student_image.shape[0]
+    if "rgb" in images:
+        outputs["raw_rgb"] = []
+    if "depth" in images:
+        outputs["raw_depth"] = []
+    for env_id in range(num_envs):
+        outputs["policy_input"].append(_tensor_chw_to_hwc_u8(student_image[env_id]))
+        if "rgb" in images:
+            outputs["raw_rgb"].append(_tensor_chw_to_hwc_u8(images["rgb"][env_id]))
+        if "depth" in images:
+            outputs["raw_depth"].append(_tensor_chw_to_hwc_u8(images["depth"][env_id]))
+    return outputs
+
+
 def _pad_video_frames_for_codec(frames: list[np.ndarray]) -> list[np.ndarray]:
     padded = []
     for frame in frames:
@@ -648,6 +695,9 @@ def _log_viewer_artifacts(
         "goal_idx": [int(f["goal_idx"]) for f in frames],
         "kp_dist": [float(f["kp_dist"]) for f in frames],
     }
+    pred_object_poses = [f["predicted_object_pose"] for f in frames if "predicted_object_pose" in f]
+    if pred_object_poses:
+        payload["predicted_object_poses"] = np.stack(pred_object_poses).tolist()
     viewer_path = run_dir / "interactive_viewer" / f"{artifact_stem}.html"
     html_text = write_pose_viewer_html(viewer_path, payload, title=f"{mode} rollout")
     _log(f"Saved interactive viewer: {viewer_path}")
@@ -739,6 +789,8 @@ def run_episode(
         raise ValueError("capture_viewer requires run_dir")
 
     for step_i in range(settings.max_steps):
+        student_obs = None
+        student_image = None
         sim_state = env.compute_sim_state()
         teacher_obs = env.build_teacher_obs(sim_state)
         teacher_obs_tensor = torch.from_numpy(teacher_obs).float().to(env.device)
@@ -783,11 +835,26 @@ def run_episode(
         env.step(render=not _args.headless)
         next_sim_state = env.compute_sim_state()
         if capture_frames and run_dir is not None and (step_i % max(capture_frame_stride, 1) == 0):
-            save_camera_debug_step(env, run_dir, step_i)
+            save_camera_debug_step(
+                env,
+                run_dir,
+                step_i,
+                debug_frames=_extract_policy_debug_frames(student_obs, student_image, env.camera_modality),
+            )
         if capture_viewer and len(viewer_frames) < capture_viewer_len:
-            viewer_frames.append(env.capture_viewer_frame(capture_viewer_env_id, next_sim_state))
+            viewer_frame = env.capture_viewer_frame(capture_viewer_env_id, next_sim_state)
+            if student_out is not None:
+                aux_pred = student_out.aux.get("object_pos")
+                if aux_pred is not None:
+                    pred_pose = viewer_frame["object_pose"].copy()
+                    pred_pose[:3] = aux_pred[capture_viewer_env_id].detach().cpu().numpy().astype(np.float32)
+                    viewer_frame["predicted_object_pose"] = pred_pose
+            viewer_frames.append(viewer_frame)
             if capture_viewer_video:
-                rgb_frame = _capture_rgb_frame(env, capture_viewer_env_id)
+                if student_image is not None:
+                    rgb_frame = _tensor_chw_to_hwc_u8(student_image[capture_viewer_env_id])
+                else:
+                    rgb_frame = _capture_rgb_frame(env, capture_viewer_env_id)
                 if rgb_frame is not None:
                     viewer_video_frames.append(rgb_frame)
         finished = env.maybe_advance_goal(next_sim_state)
@@ -915,6 +982,8 @@ def compute_distill_step(
     with torch.no_grad():
         teacher_action = teacher.get_normalized_action(teacher_obs_tensor, deterministic_actions=True)
 
+    student_obs = None
+    student_image = None
     if _args.student_input == "teacher_obs":
         if train:
             student_out, student_hidden = student(teacher_obs_tensor, student_hidden)
@@ -952,7 +1021,17 @@ def compute_distill_step(
         settings.action_loss_weight * torch.mean(action_loss_per_env)
         + settings.aux_object_pos_weight * torch.mean(aux_loss_per_env)
     )
-    return sim_state, student_action, total_loss, action_loss_per_env, aux_loss_per_env, student_hidden
+    return (
+        sim_state,
+        student_action,
+        total_loss,
+        action_loss_per_env,
+        aux_loss_per_env,
+        student_hidden,
+        student_out,
+        student_obs,
+        student_image,
+    )
 
 
 def run_online_dagger(
@@ -996,7 +1075,17 @@ def run_online_dagger(
     ) if _args.debug_policy_image_stats else []
 
     for iter_idx in range(settings.online_num_iters):
-        sim_state, student_action, total_loss, action_loss_per_env, aux_loss_per_env, student_hidden = compute_distill_step(
+        (
+            sim_state,
+            student_action,
+            total_loss,
+            action_loss_per_env,
+            aux_loss_per_env,
+            student_hidden,
+            student_out,
+            student_obs,
+            student_image,
+        ) = compute_distill_step(
             env=env,
             teacher=teacher,
             student=student,
@@ -1034,14 +1123,28 @@ def run_online_dagger(
         env.step(render=not _args.headless)
         next_sim_state = env.compute_sim_state()
         if capture_frames and (iter_idx % max(capture_frame_stride, 1) == 0):
-            save_camera_debug_step(env, run_dir, iter_idx)
+            save_camera_debug_step(
+                env,
+                run_dir,
+                iter_idx,
+                debug_frames=_extract_policy_debug_frames(student_obs, student_image, env.camera_modality),
+            )
         if capture_viewer and viewer_frames is None and viewer_interval is not None and (iter_idx + 1) % viewer_interval == 0:
             viewer_frames = []
             viewer_video_frames = []
         if capture_viewer and viewer_frames is not None:
-            viewer_frames.append(env.capture_viewer_frame(capture_viewer_env_id, next_sim_state))
+            viewer_frame = env.capture_viewer_frame(capture_viewer_env_id, next_sim_state)
+            aux_pred = student_out.aux.get("object_pos")
+            if aux_pred is not None:
+                pred_pose = viewer_frame["object_pose"].copy()
+                pred_pose[:3] = aux_pred[capture_viewer_env_id].detach().cpu().numpy().astype(np.float32)
+                viewer_frame["predicted_object_pose"] = pred_pose
+            viewer_frames.append(viewer_frame)
             if capture_viewer_video:
-                rgb_frame = _capture_rgb_frame(env, capture_viewer_env_id)
+                if student_image is not None:
+                    rgb_frame = _tensor_chw_to_hwc_u8(student_image[capture_viewer_env_id])
+                else:
+                    rgb_frame = _capture_rgb_frame(env, capture_viewer_env_id)
                 if rgb_frame is not None:
                     assert viewer_video_frames is not None
                     viewer_video_frames.append(rgb_frame)
@@ -1152,7 +1255,21 @@ def _make_grid(images: list[np.ndarray]) -> np.ndarray:
     return grid
 
 
-def save_camera_debug(env: IsaacSimDistillEnv, run_dir: Path):
+def _write_debug_frame_group(run_dir: Path, group_name: str, frames: list[np.ndarray]):
+    import imageio.v3 as iio
+
+    if not frames:
+        return
+    for env_id, frame in enumerate(frames):
+        iio.imwrite(run_dir / "camera_debug" / f"env_{env_id}_{group_name}.png", frame)
+    iio.imwrite(run_dir / "camera_debug" / f"{group_name}_grid.png", _make_grid(frames))
+
+
+def save_camera_debug(
+    env: IsaacSimDistillEnv,
+    run_dir: Path,
+    debug_frames: dict[str, list[np.ndarray]] | None = None,
+):
     import imageio.v3 as iio
     import json
 
@@ -1186,6 +1303,8 @@ def save_camera_debug(env: IsaacSimDistillEnv, run_dir: Path):
             depth_images.append(depth_img)
             iio.imwrite(run_dir / "camera_debug" / f"env_{env_id}_depth.png", depth_img)
         iio.imwrite(run_dir / "camera_debug" / "depth_grid.png", _make_grid(depth_images))
+    for group_name, frames in (debug_frames or {}).items():
+        _write_debug_frame_group(run_dir, group_name, frames)
 
     with open(run_dir / "camera_debug" / "metadata.json", "w") as f:
         json.dump(
@@ -1220,7 +1339,12 @@ def save_camera_debug(env: IsaacSimDistillEnv, run_dir: Path):
         )
 
 
-def save_camera_debug_step(env: IsaacSimDistillEnv, run_dir: Path, step_i: int):
+def save_camera_debug_step(
+    env: IsaacSimDistillEnv,
+    run_dir: Path,
+    step_i: int,
+    debug_frames: dict[str, list[np.ndarray]] | None = None,
+):
     import imageio.v3 as iio
 
     if env.camera is None:
@@ -1257,6 +1381,14 @@ def save_camera_debug_step(env: IsaacSimDistillEnv, run_dir: Path, step_i: int):
             env_dir.mkdir(parents=True, exist_ok=True)
             iio.imwrite(env_dir / f"frame_{step_i:04d}.png", depth_img)
         iio.imwrite(grids_dir / f"depth_{step_i:04d}.png", _make_grid(depth_images))
+    for group_name, frames in (debug_frames or {}).items():
+        group_dir = run_dir / "camera_debug" / "grids"
+        group_dir.mkdir(parents=True, exist_ok=True)
+        for env_id, frame in enumerate(frames):
+            env_dir = run_dir / "camera_debug" / f"env_{env_id}" / group_name
+            env_dir.mkdir(parents=True, exist_ok=True)
+            iio.imwrite(env_dir / f"frame_{step_i:04d}.png", frame)
+        iio.imwrite(group_dir / f"{group_name}_{step_i:04d}.png", _make_grid(frames))
 
 
 def update_monitor_history(
