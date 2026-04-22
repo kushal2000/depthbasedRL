@@ -1,0 +1,100 @@
+#!/bin/bash
+#SBATCH -N 1
+#SBATCH -n 1
+#SBATCH --cpus-per-task=12
+#SBATCH --get-user-env
+#SBATCH --mem=100000
+#SBATCH -t 0-01:00:00
+#SBATCH --partition=portal
+#SBATCH --exclude=portal-compute-01
+#SBATCH --gres=gpu:1
+#SBATCH -o /dev/null
+#SBATCH -e /dev/null
+
+# ╔══════════════════════════════════════════════════════════════╗
+# ║  Smoke test: 2-part multi-part training (beam_2 + beam_6)   ║
+# ║  Small envs, few epochs — just validate it doesn't crash    ║
+# ╚══════════════════════════════════════════════════════════════╝
+
+OBJECT_NAMES='["beam_2_coacd","beam_6_coacd"]'
+
+CHECKPOINT="/share/portal/kk837/depthbasedRL/pretrained_policy/model.pth"
+NUM_ENVS=24576
+MINIBATCH_SIZE=98304
+SEED=0
+
+ENABLE_RETRACT=True
+RETRACT_REWARD_SCALE=1.0
+RETRACT_DISTANCE_THRESHOLD=0.1
+RETRACT_SUCCESS_BONUS=1000.0
+
+WANDB_PROJECT="FABRICA_TRAINING"
+WANDB_GROUP="fabrica_phase4_unified"
+EXPERIMENT_TAG="smoke_test_2parts"
+
+set -euo pipefail
+
+REPO_ROOT="/share/portal/kk837/depthbasedRL"
+VISER_PORT=$((8082 + (SLURM_JOB_ID % 900)))
+
+DATETIME=$(date +"%Y-%m-%d_%H-%M-%S")
+EXPERIMENT_NAME="${EXPERIMENT_TAG}_${DATETIME}"
+scontrol update JobId="$SLURM_JOB_ID" JobName="$EXPERIMENT_NAME"
+HYDRA_RUN_DIR="${REPO_ROOT}/train_dir/${WANDB_PROJECT}/${WANDB_GROUP}/${EXPERIMENT_NAME}"
+mkdir -p "$HYDRA_RUN_DIR"
+exec > "${HYDRA_RUN_DIR}/slurm.log" 2> "${HYDRA_RUN_DIR}/slurm.err"
+
+CHECKPOINT_ARG=""
+if [ -n "$CHECKPOINT" ]; then
+    CHECKPOINT_ARG="checkpoint=$CHECKPOINT"
+fi
+
+cd "$REPO_ROOT"
+source .venv/bin/activate
+
+python -u -m isaacgymenvs.train \
+    task=FabricaEnvLSTMAsymmetric \
+    ++task.env.useSparseReward=False \
+    headless=True \
+    task.env.numEnvs=$NUM_ENVS \
+    train.params.config.minibatch_size=$MINIBATCH_SIZE \
+    multi_gpu=False \
+    train.params.config.good_reset_boundary=0 \
+    task.env.goodResetBoundary=0 \
+    train.params.config.use_others_experience=lf \
+    train.params.config.off_policy_ratio=1.0 \
+    train.params.config.expl_type=mixed_expl_learn_param \
+    train.params.config.expl_reward_type=entropy \
+    train.params.config.expl_coef_block_size=4096 \
+    train.params.config.expl_reward_coef_scale=0.005 \
+    train.params.network.space.continuous.fixed_sigma=coef_cond \
+    task.env.forceScale=0 \
+    task.env.torqueScale=0 \
+    task.env.objectAngVelPenaltyScale=0.0 \
+    "task.env.objectScaleNoiseMultiplierRange=[0.9,1.1]" \
+    task.env.forceConsecutiveNearGoalSteps=True \
+    task.env.multiPart=True \
+    "task.env.objectNames=$OBJECT_NAMES" \
+    task.env.tableResetZ=0.38 \
+    task.env.tableResetZRange=0 \
+    task.env.useObsDelay=False \
+    task.env.useActionDelay=False \
+    task.env.useObjectStateDelayNoise=False \
+    task.env.viserVizPort=$VISER_PORT \
+    task.env.viserViz=False \
+    task.env.capture_video=False \
+    task.env.finalGoalToleranceCurriculumEnabled=True \
+    task.env.finalGoalToleranceInitial=0.01 \
+    task.env.finalGoalToleranceTarget=0.002 \
+    task.env.finalGoalToleranceCurriculumDecrement=0.001 \
+    task.env.enableRetract=$ENABLE_RETRACT \
+    task.env.retractRewardScale=$RETRACT_REWARD_SCALE \
+    task.env.retractDistanceThreshold=$RETRACT_DISTANCE_THRESHOLD \
+    task.env.retractSuccessBonus=$RETRACT_SUCCESS_BONUS \
+    wandb_activate=False \
+    seed=$SEED \
+    experiment="00_$EXPERIMENT_NAME" \
+    hydra.run.dir="$HYDRA_RUN_DIR" \
+    task.sim.physx.max_gpu_contact_pairs=16777216 \
+    train.params.config.max_epochs=5 \
+    $CHECKPOINT_ARG

@@ -471,6 +471,15 @@ class A2CBuilder(NetworkBuilder):
                         sigma = self.sigma_act(self.sigma[idxs])
                     else:
                         sigma = self.sigma_act(self.sigma(out))
+                    if torch.isnan(mu).any() or torch.isinf(mu).any():
+                        import os
+                        rank = os.getenv("LOCAL_RANK", "?")
+                        nan_count = torch.isnan(mu).sum().item()
+                        inf_count = torch.isinf(mu).sum().item()
+                        print(f"[RANK {rank}] WARNING: mu has {nan_count} NaN, {inf_count} inf values out of {mu.numel()}")
+                        print(f"[RANK {rank}]   mu stats: min={mu[~torch.isnan(mu)].min().item() if (~torch.isnan(mu)).any() else 'all_nan'}, max={mu[~torch.isnan(mu)].max().item() if (~torch.isnan(mu)).any() else 'all_nan'}")
+                        print(f"[RANK {rank}]   sigma stats: min={sigma.min().item()}, max={sigma.max().item()}, has_nan={torch.isnan(sigma).any().item()}")
+                        print(f"[RANK {rank}]   mu*0 has_nan={torch.isnan(mu*0).any().item()}")
                     return mu, mu*0 + sigma, value, states
                     
         def is_separate_critic(self):

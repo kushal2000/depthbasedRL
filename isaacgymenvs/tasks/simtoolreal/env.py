@@ -56,8 +56,10 @@ from pytorch3d.transforms import (
 )
 
 from dextoolbench.objects import NAME_TO_OBJECT
+import fabrica.objects  # noqa: F401 — registers fabrica parts into NAME_TO_OBJECT
 from isaacgymenvs.tasks.base.vec_task import VecTask
 from isaacgymenvs.tasks.simtoolreal.utils import (
+    final_goal_tolerance_curriculum,
     populate_dof_properties,
     tolerance_curriculum,
     tolerance_successes_objective,
@@ -83,6 +85,24 @@ DATETIME_STR = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
 
 def assert_equals(a, b):
     assert a == b, f"a: {a}, b: {b}"
+
+
+from dataclasses import dataclass as _dataclass
+
+
+@_dataclass
+class ViewerFrame:
+    """One timestep of state for the interactive 3D viewer.
+
+    All poses use Isaac Gym's [x, y, z, qx, qy, qz, qw] layout (xyzw quaternion).
+    This matches viewer_api.py's expected format and Three.js's quaternion.set(x,y,z,w).
+    """
+
+    robot_joint_pos: np.ndarray  # (J,) joint positions in radians
+    robot_base_pose: np.ndarray  # (7,) [x, y, z, qx, qy, qz, qw]
+    object_pose: np.ndarray  # (7,) [x, y, z, qx, qy, qz, qw]
+    goal_pose: Optional[np.ndarray]  # (7,) or None if no goal object
+    table_pose: np.ndarray  # (7,) [x, y, z, qx, qy, qz, qw]
 
 
 class SimToolReal(VecTask):
@@ -384,6 +404,29 @@ class SimToolReal(VecTask):
         # Init camera for wandb logging
         self._initialize_camera_sensor(cam_pos=cam_pos, cam_target=cam_target)
         self._modify_render_settings_if_headless()
+
+        # Init viser training viewer
+        self.viser_viz_enabled = self.cfg["env"].get("viserViz", False)
+        if self.viser_viz_enabled:
+            from isaacgymenvs.tasks.simtoolreal.viser_viz import TrainingViserViewer
+
+            asset_root = os.path.join(
+                os.path.dirname(os.path.abspath(__file__)), "../../../assets"
+            )
+            robot_urdf_path = Path(asset_root) / self.robot_asset_file
+            object_urdf_path = Path(self.object_asset_files[0])
+            scene_urdf_path = Path(asset_root) / self.asset_files_dict["table"]
+
+            self.viser_viewer = TrainingViserViewer(
+                port=self.cfg["env"].get("viserVizPort", 8082),
+                dump_dir=self.cfg["env"].get("viserVizDumpDir", "viser_viz_data"),
+                object_name=self.cfg["env"]["objectName"],
+                robot_urdf_path=robot_urdf_path,
+                object_urdf_path=object_urdf_path,
+                scene_urdf_path=scene_urdf_path,
+                num_envs=self.num_envs,
+                num_dofs=self.num_hand_arm_dofs,
+            )
 
         # volume to sample target position from
         target_volume_origin = np.array([0, 0.05, 0.8], dtype=np.float32)
@@ -693,6 +736,13 @@ class SimToolReal(VecTask):
         }
 
         self.last_curriculum_update = 0
+
+        # Final goal tolerance curriculum
+        if self.cfg["env"].get("finalGoalToleranceCurriculumEnabled", False):
+            self.final_goal_success_tolerance = self.cfg["env"].get("finalGoalToleranceInitial", 0.01)
+        else:
+            self.final_goal_success_tolerance = self.cfg["env"].get("finalGoalSuccessTolerance") or 0.01
+        self.last_final_goal_curriculum_update = 0
 
         self.episode_root_state_tensors = [[] for _ in range(self.num_envs)]
         self.episode_dof_states = [[] for _ in range(self.num_envs)]
@@ -1123,6 +1173,7 @@ class SimToolReal(VecTask):
     def change_on_restart(self, cfg):
         self.frame_since_restart = 0
         self.last_curriculum_update = 0
+        self.last_final_goal_curriculum_update = 0
 
         self.cfg["env"]["distanceDeltaRewScale"] = cfg["env"]["distanceDeltaRewScale"]
         self.cfg["env"]["liftingRewScale"] = cfg["env"]["liftingRewScale"]
@@ -1238,6 +1289,9 @@ class SimToolReal(VecTask):
         ):
             object_asset_options = gymapi.AssetOptions()
             object_asset_options.vhacd_enabled = need_vhacd
+
+            if self.cfg["env"].get("useSDF", False):
+                object_asset_options.thickness = 0.0
 
             # WARNING: This should not be done if trying to set different densities for different parts of the object, unless handled appropriately in the URDF
             object_asset_options.collapse_fixed_joints = True
@@ -1501,6 +1555,21 @@ class SimToolReal(VecTask):
             self.tolerance_curriculum_increment,
         )
 
+        if self.cfg["env"].get("finalGoalToleranceCurriculumEnabled", False):
+            self.final_goal_success_tolerance, self.last_final_goal_curriculum_update = \
+                final_goal_tolerance_curriculum(
+                    self.last_final_goal_curriculum_update,
+                    self.frame_since_restart,
+                    self.cfg["env"].get("finalGoalToleranceCurriculumInterval", 3000),
+                    self.prev_episode_successes,
+                    self.max_consecutive_successes,
+                    self.final_goal_success_tolerance,
+                    self.cfg["env"].get("finalGoalToleranceInitial", 0.01),
+                    self.cfg["env"].get("finalGoalToleranceTarget", 0.001),
+                    self.cfg["env"].get("finalGoalToleranceCurriculumDecrement", 0.001),
+                    self.cfg["env"].get("finalGoalToleranceCurriculumSuccessThreshold", 0.8),
+                )
+
         eval_success_tolerance = self.cfg["env"].get("evalSuccessTolerance", None)
         if eval_success_tolerance is not None:
             self.success_tolerance = eval_success_tolerance
@@ -1537,6 +1606,8 @@ class SimToolReal(VecTask):
             goal_keypoint_pos_fixed_size=self.goal_keypoint_pos_fixed_size,
             rewards_episode=self.rewards_episode,
             last_curriculum_update=self.last_curriculum_update,
+            final_goal_success_tolerance=self.final_goal_success_tolerance,
+            last_final_goal_curriculum_update=self.last_final_goal_curriculum_update,
             rb_forces=self.rb_forces,
             rb_torques=self.rb_torques,
             random_force_prob=self.random_force_prob,
@@ -1567,6 +1638,9 @@ class SimToolReal(VecTask):
         del env_state["rewards_episode"]
 
         for key in self.get_env_state().keys():
+            if key == "object_init_state" and self.cfg["env"].get("objectStartPose") is not None:
+                print(f"Skipping checkpoint restore of object_init_state (objectStartPose is set)")
+                continue
             value = env_state.get(key, None)
             if value is None:
                 continue
@@ -1788,7 +1862,7 @@ class SimToolReal(VecTask):
         asset_options.flip_visual_attachments = False
         asset_options.collapse_fixed_joints = True
         asset_options.disable_gravity = True
-        asset_options.thickness = 0.001
+        asset_options.thickness = 0.0 if self.cfg["env"].get("useSDF", False) else 0.001
         asset_options.angular_damping = 0.01
         asset_options.linear_damping = 0.01
 
@@ -1851,6 +1925,8 @@ class SimToolReal(VecTask):
         table_asset_options = gymapi.AssetOptions()
         table_asset_options.disable_gravity = True
         table_asset_options.fix_base_link = True
+        if self.cfg["env"].get("useSDF", False):
+            table_asset_options.thickness = 0.0
         table_asset = self.gym.load_asset(
             self.sim, asset_root, self.asset_files_dict["table"], table_asset_options
         )
@@ -2242,6 +2318,29 @@ class SimToolReal(VecTask):
 
         self._after_envs_created()
 
+        # Save the URDF text for the object assigned to index_to_view BEFORE the
+        # temp dir is deleted.  _finalize_viewer_capture() uses this to embed the
+        # object inline via make_embedded_robot (safe: these URDFs are pure primitives —
+        # <box>/<cylinder> only, no mesh file references).
+        # index_to_view is set after super().__init__ returns (line 392), so use
+        # getattr with default 0 — it is always 0 at env creation time anyway.
+        viewer_obj_idx = getattr(self, "index_to_view", 0) % len(self.object_asset_files)
+        _obj_path = Path(self.object_asset_files[viewer_obj_idx])
+        self.viewer_object_urdf_text: Optional[str] = (
+            _obj_path.read_text() if _obj_path.exists() else None
+        )
+        if self.viewer_object_urdf_text is not None:
+            print(
+                f"[viewer] Saved object URDF text ({len(self.viewer_object_urdf_text)} bytes) "
+                f"for index_to_view={viewer_obj_idx} "
+                f"(object_asset_files[{viewer_obj_idx}] = {_obj_path.name})"
+            )
+        else:
+            print(
+                f"[viewer] Could not save object URDF text — "
+                f"file not found: {_obj_path}"
+            )
+
         try:
             # by this point we don't need the temporary folder for procedurally generated assets
             tmp_assets_dir.cleanup()
@@ -2415,9 +2514,11 @@ class SimToolReal(VecTask):
         )
 
         if self.with_table_force_sensor:
-            TABLE_FORCE_THRESHOLD = 100.0
+            table_force_threshold = float(
+                self.cfg["env"].get("tableForceResetThreshold", 100.0)
+            )
             table_force_too_high = torch.where(
-                self.max_table_sensor_force_norm_smoothed > TABLE_FORCE_THRESHOLD,
+                self.max_table_sensor_force_norm_smoothed > table_force_threshold,
                 ones,
                 zeros,
             )
@@ -2570,7 +2671,17 @@ class SimToolReal(VecTask):
         if self.cfg["env"]["fixedSizeKeypointReward"]:
             keypoint_rew = keypoint_rew_fixed_size
 
-        keypoint_success_tolerance = self.success_tolerance * self.keypoint_scale
+        if self.cfg["env"].get("finalGoalToleranceCurriculumEnabled", False):
+            final_tol = self.final_goal_success_tolerance
+        else:
+            final_tol = self.cfg["env"].get("finalGoalSuccessTolerance", None)
+        if final_tol is not None and self.cfg["env"]["useFixedGoalStates"]:
+            is_final_goal = self.successes == (self.max_consecutive_successes - 1)
+            base_tol = self.success_tolerance * self.keypoint_scale
+            tight_tol = final_tol * self.keypoint_scale
+            keypoint_success_tolerance = torch.where(is_final_goal, tight_tol, base_tol)
+        else:
+            keypoint_success_tolerance = self.success_tolerance * self.keypoint_scale
 
         # noinspection PyTypeChecker
         near_goal: Tensor = self.keypoints_max_dist <= keypoint_success_tolerance
@@ -2654,6 +2765,8 @@ class SimToolReal(VecTask):
         self.extras["closest_keypoint_max_dist"] = (
             self.prev_episode_closest_keypoint_max_dist
         )
+        self.extras["all_goals_hit_ratio"] = (self.prev_episode_successes >= self.max_consecutive_successes).float().mean().item()
+        self.extras["final_goal_tolerance"] = self.final_goal_success_tolerance
         self.true_objective = self._true_objective()
         self.extras["true_objective"] = self.true_objective
 
@@ -3422,17 +3535,7 @@ class SimToolReal(VecTask):
             if self.randomize_object_rotation:
                 new_object_rot = self.get_random_quat(env_ids)
                 if USE_FIXED_INIT_OBJECT_POSE:
-                    new_object_rot[:] = 0.0
-                    new_object_rot[:, -1] = 1.0  # xyzw
-
-                    # HACK: Rotate the object by 180 degrees around the z-axis to go from right handed to left handed robot
-                    from scipy.spatial.transform import Rotation as R
-
-                    new_object_rot[:] = (
-                        torch.from_numpy(R.from_euler("z", 180, degrees=True).as_quat())
-                        .float()
-                        .to(self.device)[None]
-                    )
+                    new_object_rot[:] = self.object_init_state[env_ids, 3:7]
 
                 # indices 3,4,5,6 correspond to the rotation quaternion
                 self.root_state_tensor[obj_indices, 3:7] = new_object_rot
@@ -3544,6 +3647,9 @@ class SimToolReal(VecTask):
 
             if self.save_states:
                 self.dump_env_states(env_ids)
+
+            if self.viser_viz_enabled:
+                self._viser_viz_on_reset(env_ids)
 
             self.extras["scalars"] = dict()
             self.extras["scalars"]["success_tolerance"] = self.success_tolerance
@@ -4564,6 +4670,8 @@ class SimToolReal(VecTask):
             self.accumulate_env_states()
 
         self._capture_video_if_needed()
+        self._viser_viz_step_if_needed()
+        self._capture_viewer_if_needed()
 
         if self.viewer and self.debug_viz:
             # draw axes on target object
@@ -4852,9 +4960,46 @@ class SimToolReal(VecTask):
         #   Case 3: self.video_frames = [np.array(frame) for frame in ...]
         #     * These are image frames that will be assembled into a video when enough frames are capture
         self.video_frames: Optional[List[np.ndarray]] = None
+
+        # self.viewer_state_frames mirrors self.video_frames but stores pose data instead of pixels.
+        # 4-state machine:
+        #   None                → not capturing
+        #   [] + _seen=False    → armed, waiting to observe the episode-ending reset_buf==1
+        #   [] + _seen=True     → reset observed; next step (after reset_idx) is the real ep start
+        #   [ViewerFrame, ...]  → actively capturing; finalized when len == capture_viewer_len
+        self.viewer_state_frames: Optional[List[ViewerFrame]] = None
+        self._viewer_seen_episode_reset: bool = False  # True once reset_buf==1 has been observed while armed
+
+        # Guard: the interactive viewer URDF URL is hardcoded for this robot.
+        # Raise early if a different robot asset is configured.
+        _expected_robot = "urdf/kuka_sharpa_description/iiwa14_left_sharpa_adjusted_restricted.urdf"
+        _configured_robot = self.cfg["env"]["asset"].get("robot", "")
+        if self.cfg["env"].get("capture_viewer", False) and _configured_robot != _expected_robot:
+            raise ValueError(
+                f"capture_viewer=True requires robot asset '{_expected_robot}', "
+                f"but cfg['env']['asset']['robot'] = '{_configured_robot}'. "
+                f"Update the ROBOT_URDF_URL in _finalize_viewer_capture() or set capture_viewer=False."
+            )
+
         self.gym.set_camera_location(
             self.camera_handle, self.envs[self.index_to_view], cam_pos, cam_target
         )
+
+        # Collision geometry camera (same resolution/position, renders convex hulls)
+        self.capture_collision = self.cfg["env"].get("capture_video_collision_geometry", True)
+        if self.capture_collision:
+            collision_props = gymapi.CameraProperties()
+            collision_props.width = self.camera_properties.width
+            collision_props.height = self.camera_properties.height
+            collision_props.use_collision_geometry = True
+            self.collision_camera_handle = self.gym.create_camera_sensor(
+                self.envs[self.index_to_view], collision_props
+            )
+            self.collision_camera_properties = collision_props
+            self.collision_video_frames: Optional[List[np.ndarray]] = None
+            self.gym.set_camera_location(
+                self.collision_camera_handle, self.envs[self.index_to_view], cam_pos, cam_target
+            )
 
     def _modify_render_settings_if_headless(self) -> None:
         # If not headless, leave things as they are
@@ -4886,6 +5031,8 @@ class SimToolReal(VecTask):
             )
             print("-" * 80)
             self.video_frames = []
+            if self.capture_collision:
+                self.collision_video_frames = []
             return
 
         should_start_video_capture_now = (
@@ -4919,6 +5066,8 @@ class SimToolReal(VecTask):
         # Store image
         self.enable_viewer_sync = True
         self.gym.render_all_camera_sensors(self.sim)
+
+        # Capture visual camera
         color_image = self.gym.get_camera_image(
             self.sim,
             self.envs[self.index_to_view],
@@ -4937,39 +5086,596 @@ class SimToolReal(VecTask):
         color_image = color_image.reshape(
             self.camera_properties.height, self.camera_properties.width, NUM_RGBA
         )
+        color_image = self._add_env_idx_overlay(color_image)
         self.video_frames.append(color_image)
 
+        # Capture collision camera
+        if self.capture_collision and self.collision_video_frames is not None:
+            collision_image = self.gym.get_camera_image(
+                self.sim,
+                self.envs[self.index_to_view],
+                self.collision_camera_handle,
+                gymapi.IMAGE_COLOR,
+            )
+            if collision_image.size > 0:
+                collision_image = collision_image.reshape(
+                    self.collision_camera_properties.height,
+                    self.collision_camera_properties.width,
+                    NUM_RGBA,
+                )
+                collision_image = self._add_env_idx_overlay(collision_image)
+                self.collision_video_frames.append(collision_image)
+
         if len(self.video_frames) == self.cfg["env"]["capture_video_len"]:
-            video_filename = f"{DATETIME_STR}_video_{self.control_steps}.mp4"
-            videos_dir = Path("videos")
-            videos_dir.mkdir(parents=True, exist_ok=True)
-            video_path = videos_dir / video_filename
-            print("-" * 80)
-            print(f"Saving video to {video_path} ...")
-
-            if not self.enable_viewer_sync_before:
-                self.video_frames.pop(0)  # Remove first frame because it was not synced
-
             import imageio
             import wandb
 
-            imageio.mimsave(
-                video_path, self.video_frames, fps=int(1.0 / self.control_dt)
-            )
+            videos_dir = Path("videos")
+            videos_dir.mkdir(parents=True, exist_ok=True)
+            fps = int(1.0 / self.control_dt)
+
+            if not self.enable_viewer_sync_before:
+                self.video_frames.pop(0)
+
+            # Save visual video
+            video_filename = f"{DATETIME_STR}_video_{self.control_steps}.mp4"
+            video_path = videos_dir / video_filename
+            print("-" * 80)
+            print(f"Saving video to {video_path} ...")
+            imageio.mimsave(video_path, self.video_frames, fps=fps)
+
+            wandb_log = {}
             if wandb.run is not None:
-                wandb_video = wandb.Video(
-                    str(video_path), fps=int(1.0 / self.control_dt)
-                )
-                wandb.log({"video": wandb_video})
-                # self.wandb_dict["video"] = wandb.Video(
-                #     str(video_path), fps=int(1.0 / self.control_dt)
-                # )
+                wandb_log["video"] = wandb.Video(str(video_path), fps=fps)
+
+            # Save collision video
+            if self.capture_collision and self.collision_video_frames is not None:
+                if not self.enable_viewer_sync_before and len(self.collision_video_frames) > 0:
+                    self.collision_video_frames.pop(0)
+                collision_filename = f"{DATETIME_STR}_video_collision_{self.control_steps}.mp4"
+                collision_path = videos_dir / collision_filename
+                print(f"Saving collision video to {collision_path} ...")
+                if len(self.collision_video_frames) > 0:
+                    imageio.mimsave(collision_path, self.collision_video_frames, fps=fps)
+                    if wandb.run is not None:
+                        wandb_log["video_collision"] = wandb.Video(str(collision_path), fps=fps)
+                self.collision_video_frames = None
+
+            if wandb.run is not None and wandb_log:
+                wandb.log(wandb_log)
+
             print("DONE")
             print("-" * 80)
 
             # Reset variables
             self.video_frames = None
             self.enable_viewer_sync = self.enable_viewer_sync_before
+
+    def _viser_viz_step_if_needed(self):
+        """Push state to viser viewer (online mode) and accumulate for offline recording."""
+        if not self.viser_viz_enabled:
+            return
+
+        # Sync recording env index from viser GUI → self.index_to_view
+        rec_idx = self.viser_viewer.recording_env_idx
+        if rec_idx != self.index_to_view:
+            self.index_to_view = rec_idx
+
+        # Online mode: push live state for the selected viewing env
+        if self.viser_viewer.is_online_mode:
+            view_idx = min(int(self.viser_viewer.online_env_idx), self.num_envs - 1)
+            dof_pos = self.dof_state.reshape(self.num_envs, -1, 2)[view_idx, :, 0].cpu().numpy()
+            obj_pose = self.root_state_tensor[self.object_indices[view_idx], :7].cpu().numpy()
+            goal_pose = self.root_state_tensor[self.goal_object_indices[view_idx], :7].cpu().numpy()
+            table_pose = self.root_state_tensor[self.table_indices[view_idx], :7].cpu().numpy()
+            info = {
+                "control_steps": self.control_steps,
+                "successes": int(self.successes[view_idx].item()),
+                "max_successes": self.max_consecutive_successes,
+                "progress_buf": int(self.progress_buf[view_idx].item()),
+                "current_dist": float(self.keypoints_max_dist[view_idx].item()),
+                "success_tolerance": float(self.success_tolerance),
+                "episode_reward": float(self.rewards_episode["total_reward"][view_idx].item()),
+            }
+            self.viser_viewer.update_online(dof_pos, obj_pose, goal_pose, table_pose, info=info)
+
+        # Offline recording: sync exactly with video capture frames
+        # Start when video capture starts (first frame just appended)
+        if (self.video_frames is not None
+                and len(self.video_frames) == 1
+                and not self.viser_viewer.is_offline_recording):
+            self.viser_viewer.start_recording()
+
+        # Accumulate on every frame while video is recording
+        if self.viser_viewer.is_offline_recording and self.video_frames is not None:
+            env_idx = self.index_to_view
+            num_actors_per_env = self.root_state_tensor.shape[0] // self.num_envs
+            root_state = self.root_state_tensor.reshape(
+                self.num_envs, num_actors_per_env, 13
+            )[env_idx]
+            dof_state = self.dof_state.reshape(
+                self.num_envs, -1, 2
+            )[env_idx]
+            self.viser_viewer.accumulate_step(root_state, dof_state)
+
+            # Save when video capture finishes (same frame count)
+            if len(self.video_frames) == self.cfg["env"]["capture_video_len"]:
+                num_actors_per_env = self.root_state_tensor.shape[0] // self.num_envs
+                idx = self.index_to_view
+                metadata = {
+                    "object_name": self.cfg["env"]["objectName"],
+                    "control_steps": self.control_steps,
+                    "success": bool(self.prev_episode_successes[idx].item() > 0),
+                    "object_local_idx": self.object_indices[idx].item() % num_actors_per_env,
+                    "goal_local_idx": self.goal_object_indices[idx].item() % num_actors_per_env,
+                    "table_local_idx": self.table_indices[idx].item() % num_actors_per_env,
+                    "num_dofs": self.num_hand_arm_dofs,
+                }
+                if self.cfg["env"].get("useFixedGoalStates", False):
+                    metadata["fixed_goal_states"] = self.cfg["env"].get("fixedGoalStates")
+                self.viser_viewer.on_episode_end(idx, metadata)
+
+    def _viser_viz_on_reset(self, env_ids):
+        """No-op: offline recording is now synced with video capture, not episode resets."""
+        pass
+
+    def _add_env_idx_overlay(self, frame: np.ndarray) -> np.ndarray:
+        """Burn ENV_IDX text onto top-left corner of an RGBA frame."""
+        import cv2
+
+        # Work on RGB copy (cv2 doesn't handle RGBA putText well)
+        rgb = frame[:, :, :3].copy()
+        text = f"ENV {self.index_to_view}"
+        cv2.putText(
+            rgb, text, (5, 15), cv2.FONT_HERSHEY_SIMPLEX,
+            0.4, (255, 255, 255), 1, cv2.LINE_AA,
+        )
+        frame = frame.copy()
+        frame[:, :, :3] = rgb
+        return frame
+
+    # ──────────────────────────────────────────────────────────────────────
+    # Interactive 3D viewer capture (pose-based, no camera sensors needed)
+    # Mirrors the _capture_video_if_needed / _capture_video 3-state machine.
+    # ──────────────────────────────────────────────────────────────────────
+
+    def _capture_viewer_if_needed(self) -> None:
+        if not self.cfg["env"].get("capture_viewer", False):
+            return
+
+        # State 1 → 2: arm the capture when the frequency check fires.
+        if (
+            self.viewer_state_frames is None
+            and self.control_steps % self.cfg["env"]["capture_viewer_freq"] == 0
+        ):
+            print("-" * 80)
+            print(
+                f"At self.control_steps = {self.control_steps}, "
+                "arming interactive viewer capture (waiting for episode reset)"
+            )
+            print("-" * 80)
+            self.viewer_state_frames = []
+            self._viewer_seen_episode_reset = False
+            return
+
+        if self.viewer_state_frames is None:
+            return  # not armed
+
+        # State 2 → 3: observe the episode-ending reset (reset_buf==1 = end of episode,
+        # before reset_idx has been called).  Do NOT capture this frame — it is the
+        # final state of the PREVIOUS episode and would appear as a jarring jump.
+        if (
+            len(self.viewer_state_frames) == 0
+            and not self._viewer_seen_episode_reset
+            and self.reset_buf[self.index_to_view].item() == 1
+        ):
+            self._viewer_seen_episode_reset = True
+            return
+
+        # State 3 → 4 (start): one step after the reset was observed.
+        # pre_physics_step of the CURRENT step already called reset_idx, which set
+        # arm_hand_dof_pos to the new initial configuration.
+        # We do NOT re-check reset_buf here — even if the object falls again immediately
+        # (reset_buf==1 again by the end of this step), we still want to start capturing
+        # from this new-episode initial state.
+        should_start_now = (
+            len(self.viewer_state_frames) == 0
+            and self._viewer_seen_episode_reset
+        )
+        capture_in_progress = len(self.viewer_state_frames) > 0
+
+        if should_start_now or capture_in_progress:
+            self._capture_viewer_frame(capture_in_progress)
+
+    def _capture_viewer_frame(self, capture_in_progress: bool) -> None:
+        assert self.viewer_state_frames is not None
+        if not capture_in_progress:
+            print("-" * 80)
+            print("Starting interactive viewer capture...")
+            print("-" * 80)
+
+        i = self.index_to_view
+        frame = ViewerFrame(
+            robot_joint_pos=self.arm_hand_dof_pos[i].cpu().numpy(),
+            robot_base_pose=self.root_state_tensor[self.robot_indices[i], 0:7].cpu().numpy(),
+            object_pose=self.object_state[i, 0:7].cpu().numpy(),
+            goal_pose=(
+                self.goal_states[i, 0:7].cpu().numpy()
+                if hasattr(self, "goal_object_indices")
+                else None
+            ),
+            table_pose=self.root_state_tensor[self.table_indices[i], 0:7].cpu().numpy(),
+        )
+
+        # Sanity checks
+        J = len(self.joint_names)
+        assert frame.robot_joint_pos.shape == (J,), (
+            f"robot_joint_pos shape {frame.robot_joint_pos.shape} != ({J},)"
+        )
+        for pose_name, pose in [
+            ("robot_base_pose", frame.robot_base_pose),
+            ("object_pose", frame.object_pose),
+            ("table_pose", frame.table_pose),
+        ]:
+            assert pose.shape == (7,), f"{pose_name}.shape {pose.shape} != (7,)"
+            quat_norm = float(np.linalg.norm(pose[3:]))
+            assert abs(quat_norm - 1.0) < 0.05, (
+                f"{pose_name} quaternion norm {quat_norm:.4f} is not ~1.0"
+            )
+        if frame.goal_pose is not None:
+            assert frame.goal_pose.shape == (7,)
+
+        self.viewer_state_frames.append(frame)
+
+        if len(self.viewer_state_frames) == self.cfg["env"]["capture_viewer_len"]:
+            self._finalize_viewer_capture()
+
+    # ──────────────────────────────────────────────────────────────────────────
+    # Viewer URL helpers
+    # ──────────────────────────────────────────────────────────────────────────
+
+    @staticmethod
+    def _get_viewer_github_raw_base(override: str) -> str:
+        """Return the GitHub raw base URL to use for viewer URDF fetching.
+
+        Priority:
+          1. *override* non-empty → use it directly (trailing slash ensured)
+          2. _VIEWER_USE_CURRENT_COMMIT = True → resolve `git rev-parse HEAD`
+          3. default → /main/ (stable; always has all released URDF + mesh files)
+
+        To target your exact pushed commit instead of /main/, flip the flag in code:
+            _VIEWER_USE_CURRENT_COMMIT = True
+        This is intentionally a code change, not a config key, so it's easy to find
+        and review (grep for _VIEWER_USE_CURRENT_COMMIT).
+        """
+        # ── Developer flag ────────────────────────────────────────────────────
+        # Set True when you've added new URDF/mesh files and want the viewer to
+        # fetch from your exact pushed commit rather than /main/.
+        _VIEWER_USE_CURRENT_COMMIT = False
+        # ─────────────────────────────────────────────────────────────────────
+
+        MAIN_BASE = "https://raw.githubusercontent.com/tylerlum/simtoolreal/main/"
+
+        if override:
+            base = override if override.endswith("/") else override + "/"
+            print(
+                f"\n[viewer] GitHub raw base URL — source: config override\n"
+                f"  {base}\n"
+            )
+            return base
+
+        if _VIEWER_USE_CURRENT_COMMIT:
+            try:
+                import subprocess
+                from isaacgymenvs.utils.utils import get_repo_root_dir
+                commit = subprocess.check_output(
+                    ["git", "rev-parse", "HEAD"],
+                    cwd=str(get_repo_root_dir()),
+                    stderr=subprocess.DEVNULL,
+                    text=True,
+                ).strip()
+                base = f"https://raw.githubusercontent.com/tylerlum/simtoolreal/{commit}/"
+                print(
+                    f"\n[viewer] GitHub raw base URL — source: git HEAD commit\n"
+                    f"  commit : {commit}\n"
+                    f"  base   : {base}\n"
+                )
+                return base
+            except Exception as e:
+                print(
+                    f"\n[viewer] _VIEWER_USE_CURRENT_COMMIT=True but could not read git HEAD: {e}\n"
+                    f"  Falling back to /main/: {MAIN_BASE}\n"
+                )
+
+        print(
+            f"\n[viewer] GitHub raw base URL — source: /main/ (default)\n"
+            f"  {MAIN_BASE}\n"
+            f"  Tip: set _VIEWER_USE_CURRENT_COMMIT=True in env.py to target your\n"
+            f"       exact pushed commit (useful when adding new URDF/mesh files).\n"
+        )
+        return MAIN_BASE
+
+    @staticmethod
+    def _check_viewer_urls(urls: list, url_check: str) -> set:
+        """Check that each URL in *urls* is reachable via an HTTP HEAD request.
+
+        Returns the set of URLs that failed (empty if all passed or mode is "skip").
+
+        url_check values:
+          "warn"  — print a loud warning box on failure, continue; caller handles fallback
+          "error" — raise ValueError on first failure
+          "skip"  — skip all checks (no network call); returns empty set
+        """
+        import time
+        import urllib.request
+
+        BORDER = "=" * 72
+        failed: set = set()
+
+        if url_check == "skip":
+            print(
+                f"\n[viewer] URL check SKIPPED (capture_viewer_url_check='skip').\n"
+                f"  URLs will not be validated — mesh loading may silently fail in browser.\n"
+            )
+            return failed
+
+        seen = set()
+        for url in urls:
+            if url in seen:
+                continue
+            seen.add(url)
+
+            print(f"[viewer] URL check ({url_check}) → {url}")
+            t0 = time.monotonic()
+            try:
+                req = urllib.request.Request(url, method="HEAD")
+                urllib.request.urlopen(req, timeout=10)
+                elapsed = time.monotonic() - t0
+                print(f"[viewer]   PASSED  ({elapsed:.2f}s)\n")
+            except Exception as e:
+                elapsed = time.monotonic() - t0
+                failed.add(url)
+                msg = (
+                    f"\n{BORDER}\n"
+                    f"[viewer] URL CHECK FAILED ({elapsed:.2f}s)\n"
+                    f"  URL   : {url}\n"
+                    f"  Error : {e}\n"
+                    f"\n"
+                    f"  Common causes:\n"
+                    f"    - Commit not yet pushed to GitHub\n"
+                    f"    - File doesn't exist at this branch/commit\n"
+                    f"    - No internet access\n"
+                    f"\n"
+                    f"  Fixes:\n"
+                    f"    1. Push your commit:  git push\n"
+                    f"    2. Override the base URL:\n"
+                    f"         task.env.capture_viewer_github_raw_base="
+                    f"https://raw.githubusercontent.com/tylerlum/simtoolreal/main/\n"
+                    f"    3. Disable URL checks (e.g. no internet):\n"
+                    f"         task.env.capture_viewer_url_check=skip\n"
+                    f"{BORDER}\n"
+                )
+                if url_check == "error":
+                    raise ValueError(msg)
+                else:  # "warn"
+                    print(msg)
+
+        return failed
+
+    def _finalize_viewer_capture(self) -> None:
+        import wandb
+
+        from isaacgymenvs.tasks.simtoolreal.interactive_viewer import (
+            create_html,
+            make_embedded_robot,
+            make_url_robot,
+        )
+        from dextoolbench.objects import NAME_TO_OBJECT
+        from isaacgymenvs.utils.utils import get_repo_root_dir
+
+        frames = self.viewer_state_frames
+        assert frames is not None and len(frames) > 0
+        T = len(frames)
+        J = len(self.joint_names)
+
+        robot_joint_positions = np.stack([f.robot_joint_pos for f in frames])  # (T, J)
+        robot_base_poses = np.stack([f.robot_base_pose for f in frames])  # (T, 7)
+        timestamps = np.arange(T, dtype=float) * self.control_dt  # (T,)
+
+        # Shape sanity checks
+        assert robot_joint_positions.shape == (T, J), (
+            f"robot_joint_positions {robot_joint_positions.shape} != ({T}, {J})"
+        )
+        assert robot_base_poses.shape == (T, 7)
+
+        GITHUB_RAW_BASE = self._get_viewer_github_raw_base(
+            self.cfg["env"].get("capture_viewer_github_raw_base", "")
+        )
+        url_check = self.cfg["env"].get("capture_viewer_url_check", "warn")
+
+        # Robot arm URDF (hardcoded for iiwa14_left_sharpa_adjusted_restricted;
+        # a ValueError is raised at __init__ if a different robot asset is configured).
+        ROBOT_URDF_URL = (
+            GITHUB_RAW_BASE
+            + "assets/urdf/kuka_sharpa_description/"
+            + "iiwa14_left_sharpa_adjusted_restricted.urdf"
+        )
+
+        # Determine how to represent the object in the viewer.
+        # Three cases, checked in priority order:
+        #
+        #   Case 1 — Real mesh object in NAME_TO_OBJECT:
+        #     Fetch the URDF from GitHub raw (browser resolves mesh paths relative to it).
+        #
+        #   Case 2 — Procedural primitive object (e.g. handle_head_primitives):
+        #     URDF was saved before the temp dir was deleted (_create_envs).
+        #     Contains only <box>/<cylinder> — no mesh refs — safe to embed inline.
+        #
+        #   Case 3 — Neither (shouldn't happen in normal use):
+        #     HACK fallback: use claw_hammer as a visual stand-in so the viewer
+        #     shows *something* rather than crashing.
+
+        object_name = self.cfg["env"]["objectName"]
+
+        CLAW_HAMMER_FALLBACK_URL = (
+            GITHUB_RAW_BASE
+            + "assets/urdf/dextoolbench/hammer/claw_hammer/claw_hammer.urdf"
+        )
+
+        if object_name in NAME_TO_OBJECT:
+            # ── Case 1: known mesh object ──────────────────────────────────────────
+            rel = NAME_TO_OBJECT[object_name].urdf_path.relative_to(get_repo_root_dir())
+            object_urdf_url = GITHUB_RAW_BASE + rel.as_posix()
+            print(
+                f"[viewer] _finalize_viewer_capture | CASE 1 — mesh object: "
+                f"objectName='{object_name}' found in NAME_TO_OBJECT. "
+                f"Using GitHub raw URL: {object_urdf_url}"
+            )
+            object_robot = make_url_robot(name="object", urdf_url=object_urdf_url)
+            goal_robot = (
+                make_url_robot(
+                    name="goal",
+                    urdf_url=object_urdf_url,
+                    color_override=(0.20, 0.72, 0.31),  # green for goal
+                )
+                if frames[0].goal_pose is not None else None
+            )
+
+        elif getattr(self, "viewer_object_urdf_text", None) is not None:
+            # ── Case 2: procedural primitive (pure <box>/<cylinder>, no mesh refs) ─
+            print(
+                f"[viewer] _finalize_viewer_capture | CASE 2 — procedural primitive: "
+                f"objectName='{object_name}' NOT in NAME_TO_OBJECT. "
+                f"Using stored URDF text ({len(self.viewer_object_urdf_text)} bytes) "
+                f"captured at env creation (assumes only URDF primitives — "
+                f"no mesh files required)."
+            )
+            object_robot = make_embedded_robot(
+                name="object", urdf_text=self.viewer_object_urdf_text
+            )
+            goal_robot = (
+                make_embedded_robot(
+                    name="goal",
+                    urdf_text=self.viewer_object_urdf_text,
+                    color_override=(0.20, 0.72, 0.31),  # green for goal
+                )
+                if frames[0].goal_pose is not None else None
+            )
+
+        else:
+            # ── Case 3: HACK fallback — no URDF available at all ──────────────────
+            print(
+                f"[viewer] _finalize_viewer_capture | CASE 3 — HACK FALLBACK: "
+                f"objectName='{object_name}' NOT in NAME_TO_OBJECT and "
+                f"viewer_object_urdf_text is None (stored URDF was not captured). "
+                f"Using claw_hammer as a visual stand-in — object shape will be WRONG. "
+                f"URL: {CLAW_HAMMER_FALLBACK_URL}"
+            )
+            object_robot = make_url_robot(name="object", urdf_url=CLAW_HAMMER_FALLBACK_URL)
+            goal_robot = (
+                make_url_robot(
+                    name="goal",
+                    urdf_url=CLAW_HAMMER_FALLBACK_URL,
+                    color_override=(0.20, 0.72, 0.31),
+                )
+                if frames[0].goal_pose is not None else None
+            )
+
+        # Table URDF — pure <box> geometry, no mesh refs → safe to embed inline.
+        table_asset_rel = self.cfg["env"]["asset"]["table"]  # e.g. "urdf/table_narrow.urdf"
+        table_urdf_text = (get_repo_root_dir() / "assets" / table_asset_rel).read_text()
+
+        # Collect all URL-based robots and validate them before building the HTML.
+        # Embedded robots (make_embedded_robot) use inline URDF text — no URL check needed.
+        urls_to_check = [ROBOT_URDF_URL]
+        if object_robot.get("urdf_path"):
+            urls_to_check.append(object_robot["urdf_path"])
+        if goal_robot is not None and goal_robot.get("urdf_path"):
+            urls_to_check.append(goal_robot["urdf_path"])
+
+        print(
+            f"\n[viewer] URL check mode: capture_viewer_url_check='{url_check}'\n"
+            f"[viewer] URLs to check ({len(urls_to_check)} URL-based robots, "
+            f"table is embedded inline):"
+        )
+        for u in urls_to_check:
+            print(f"[viewer]   {u}")
+        print()
+        failed_urls = self._check_viewer_urls(urls_to_check, url_check)
+
+        # For any URL that failed the check, swap in the claw_hammer from /main/ so
+        # the viewer still renders something instead of a blank mesh slot.
+        # This URL is hardcoded to /main/ — it is always present and stable.
+        CLAW_HAMMER_MAIN_URL = (
+            "https://raw.githubusercontent.com/tylerlum/simtoolreal/main/"
+            "assets/urdf/dextoolbench/hammer/claw_hammer/claw_hammer.urdf"
+        )
+        for failed_url in failed_urls:
+            if object_robot.get("urdf_path") == failed_url:
+                print(
+                    f"[viewer] Swapping FAILED object URL to claw_hammer fallback\n"
+                    f"  failed URL : {failed_url}\n"
+                    f"  fallback   : {CLAW_HAMMER_MAIN_URL}\n"
+                    f"  (object shape will be WRONG — fix the URL and retry)\n"
+                )
+                object_robot = {**object_robot, "urdf_path": CLAW_HAMMER_MAIN_URL}
+            if goal_robot is not None and goal_robot.get("urdf_path") == failed_url:
+                goal_robot = {**goal_robot, "urdf_path": CLAW_HAMMER_MAIN_URL}
+            if ROBOT_URDF_URL == failed_url:
+                print(
+                    f"[viewer] Swapping FAILED robot URL to claw_hammer fallback\n"
+                    f"  failed URL : {failed_url}\n"
+                    f"  fallback   : {CLAW_HAMMER_MAIN_URL}\n"
+                )
+                ROBOT_URDF_URL = CLAW_HAMMER_MAIN_URL
+
+        # Build robots list.  Every key in object_poses MUST have a matching name here.
+        robots = [
+            make_url_robot(name="robot", urdf_url=ROBOT_URDF_URL, animated=True),
+            make_embedded_robot(name="table", urdf_text=table_urdf_text),
+            object_robot,
+        ]
+        if goal_robot is not None:
+            robots.append(goal_robot)
+
+        # Build object_poses — must have exactly one entry per non-robot, non-animated robot
+        # in the robots list.  Keys must match robot names exactly.
+        object_poses: dict = {
+            "table":  np.stack([f.table_pose  for f in frames]),   # (T, 7)
+            "object": np.stack([f.object_pose for f in frames]),   # (T, 7)
+        }
+        if goal_robot is not None:
+            object_poses["goal"] = np.stack([f.goal_pose for f in frames])     # (T, 7)
+
+        for k, v in object_poses.items():
+            assert v.shape == (T, 7), f"object_poses['{k}'] {v.shape} != ({T}, 7)"
+
+        html = create_html(
+            joint_names=self.joint_names,
+            robot_joint_positions=robot_joint_positions,
+            robots=robots,
+            object_poses=object_poses,
+            robot_base_poses=robot_base_poses,
+            timestamps=timestamps,
+        )
+
+        # Save HTML locally (mirrors how MP4 is saved to videos/)
+        viewer_filename = f"{DATETIME_STR}_viewer_{self.control_steps}.html"
+        videos_dir = Path("videos")
+        videos_dir.mkdir(parents=True, exist_ok=True)
+        viewer_path = videos_dir / viewer_filename
+        viewer_path.write_text(html)
+
+        print("-" * 80)
+        print(f"Interactive viewer: built HTML ({len(html):,} bytes)")
+        print(f"Saved interactive viewer to {viewer_path.resolve()}")
+        if wandb.run is not None:
+            wandb.log({"interactive_viewer": wandb.Html(html)})
+            print("Logged interactive_viewer to wandb")
+        print("-" * 80)
+
+        self.viewer_state_frames = None
+        self._viewer_seen_episode_reset = False
 
     def _draw_transform(
         self, transform: gymapi.Transform, line_length: float = 0.2, env_idx: int = 0
@@ -5161,9 +5867,12 @@ class SimToolReal(VecTask):
         )
 
         # Different friction for normal links (low friction) and fingertips (high friction)
+        use_sdf = self.cfg["env"].get("useSDF", False)
         for i in range(len(rigid_shape_props)):
             if friction is not None:
                 rigid_shape_props[i].friction = friction
+            if use_sdf:
+                rigid_shape_props[i].thickness = 0.0
 
         # Rigid bodies (links) are not the same as rigid shapes (collision geometries)
         # Each rigid body can have >=1 rigid shapes
@@ -5239,8 +5948,11 @@ class SimToolReal(VecTask):
             len(rigid_shape_props),
             self.gym.get_asset_rigid_shape_count(table_asset),
         )
+        use_sdf = self.cfg["env"].get("useSDF", False)
         for i in range(len(rigid_shape_props)):
             rigid_shape_props[i].friction = friction
+            if use_sdf:
+                rigid_shape_props[i].thickness = 0.0
         self.gym.set_asset_rigid_shape_properties(table_asset, rigid_shape_props)
 
     def set_object_asset_rigid_shape_properties(
@@ -5251,8 +5963,11 @@ class SimToolReal(VecTask):
             len(rigid_shape_props),
             self.gym.get_asset_rigid_shape_count(object_asset),
         )
+        use_sdf = self.cfg["env"].get("useSDF", False)
         for i in range(len(rigid_shape_props)):
             rigid_shape_props[i].friction = friction
+            if use_sdf:
+                rigid_shape_props[i].thickness = 0.0
         self.gym.set_asset_rigid_shape_properties(object_asset, rigid_shape_props)
 
     def set_object_masses_and_inertias(

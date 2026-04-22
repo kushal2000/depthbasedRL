@@ -1,0 +1,38 @@
+#!/bin/bash
+#SBATCH -N 1
+#SBATCH -n 1
+#SBATCH --cpus-per-task=4
+#SBATCH --get-user-env
+#SBATCH --mem=8000
+#SBATCH -t 0-00:05:00
+#SBATCH --partition=portal
+#SBATCH --exclude=portal-compute-01
+#SBATCH --gres=gpu:4
+#SBATCH -J gpu_diagnostic
+
+echo "=== SLURM GPU Allocation ==="
+echo "SLURM_JOB_ID=$SLURM_JOB_ID"
+echo "SLURM_NODELIST=$SLURM_NODELIST"
+echo "SLURM_JOB_GPUS=$SLURM_JOB_GPUS"
+echo "CUDA_VISIBLE_DEVICES=$CUDA_VISIBLE_DEVICES"
+echo "SLURM_GPUS_ON_NODE=$SLURM_GPUS_ON_NODE"
+echo ""
+
+echo "=== nvidia-smi GPU list ==="
+nvidia-smi --query-gpu=index,uuid,name,memory.total --format=csv
+echo ""
+
+echo "=== Processes on GPUs ==="
+nvidia-smi --query-compute-apps=pid,gpu_uuid,used_memory --format=csv
+echo ""
+
+echo "=== PyTorch CUDA device check ==="
+source /share/portal/kk837/depthbasedRL/.venv/bin/activate
+python3 -c "
+import torch, os
+cvd = os.environ.get('CUDA_VISIBLE_DEVICES', 'not set')
+print(f'CUDA_VISIBLE_DEVICES={cvd}')
+print(f'torch.cuda.device_count()={torch.cuda.device_count()}')
+for i in range(torch.cuda.device_count()):
+    print(f'  cuda:{i} -> {torch.cuda.get_device_name(i)} (pci bus: {torch.cuda.get_device_properties(i).name})')
+"

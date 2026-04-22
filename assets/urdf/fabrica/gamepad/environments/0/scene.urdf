@@ -1,0 +1,67 @@
+<?xml version="1.0"?>
+<robot name="table_gamepad_0_scene">
+  <link name="box">
+    <visual>
+      <material name="wood"><color rgba="0.82 0.56 0.35 1.0"/></material>
+      <origin xyz="0 0 0"/>
+      <geometry><box size="0.475 0.4 0.3"/></geometry>
+    </visual>
+    <collision>
+      <origin xyz="0 0 0"/>
+      <geometry><box size="0.475 0.4 0.3"/></geometry>
+    </collision>
+    <inertial>
+      <mass value="500"/>
+      <friction value="1.0"/>
+      <inertia ixx="1000.0" ixy="0.0" ixz="0.0" iyy="1000.0" iyz="0.0" izz="1000.0"/>
+    </inertial>
+  </link>
+  <link name="part_3">
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry><mesh filename="../../3/3_canonical.obj" scale="1 1 1"/></geometry>
+      <material name="placed_3"><color rgba="0.6 0.6 0.6 1.0"/></material>
+    </visual>
+    <collision>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry><mesh filename="../../3/3_canonical.obj" scale="1 1 1"/></geometry>
+    </collision>
+  </link>
+  <joint name="part_3_joint" type="fixed">
+    <parent link="box"/>
+    <child link="part_3"/>
+    <origin xyz="-0.079973 0.027378 0.16249999999999998" rpy="0.0 0.0 0.0"/>
+  </joint>
+  <link name="part_4">
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry><mesh filename="../../4/4_canonical.obj" scale="1 1 1"/></geometry>
+      <material name="placed_4"><color rgba="0.6 0.6 0.6 1.0"/></material>
+    </visual>
+    <collision>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry><mesh filename="../../4/4_canonical.obj" scale="1 1 1"/></geometry>
+    </collision>
+  </link>
+  <joint name="part_4_joint" type="fixed">
+    <parent link="box"/>
+    <child link="part_4"/>
+    <origin xyz="-0.079973 0.066058 0.16249999999999998" rpy="3.141592653589793 0.0 1.5707963267948966"/>
+  </joint>
+  <link name="part_1">
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry><mesh filename="../../1/1_canonical.obj" scale="1 1 1"/></geometry>
+      <material name="placed_1"><color rgba="0.6 0.6 0.6 1.0"/></material>
+    </visual>
+    <collision>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry><mesh filename="../../1/1_canonical.obj" scale="1 1 1"/></geometry>
+    </collision>
+  </link>
+  <joint name="part_1_joint" type="fixed">
+    <parent link="box"/>
+    <child link="part_1"/>
+    <origin xyz="-0.123681 0.044275 0.1725" rpy="0.0 -1.5707963057214722 0.0"/>
+  </joint>
+</robot>

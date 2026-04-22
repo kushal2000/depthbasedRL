@@ -1,0 +1,162 @@
+#!/bin/bash
+#SBATCH -N 1
+#SBATCH -n 1
+#SBATCH --cpus-per-task=12
+#SBATCH --get-user-env
+#SBATCH --mem=100000
+#SBATCH -t 7-00:00:00
+#SBATCH --partition=portal
+#SBATCH --exclude=portal-compute-01
+#SBATCH --gres=gpu:1
+#SBATCH -o /dev/null
+#SBATCH -e /dev/null
+
+# ╔══════════════════════════════════════════════════════════════╗
+# ║  Phase 2 — Scale Parts: Beam Part 1                        ║
+# ║  Geometry: 76×15×13mm, complex 3-axis rotation (HARD)      ║
+# ╚══════════════════════════════════════════════════════════════╝
+
+# ── Assembly Details ──────────────────────────────────────────
+ASSEMBLY="beam"
+PART_ID="1"
+COLLISION_METHOD="coacd"
+
+# ── Training Details ──────────────────────────────────────────
+CHECKPOINT="/share/portal/kk837/depthbasedRL/pretrained_policy/model.pth"
+NUM_ENVS=12288
+MINIBATCH_SIZE=98304
+SEED=0
+
+# ── Final Goal Tolerance Curriculum ──────────────────────────
+FINAL_GOAL_TOLERANCE_CURRICULUM=True
+FINAL_GOAL_TOLERANCE_INITIAL=0.01
+FINAL_GOAL_TOLERANCE_TARGET=0.002
+FINAL_GOAL_TOLERANCE_DECREMENT=0.001
+
+# ── Domain Randomization ─────────────────────────────────────
+FORCE_SCALE=0
+TORQUE_SCALE=0
+USE_OBS_DELAY=False
+USE_ACTION_DELAY=False
+USE_OBJECT_STATE_DELAY_NOISE=False
+OBJECT_STATE_XYZ_NOISE_STD=0.01
+OBJECT_STATE_ROTATION_NOISE_DEG=5.0
+OBJECT_SCALE_NOISE="[0.9,1.1]"
+
+# ── Weights & Biases ─────────────────────────────────────────
+WANDB_PROJECT="FABRICA_TRAINING"
+WANDB_GROUP="fabrica_phase2.6_oom_retry"
+EXPERIMENT_TAG="beam_part1_12k"
+
+# ╔══════════════════════════════════════════════════════════════╗
+# ║         END CONFIG — generally don't edit below here        ║
+# ╚══════════════════════════════════════════════════════════════╝
+
+set -euo pipefail
+
+REPO_ROOT="/share/portal/kk837/depthbasedRL"
+
+# ── Derived: object name ──────────────────────────────────────
+if [ "$COLLISION_METHOD" = "vhacd" ]; then
+    OBJECT_NAME="${ASSEMBLY}_${PART_ID}"
+else
+    OBJECT_NAME="${ASSEMBLY}_${PART_ID}_${COLLISION_METHOD}"
+fi
+
+# ── Derived: scene URDF ──────────────────────────────────────
+SUFFIX_MAP_vhacd="" ; SUFFIX_MAP_coacd="_coacd" ; SUFFIX_MAP_sdf="_sdf"
+SUFFIX_VAR="SUFFIX_MAP_${COLLISION_METHOD}"
+TABLE_URDF="urdf/fabrica/environments/${ASSEMBLY}_${PART_ID}/scene${!SUFFIX_VAR}.urdf"
+
+# ── Derived: SDF flag ────────────────────────────────────────
+USE_SDF=False
+if [ "$COLLISION_METHOD" = "sdf" ]; then
+    USE_SDF=True
+fi
+
+# ── Derived: viser port (unique per SLURM job) ────────────────
+VISER_PORT=$((8082 + (SLURM_JOB_ID % 900)))
+
+# ── Derived: goals & start pose from trajectory JSON ─────────
+TRAJ_JSON="$REPO_ROOT/fabrica/trajectories/${ASSEMBLY}_${PART_ID}/pick_place.json"
+read -r GOALS START_POSE <<< "$(python3 -c "
+import json
+with open('$TRAJ_JSON') as f:
+    t = json.load(f)
+print(str(t['goals']).replace(' ',''), str(t['start_pose']).replace(' ',''))
+")"
+
+# ── Derived: experiment name & logging ───────────────────────
+DATETIME=$(date +"%Y-%m-%d_%H-%M-%S")
+if [ -n "$EXPERIMENT_TAG" ]; then
+    EXPERIMENT_NAME="${EXPERIMENT_TAG}_${OBJECT_NAME}_${DATETIME}"
+else
+    EXPERIMENT_NAME="${OBJECT_NAME}_${DATETIME}"
+fi
+scontrol update JobId="$SLURM_JOB_ID" JobName="$EXPERIMENT_NAME"
+HYDRA_RUN_DIR="${REPO_ROOT}/train_dir/${WANDB_PROJECT}/${WANDB_GROUP}/${EXPERIMENT_NAME}"
+mkdir -p "$HYDRA_RUN_DIR"
+exec > "${HYDRA_RUN_DIR}/slurm.log" 2> "${HYDRA_RUN_DIR}/slurm.err"
+
+# ── Derived: checkpoint arg ──────────────────────────────────
+CHECKPOINT_ARG=""
+if [ -n "$CHECKPOINT" ]; then
+    CHECKPOINT_ARG="checkpoint=$CHECKPOINT"
+fi
+
+# ── Launch training ──────────────────────────────────────────
+cd "$REPO_ROOT"
+source .venv/bin/activate
+
+python -u -m isaacgymenvs.train \
+    task=SimToolRealLSTMAsymmetric \
+    ++task.env.useSparseReward=False \
+    headless=True \
+    task.env.numEnvs=$NUM_ENVS \
+    train.params.config.minibatch_size=$MINIBATCH_SIZE \
+    multi_gpu=False \
+    train.params.config.good_reset_boundary=0 \
+    task.env.goodResetBoundary=0 \
+    train.params.config.use_others_experience=lf \
+    train.params.config.off_policy_ratio=1.0 \
+    train.params.config.expl_type=mixed_expl_learn_param \
+    train.params.config.expl_reward_type=entropy \
+    train.params.config.expl_coef_block_size=2048 \
+    train.params.config.expl_reward_coef_scale=0.005 \
+    train.params.network.space.continuous.fixed_sigma=coef_cond \
+    task.env.forceScale=$FORCE_SCALE \
+    task.env.torqueScale=$TORQUE_SCALE \
+    task.env.objectAngVelPenaltyScale=0.0 \
+    "task.env.objectScaleNoiseMultiplierRange=$OBJECT_SCALE_NOISE" \
+    task.env.forceConsecutiveNearGoalSteps=True \
+    task.env.objectName="$OBJECT_NAME" \
+    task.env.useFixedGoalStates=True \
+    "task.env.fixedGoalStates=$GOALS" \
+    "task.env.objectStartPose=$START_POSE" \
+    task.env.useFixedInitObjectPose=True \
+    task.env.asset.table="$TABLE_URDF" \
+    task.env.tableResetZ=0.38 \
+    task.env.tableResetZRange=0 \
+    task.env.useSDF=$USE_SDF \
+    task.env.useObsDelay=$USE_OBS_DELAY \
+    task.env.useActionDelay=$USE_ACTION_DELAY \
+    task.env.useObjectStateDelayNoise=$USE_OBJECT_STATE_DELAY_NOISE \
+    task.env.objectStateXyzNoiseStd=$OBJECT_STATE_XYZ_NOISE_STD \
+    task.env.objectStateRotationNoiseDegrees=$OBJECT_STATE_ROTATION_NOISE_DEG \
+    task.env.viserVizPort=$VISER_PORT \
+    task.env.finalGoalToleranceCurriculumEnabled=$FINAL_GOAL_TOLERANCE_CURRICULUM \
+    task.env.finalGoalToleranceInitial=$FINAL_GOAL_TOLERANCE_INITIAL \
+    task.env.finalGoalToleranceTarget=$FINAL_GOAL_TOLERANCE_TARGET \
+    task.env.finalGoalToleranceCurriculumDecrement=$FINAL_GOAL_TOLERANCE_DECREMENT \
+    wandb_project="$WANDB_PROJECT" \
+    wandb_entity=kk837 \
+    wandb_activate=True \
+    wandb_group="$WANDB_GROUP" \
+    wandb_tags=[] \
+    ++wandb_notes='' \
+    seed=$SEED \
+    experiment="00_$EXPERIMENT_NAME" \
+    hydra.run.dir="$HYDRA_RUN_DIR" \
+    task.sim.physx.max_gpu_contact_pairs=33554432 \
+    train.params.config.max_frames=100_000_000_000_000 \
+    $CHECKPOINT_ARG

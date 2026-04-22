@@ -1,0 +1,33 @@
+#!/bin/bash
+#SBATCH -N 1
+#SBATCH -n 1
+#SBATCH --cpus-per-task=24
+#SBATCH --get-user-env
+#SBATCH --mem=100000
+#SBATCH -t 0-01:00:00
+#SBATCH --partition=portal
+#SBATCH --exclude=portal-compute-01
+#SBATCH --gres=gpu:4
+#SBATCH -J stress_pairwise
+
+cd /share/portal/kk837/depthbasedRL
+source .venv/bin/activate
+
+echo "=== SLURM GPU Allocation ==="
+echo "SLURM_JOB_GPUS=$SLURM_JOB_GPUS"
+echo "CUDA_VISIBLE_DEVICES=$CUDA_VISIBLE_DEVICES"
+echo ""
+
+echo "=========================================="
+echo "TEST: 4 GPUs, 38 parts, 6144 envs, PAIRWISE serialization"
+echo "=========================================="
+
+export OMP_NUM_THREADS=6
+export ENV_TEST_NUM_ENVS=6144
+export SERIALIZE_STRATEGY=pairwise
+export ENV_TEST_OBJECTS='["beam_6_coacd","beam_2_coacd","beam_0_coacd","beam_3_coacd","beam_1_coacd","car_2_coacd","car_1_coacd","car_0_coacd","car_4_coacd","car_5_coacd","car_3_coacd","cooling_manifold_1_coacd","cooling_manifold_0_coacd","cooling_manifold_4_coacd","cooling_manifold_6_coacd","cooling_manifold_2_coacd","cooling_manifold_3_coacd","cooling_manifold_5_coacd","gamepad_3_coacd","gamepad_4_coacd","gamepad_1_coacd","gamepad_0_coacd","gamepad_5_coacd","gamepad_2_coacd","plumbers_block_2_coacd","plumbers_block_0_coacd","plumbers_block_3_coacd","plumbers_block_1_coacd","plumbers_block_4_coacd","stool_circular_2_coacd","stool_circular_1_coacd","stool_circular_0_coacd","stool_circular_5_coacd","stool_circular_8_coacd","stool_circular_7_coacd","stool_circular_4_coacd","stool_circular_3_coacd","stool_circular_6_coacd"]'
+
+torchrun --standalone --nnodes=1 --nproc_per_node=4 \
+    fabrica/experiments/gpu_diagnostics/env_creation_pairwise.py
+
+echo "TEST COMPLETE"

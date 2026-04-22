@@ -90,9 +90,7 @@ def get_rlgames_env_creator(
         Creates the task from configurations and wraps it using RL-games wrappers if required.
         """
         if multi_gpu:
-
-            local_rank = int(os.getenv("LOCAL_RANK", "0"))
-            global_rank = int(os.getenv("RANK", "0"))
+            import torch.distributed as dist
 
             # local rank of the GPU in a node
             local_rank = int(os.getenv("LOCAL_RANK", "0"))
@@ -103,8 +101,8 @@ def get_rlgames_env_creator(
 
             print(f"global_rank = {global_rank} local_rank = {local_rank} world_size = {world_size}")
 
-            _sim_device = f'cuda:0'
-            _rl_device = f'cuda:0'
+            _sim_device = f'cuda:{local_rank}'
+            _rl_device = f'cuda:{local_rank}'
 
             task_config['rank'] = local_rank
             task_config['rl_device'] = _rl_device
@@ -113,15 +111,38 @@ def get_rlgames_env_creator(
             _rl_device = rl_device
 
         # create native task and pass custom config
-        env = isaacgym_task_map[task_name](
-            cfg=task_config,
-            rl_device=_rl_device,
-            sim_device=_sim_device,
-            graphics_device_id=graphics_device_id,
-            headless=headless,
-            virtual_screen_capture=virtual_screen_capture,
-            force_render=force_render,
-        )
+        _graphics_device_id = local_rank if multi_gpu else graphics_device_id
+
+        if multi_gpu:
+            # Serialize env creation across ranks to prevent PhysX deadlock.
+            # When 4+ ranks simultaneously call gym.load_asset(), PhysX can
+            # permanently hang. By creating envs one rank at a time, we avoid
+            # the contention. dist.init_process_group("gloo") is already called
+            # before this point (in a2c_common.py), so barriers are available.
+            for turn in range(world_size):
+                if global_rank == turn:
+                    print(f"[RANK {global_rank}] Starting env creation (serialized, turn {turn}/{world_size})", flush=True)
+                    env = isaacgym_task_map[task_name](
+                        cfg=task_config,
+                        rl_device=_rl_device,
+                        sim_device=_sim_device,
+                        graphics_device_id=_graphics_device_id,
+                        headless=headless,
+                        virtual_screen_capture=virtual_screen_capture,
+                        force_render=force_render,
+                    )
+                    print(f"[RANK {global_rank}] Env creation complete", flush=True)
+                dist.barrier()
+        else:
+            env = isaacgym_task_map[task_name](
+                cfg=task_config,
+                rl_device=_rl_device,
+                sim_device=_sim_device,
+                graphics_device_id=_graphics_device_id,
+                headless=headless,
+                virtual_screen_capture=virtual_screen_capture,
+                force_render=force_render,
+            )
 
         if post_create_hook is not None:
             post_create_hook()
