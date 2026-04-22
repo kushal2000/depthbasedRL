@@ -64,6 +64,7 @@ def launch_app():
     parser.add_argument("--max_steps", type=int, default=None)
     parser.add_argument("--num_episodes", type=int, default=None)
     parser.add_argument("--num_envs", type=int, default=None)
+    parser.add_argument("--allow_single_env_camera_eval", action="store_true")
     parser.add_argument("--env_spacing", type=float, default=None)
     parser.add_argument("--ground_plane_size", type=float, default=None)
     parser.add_argument("--object_start_mode", choices=["fixed", "randomized"], default=None)
@@ -1419,6 +1420,17 @@ def main():
     teacher_checkpoint = resolve_repo_path(repo_root, args.teacher_checkpoint)
     settings = load_distill_settings(Path(resolve_repo_path(repo_root, args.distill_config)), args)
     validate_distill_settings(settings)
+    if (
+        args.mode == "student_eval"
+        and args.student_input == "camera"
+        and settings.num_envs == 1
+        and not args.allow_single_env_camera_eval
+    ):
+        _log(
+            "Single-env camera student_eval produces noisier wrist/vision renders than multi-env eval in Isaac Sim. "
+            "Bumping num_envs from 1 to 4 for evaluation stability. Pass --allow_single_env_camera_eval to disable."
+        )
+        settings.num_envs = 4
     camera_modality, camera_pose, camera_intrinsics = load_camera_pose(Path(resolve_repo_path(repo_root, args.camera_config)))
     if args.student_modality:
         camera_modality = args.student_modality
