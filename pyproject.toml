@@ -73,6 +73,7 @@ dev = [
 [tool.setuptools.packages.find]
 include = [
     "isaacgymenvs*",
+    "isaacsimenvs*",
     "dextoolbench*",
     "deployment*",
     "fabrica*",

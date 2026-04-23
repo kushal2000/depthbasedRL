@@ -38,3 +38,10 @@ Each assembly has numbered part subdirs (e.g., `beam/0/0.obj`) and an `assembly_
 - OBJ meshes are in assembled reference frame — no rotation needed at final position
 - Part IDs are strings ("0", "1", ...) not ints
 - Branch names start with the creation date in `YYYY_MM_DD` format (e.g., `2025_03_18_my_feature`)
+
+## Python packaging for venv_isaacsim
+- No `PYTHONPATH=...` hacks, even if the alternative costs ~30s of startup. Prefer proper installation.
+- Repo-local packages (`deployment`, `isaacgymenvs`, `isaacsimenvs`, `fabrica`, …): register via `uv pip install -e . --no-deps` into the target venv. `--no-deps` is required in `.venv_isaacsim` because `pyproject.toml` pins conflict with Python 3.11 (numpy==1.23.0, warp-lang==0.10.1, isaacgym-stubs).
+- New top-level package dirs must be added to `[tool.setuptools.packages.find]` in `pyproject.toml`, then `uv pip install -e . --no-deps` re-run.
+- Isaac Lab sub-namespaces (`isaaclab.sim`, `isaaclab.envs`, …) resolve only after `AppLauncher(args)` runs. Any script that imports `isaaclab.*` must instantiate `AppLauncher` first. Do not export the bundled `site-packages/isaaclab/source/isaaclab` dir onto `PYTHONPATH`.
+- Scripts that don't need Isaac Lab (e.g., `isaacsim_conversion/test_inference.py`) must not call `AppLauncher` — skip the Kit startup cost.
