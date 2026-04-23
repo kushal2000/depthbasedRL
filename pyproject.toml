@@ -74,6 +74,7 @@ dev = [
 include = [
     "isaacgymenvs*",
     "isaacsimenvs*",
+    "isaacsim_conversion*",
     "dextoolbench*",
     "deployment*",
     "fabrica*",

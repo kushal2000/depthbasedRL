@@ -1,0 +1,39 @@
+# Overlay applied on top of SimToolRealEnvCfg() defaults by
+# `hydra_task_config_with_yaml`. Key paths mirror the configclass attribute
+# tree exactly (snake_case). Isaac Lab's `configclass.from_dict` is strict —
+# unknown keys raise.
+#
+# This overlay is minimal because the training path of SimToolReal is not yet
+# ported (see isaacsimenvs/tasks/simtoolreal/simtoolreal_env.py). The
+# pretrained-policy rollout script (`play_simtoolreal.py`) does NOT consume
+# this YAML — it takes its assembly / object paths via CLI flags. This file
+# exists for registry parity + future training.
+
+# Top-level scalars (mirror cfg/task/Cartpole.yaml shape)
+decimation: 1
+episode_length_s: 10.0
+
+# Nested: SimulationCfg (60 Hz control with 2 physics substeps = 120 Hz physics)
+sim:
+  dt: 0.00833333333   # 1/120
+  render_interval: 2
+
+# Nested: InteractiveSceneCfg
+scene:
+  num_envs: 1
+  env_spacing: 1.2
+  replicate_physics: true
+  clone_in_fabric: true
+
+# Recording camera pose in env-local frame (matches the working rollout
+# framing in isaacsim_conversion/rollout.py: look at the table from -Y).
+record_camera_eye: [0.0, -1.0, 1.03]
+record_camera_target: [0.0, 0.0, 0.53]
+
+# Action smoothing + keypoint thresholds, mirrored from isaacgymenvs/cfg/task/SimToolReal.yaml.
+hand_moving_average: 0.1
+arm_moving_average: 0.1
+dof_speed_scale: 1.5
+keypoint_scale: 1.5
+target_success_tolerance: 0.01
+success_steps: 10
