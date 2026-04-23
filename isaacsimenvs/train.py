@@ -1,131 +1,178 @@
 """Train an isaacsimenvs task with our vendored rl_games.
 
 Pipeline:
-    Hydra config (cfg/config.yaml + cfg/task/<Name>.yaml + cfg/train/<Name>PPO.yaml)
+    argparse (--task, --agent, AppLauncher, wandb/video flags)
         ↓
-    AppLauncher (boots Kit)
+    AppLauncher (boots Kit; must precede any isaaclab.* import — see CLAUDE.md)
         ↓
-    DirectRLEnv from isaacsim_task_map
+    @hydra_task_config_with_yaml  (configclass defaults ← task YAML overlay ← Hydra CLI)
         ↓
-    isaaclab_rl.RlGamesVecEnvWrapper (clipping, device bridging, obs-group routing)
+    gym.make(task_id, cfg=env_cfg)  → DirectRLEnv wrapped by gym.Wrapper
+        ↓
+    isaaclab_rl.RlGamesVecEnvWrapper (via register_rlgames_env — clipping,
+                                      device bridging, obs-group routing)
         ↓
     rl_games.torch_runner.Runner (PPO / SAPG — both live in ./rl_games/)
+
+CLI shape:
+    python isaacsimenvs/train.py \
+        --task Isaacsimenvs-Cartpole-Direct-v0 \
+        --agent rl_games_cfg_entry_point \        # or rl_games_sapg_cfg_entry_point
+        --headless --enable_cameras --capture_video \
+        --wandb_activate --wandb_project X --wandb_name Y \
+        env.scene.num_envs=4096 \
+        agent.params.config.max_epochs=200 \
+        agent.params.config.minibatch_size=16384 \
+        agent.params.seed=42
 """
 
 from __future__ import annotations
 
 import argparse
+import math
 import os
 import sys
 
-import hydra
-from omegaconf import DictConfig
 
-
-@hydra.main(version_base="1.1", config_name="config", config_path="./cfg")
-def main(cfg: DictConfig) -> None:
-    # 1. AppLauncher FIRST — must run before any isaaclab.* import (see CLAUDE.md).
+def main() -> None:
     from isaaclab.app import AppLauncher
 
-    parser = argparse.ArgumentParser()
+    parser = argparse.ArgumentParser(description="Train isaacsimenvs task via rl_games.")
+    # --- Task/agent selection ---
+    parser.add_argument("--task", required=True, help="Gym task id, e.g. Isaacsimenvs-Cartpole-Direct-v0")
+    parser.add_argument(
+        "--agent",
+        default="rl_games_cfg_entry_point",
+        help="Key in gym.register kwargs for the rl_games YAML. "
+        "Use rl_games_sapg_cfg_entry_point for SAPG.",
+    )
+    # --- Runtime toggles ---
+    parser.add_argument("--test", action="store_true", help="Run inference (player) instead of training")
+    parser.add_argument("--checkpoint", default=None, help="Path to .pth to restore")
+    parser.add_argument("--rl_device", default="cuda:0")
+    parser.add_argument("--sim_device", default="cuda:0")
+    # --- Video ---
+    parser.add_argument("--capture_video", action="store_true", help="Attach recording camera; implies --enable_cameras")
+    parser.add_argument("--video_interval", type=int, default=10)
+    parser.add_argument("--video_capture_frames", type=int, default=120)
+    parser.add_argument("--video_fps", type=int, default=30)
+    # --- wandb ---
+    parser.add_argument("--wandb_activate", action="store_true")
+    parser.add_argument("--wandb_project", default="isaacsimenvs")
+    parser.add_argument("--wandb_group", default="")
+    parser.add_argument("--wandb_entity", default="")
+    parser.add_argument("--wandb_name", default="", help="Defaults to agent_cfg.params.config.name")
+    parser.add_argument("--wandb_tags", nargs="*", default=[])
+    parser.add_argument("--wandb_notes", default="")
+    parser.add_argument("--wandb_logcode_dir", default="")
+    # --- AppLauncher flags (--headless, --enable_cameras, etc.) ---
     AppLauncher.add_app_launcher_args(parser)
-    launcher_args, _ = parser.parse_known_args([])
-    launcher_args.headless = bool(cfg.headless)
-    launcher_args.enable_cameras = bool(cfg.capture_video)
-    app_launcher = AppLauncher(launcher_args)
-    app = app_launcher.app
+    args_cli, hydra_args = parser.parse_known_args()
+
+    # Recording a video requires cameras even if user forgot --enable_cameras.
+    if args_cli.capture_video:
+        args_cli.enable_cameras = True
+
+    # Hand the leftover key=value tokens to Hydra via sys.argv.
+    sys.argv = [sys.argv[0]] + hydra_args
+
+    app = AppLauncher(args_cli).app
 
     # 2. Safe to import isaaclab-backed modules now.
+    import gymnasium as gym
     from hydra.core.hydra_config import HydraConfig
+    from omegaconf import OmegaConf
     from rl_games.torch_runner import Runner
 
-    from isaacsimenvs.tasks import isaacsim_task_map
-    from isaacsimenvs.utils.reformat import omegaconf_to_dict
-    from isaacsimenvs.utils.rlgames_utils import (
-        MultiObserver,
-        apply_task_overrides,
-        register_rlgames_env,
-    )
+    import isaacsimenvs  # noqa: F401  triggers gym.register side effects
+    from isaacsimenvs.utils.hydra_utils import hydra_task_config_with_yaml
+    from isaacsimenvs.utils.rlgames_utils import MultiObserver, register_rlgames_env
 
-    # Resolve the Hydra-managed output dir once — used for rl_games' train_dir
-    # and for the video observer, so all artifacts co-locate under it.
-    hydra_run_dir = HydraConfig.get().runtime.output_dir
+    @hydra_task_config_with_yaml(args_cli.task, args_cli.agent)
+    def run(env_cfg, agent_cfg: dict) -> None:
+        hydra_run_dir = HydraConfig.get().runtime.output_dir
 
-    # 3. Build env.
-    env_cls, cfg_cls = isaacsim_task_map[cfg.task_name]
-    env_cfg = cfg_cls()
-    # Top-level `num_envs` CLI override is mirrored into the task YAML so the
-    # train YAML's `num_actors: ${....task.scene.num_envs}` interpolation sees it.
-    if cfg.num_envs not in ("", None):
-        cfg.task.scene.num_envs = int(cfg.num_envs)
-    apply_task_overrides(env_cfg, cfg.task, num_envs=cfg.num_envs)
-    env_cfg.sim.device = cfg.sim_device
-    env = env_cls(cfg=env_cfg)
+        # sim_device CLI flag still wins — it's a launcher-level concern, not
+        # something we expect in the task YAML.
+        env_cfg.sim.device = args_cli.sim_device
 
-    # 4. Optional recording camera for wandb video logging. Attach BEFORE
-    # RlGamesVecEnvWrapper so we're still talking to the raw DirectRLEnv's scene.
-    if cfg.capture_video:
-        from isaacsimenvs.utils.video_capture import attach_record_camera
+        env = gym.make(args_cli.task, cfg=env_cfg)
 
-        attach_record_camera(env)
+        if args_cli.capture_video:
+            from isaacsimenvs.utils.video_capture import attach_record_camera
 
-    # 5. Wrap + register under rl_games name "rlgpu". Clip bounds live at the
-    # top level of the task YAML — not on the configclass, but consumed here.
-    register_rlgames_env(
-        env,
-        rl_device=str(cfg.rl_device),
-        clip_obs=float(cfg.task.clip_observations),
-        clip_actions=float(cfg.task.clip_actions),
-    )
+            # gym.make wraps the DirectRLEnv; attach_record_camera pokes .scene.
+            attach_record_camera(env.unwrapped)
 
-    # 6. Observers.
-    observers = []
-    if cfg.wandb_activate:
-        from isaacsimenvs.utils.wandb_utils import WandbAlgoObserver
-
-        observers.append(WandbAlgoObserver(cfg))
-    if cfg.capture_video:
-        from pathlib import Path
-        from isaacsimenvs.utils.video_capture import WandbVideoObserver
-
-        exp_name = cfg.train.params.config.name
-        video_dir = Path(hydra_run_dir) / exp_name / "videos"
-        observers.append(
-            WandbVideoObserver(
-                env,
-                video_interval=int(cfg.get("video_interval", 10)),
-                capture_frames=int(cfg.get("video_capture_frames", 120)),
-                video_fps=int(cfg.get("video_fps", 30)),
-                video_dir=video_dir,
-            )
+        # Clip bounds live in the rl_games YAML (params.env.*). Default to
+        # +inf if absent so a task without clip YAML just runs unbounded —
+        # matches isaacgymenvs's `cfg["env"].get("clipObservations", np.Inf)`.
+        clip_obs = float(agent_cfg["params"]["env"].get("clip_observations", math.inf))
+        clip_actions = float(agent_cfg["params"]["env"].get("clip_actions", math.inf))
+        register_rlgames_env(
+            env,
+            rl_device=args_cli.rl_device,
+            clip_obs=clip_obs,
+            clip_actions=clip_actions,
         )
 
-    # 7. rl_games Runner.
-    runner = Runner(MultiObserver(observers)) if observers else Runner()
+        observers = []
+        if args_cli.wandb_activate:
+            from isaacsimenvs.utils.wandb_utils import WandbAlgoObserver
 
-    rlg_cfg = omegaconf_to_dict(cfg.train)
-    # Point rl_games at the Hydra run dir so checkpoints (`<name>/nn/`) and
-    # tensorboard summaries (`<name>/summaries/`) co-locate with videos + slurm
-    # logs + the resolved Hydra config.
-    rlg_cfg["params"]["config"]["train_dir"] = hydra_run_dir
-    rlg_cfg["params"]["config"]["device"] = str(cfg.rl_device)
-    rlg_cfg["params"]["config"]["device_name"] = str(cfg.rl_device)
-    if cfg.max_iterations not in ("", None):
-        rlg_cfg["params"]["config"]["max_epochs"] = int(cfg.max_iterations)
-    if cfg.seed not in ("", None):
-        rlg_cfg["params"]["seed"] = int(cfg.seed)
+            # WandbAlgoObserver expects attribute access (cfg.wandb_project,
+            # cfg.wandb_notes, …) and also passes cfg to omegaconf_to_dict
+            # for wandb.config upload. OmegaConf satisfies both.
+            wandb_cfg = OmegaConf.create(
+                {
+                    "wandb_activate": True,
+                    "wandb_project": args_cli.wandb_project,
+                    "wandb_group": args_cli.wandb_group,
+                    "wandb_entity": args_cli.wandb_entity,
+                    "wandb_name": args_cli.wandb_name or agent_cfg["params"]["config"]["name"],
+                    "wandb_tags": list(args_cli.wandb_tags),
+                    "wandb_notes": args_cli.wandb_notes,
+                    "wandb_logcode_dir": args_cli.wandb_logcode_dir,
+                }
+            )
+            observers.append(WandbAlgoObserver(wandb_cfg))
 
-    runner.load(rlg_cfg)
-    runner.reset()
-    runner.run(
-        {
-            "train": not bool(cfg.test),
-            "play": bool(cfg.test),
-            "checkpoint": str(cfg.checkpoint) if cfg.checkpoint else None,
-        }
-    )
+        if args_cli.capture_video:
+            from pathlib import Path
+            from isaacsimenvs.utils.video_capture import WandbVideoObserver
 
-    # 8. Kit shutdown hangs (per CLAUDE.md + isaacsim_conversion/distill.py).
+            exp_name = agent_cfg["params"]["config"]["name"]
+            video_dir = Path(hydra_run_dir) / exp_name / "videos"
+            observers.append(
+                WandbVideoObserver(
+                    env.unwrapped,
+                    video_interval=args_cli.video_interval,
+                    capture_frames=args_cli.video_capture_frames,
+                    video_fps=args_cli.video_fps,
+                    video_dir=video_dir,
+                )
+            )
+
+        runner = Runner(MultiObserver(observers)) if observers else Runner()
+        # Co-locate rl_games artifacts (checkpoints, summaries) with the Hydra
+        # run dir so slurm logs + config + videos all live together.
+        agent_cfg["params"]["config"]["train_dir"] = hydra_run_dir
+        agent_cfg["params"]["config"]["device"] = args_cli.rl_device
+        agent_cfg["params"]["config"]["device_name"] = args_cli.rl_device
+
+        runner.load(agent_cfg)
+        runner.reset()
+        runner.run(
+            {
+                "train": not args_cli.test,
+                "play": args_cli.test,
+                "checkpoint": args_cli.checkpoint,
+            }
+        )
+
+    run()
+
+    # Kit shutdown hangs (per CLAUDE.md + isaacsim_conversion/distill.py).
     del app
     sys.stdout.flush()
     sys.stderr.flush()

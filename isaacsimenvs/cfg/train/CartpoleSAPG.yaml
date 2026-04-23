@@ -53,7 +53,7 @@ params:
     mixed_precision: False
     normalize_input: True
     normalize_value: True
-    num_actors: ${....task.scene.num_envs}
+    num_actors: ${....env.scene.num_envs}
     reward_shaper:
       scale_value: 0.1
     normalize_advantage: True

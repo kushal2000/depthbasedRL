@@ -1,8 +1,9 @@
-# This YAML is the source of truth for CartpoleEnvCfg values.
+# Overlay applied on top of CartpoleEnvCfg() defaults by
+# `hydra_task_config_with_yaml` (see isaacsimenvs/utils/hydra_utils.py).
 # Key paths mirror the configclass attribute tree exactly (snake_case).
-# `apply_task_overrides` walks this dict and setattr's each key onto env_cfg.
-# Override anything at submission time, e.g.:
-#   task.action_scale=200.0 task.rew_scale_pole_pos=-2.0 task.scene.num_envs=8192
+# Isaac Lab's `configclass.from_dict` is strict — unknown keys raise.
+# Override at submission time via Hydra CLI, e.g.:
+#   env.action_scale=200.0 env.rew_scale_pole_pos=-2.0 env.scene.num_envs=8192
 
 # Top-level CartpoleEnvCfg scalars
 decimation: 2
@@ -38,8 +39,3 @@ scene:
   env_spacing: 4.0
   replicate_physics: true
   clone_in_fabric: true
-
-# NOT attributes on CartpoleEnvCfg — consumed by train.py to parameterize
-# RlGamesVecEnvWrapper. Defaults follow Isaac Lab's cartpole PPO cfg.
-clip_observations: 5.0
-clip_actions: 1.0

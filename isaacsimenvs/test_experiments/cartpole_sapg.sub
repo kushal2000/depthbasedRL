@@ -18,7 +18,8 @@
 # ╚══════════════════════════════════════════════════════════════╝
 
 # ── Train / algo ─────────────────────────────────────────────
-TRAIN_CFG="CartpoleSAPG"
+TASK_ID="Isaacsimenvs-Cartpole-Direct-v0"
+AGENT_KEY="rl_games_sapg_cfg_entry_point"
 NUM_ENVS=4096                     # must be divisible by num_blocks (block_size=1024 → 4 blocks)
 MINIBATCH_SIZE=16384
 MAX_ITERATIONS=200
@@ -73,20 +74,17 @@ mkdir -p "$OMNI_KIT_CACHE_PATH"
 
 # ── Launch training ──────────────────────────────────────────
 python -u isaacsimenvs/train.py \
-    task=Cartpole \
-    train=$TRAIN_CFG \
-    num_envs=$NUM_ENVS \
-    max_iterations=$MAX_ITERATIONS \
-    train.params.config.minibatch_size=$MINIBATCH_SIZE \
-    headless=true \
-    capture_video=true \
-    video_interval=20 \
-    wandb_activate=true \
-    wandb_project="$WANDB_PROJECT" \
-    wandb_group="$WANDB_GROUP" \
-    wandb_entity=kk837 \
-    wandb_name="$EXPERIMENT_NAME" \
-    wandb_tags=[] \
-    ++wandb_notes='' \
-    seed=$SEED \
+    --task "$TASK_ID" \
+    --agent "$AGENT_KEY" \
+    --headless --enable_cameras \
+    --capture_video --video_interval 20 \
+    --wandb_activate \
+    --wandb_project "$WANDB_PROJECT" \
+    --wandb_group "$WANDB_GROUP" \
+    --wandb_entity kk837 \
+    --wandb_name "$EXPERIMENT_NAME" \
+    env.scene.num_envs=$NUM_ENVS \
+    agent.params.config.max_epochs=$MAX_ITERATIONS \
+    agent.params.config.minibatch_size=$MINIBATCH_SIZE \
+    agent.params.seed=$SEED \
     hydra.run.dir="$HYDRA_RUN_DIR"

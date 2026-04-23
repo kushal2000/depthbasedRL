@@ -1,34 +1,39 @@
 """Run a trained policy and record an mp4 of the rollout.
 
-Unlike `train.py test=true` (which calls rl_games' `player.run()` and gives us
+Unlike ``train.py --test`` (which calls rl_games' ``player.run()`` and gives us
 no hook to capture frames), this script builds a manual rollout loop so we can
-`camera.update(dt)` and append rgb frames each step.
+``camera.update(dt)`` and append rgb frames each step.
 
     python isaacsimenvs/play_video.py \
         --checkpoint runs/0_cartpole_direct/nn/last_0_cartpole_direct_ep_<...>_.pth \
-        --task Cartpole --train_cfg CartpolePPO \
+        --task Isaacsimenvs-Cartpole-Direct-v0 \
+        --agent rl_games_cfg_entry_point \
         --num_envs 4 --steps 300
 
-Output: `isaacsimenvs/videos/<task>_rollout.mp4`.
+Output: ``isaacsimenvs/videos/<task>_rollout.mp4``.
 """
 
 from __future__ import annotations
 
 import argparse
+import importlib
 import os
 import sys
 from pathlib import Path
 
 
-REPO_ROOT = Path(__file__).resolve().parents[1]
 VIDEO_DIR = Path(__file__).resolve().parent / "videos"
 
 
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--checkpoint", required=True, help="Path to rl_games .pth checkpoint")
-    parser.add_argument("--task", default="Cartpole", help="Task name from isaacsim_task_map")
-    parser.add_argument("--train_cfg", default="CartpolePPO", help="Train yaml stem under cfg/train/")
+    parser.add_argument("--task", default="Isaacsimenvs-Cartpole-Direct-v0", help="Gym task id")
+    parser.add_argument(
+        "--agent",
+        default="rl_games_cfg_entry_point",
+        help="Key in gym.register kwargs for the rl_games YAML (PPO vs SAPG).",
+    )
     parser.add_argument("--num_envs", type=int, default=1)
     parser.add_argument("--env_idx", type=int, default=0, help="Which env the camera follows (0..num_envs-1)")
     parser.add_argument("--steps", type=int, default=300, help="Physics steps to record")
@@ -47,18 +52,24 @@ def main() -> None:
     launcher_args.enable_cameras = True
     app = AppLauncher(launcher_args).app
 
+    import gymnasium as gym
     import torch
-    import yaml
     import isaaclab.sim as sim_utils
     from isaaclab.sensors import Camera, CameraCfg
+    from isaaclab_tasks.utils.parse_cfg import load_cfg_from_registry
 
-    from isaacsimenvs.tasks import isaacsim_task_map
+    import isaacsimenvs  # noqa: F401  triggers gym.register
     from isaacsimenvs.utils.rlgames_utils import register_rlgames_env
 
     # --- Env ---
-    env_cls, cfg_cls = isaacsim_task_map[my_args.task]
-    env_cfg = cfg_cls()
+    # Direct instantiation (not gym.make) — play loop is manual, no gym
+    # step/reset semantics needed, and DirectRLEnv exposes .scene / .sim directly.
+    env_cfg = load_cfg_from_registry(my_args.task, "env_cfg_entry_point")
     env_cfg.scene.num_envs = my_args.num_envs
+
+    spec = gym.spec(my_args.task)
+    mod_name, cls_name = spec.entry_point.split(":")
+    env_cls = getattr(importlib.import_module(mod_name), cls_name)
     env = env_cls(cfg=env_cfg)
 
     # --- Camera sensor ---
@@ -102,26 +113,27 @@ def main() -> None:
     print(f"[diag] camera pos_w actual = {camera.data.pos_w[0].cpu().tolist()}")
     print(f"[diag] camera quat_w actual = {camera.data.quat_w_world[0].cpu().tolist()}")
 
-    # --- Wrap for rl_games + register ---
+    # --- Agent cfg + rl_games wrap ---
+    agent_cfg = load_cfg_from_registry(my_args.task, my_args.agent)
+    import math
+
+    clip_obs = float(agent_cfg["params"]["env"].get("clip_observations", math.inf))
+    clip_actions = float(agent_cfg["params"]["env"].get("clip_actions", math.inf))
     wrapped = register_rlgames_env(
         env,
         rl_device=my_args.rl_device,
-        clip_obs=5.0,
-        clip_actions=1.0,
+        clip_obs=clip_obs,
+        clip_actions=clip_actions,
     )
 
-    # --- Load train yaml to construct the Runner with matching arch ---
-    train_yaml_path = REPO_ROOT / "isaacsimenvs" / "cfg" / "train" / f"{my_args.train_cfg}.yaml"
-    with open(train_yaml_path) as f:
-        rlg_cfg = yaml.safe_load(f)
-    rlg_cfg["params"]["config"]["device"] = my_args.rl_device
-    rlg_cfg["params"]["config"]["device_name"] = my_args.rl_device
+    agent_cfg["params"]["config"]["device"] = my_args.rl_device
+    agent_cfg["params"]["config"]["device_name"] = my_args.rl_device
 
     # --- Player ---
     from rl_games.torch_runner import Runner
 
     runner = Runner()
-    runner.load(rlg_cfg)
+    runner.load(agent_cfg)
     runner.reset()
     player = runner.create_player()
     player.restore(my_args.checkpoint)
@@ -151,6 +163,7 @@ def main() -> None:
                         f" min={frame.min()} max={frame.max()} mean={frame.mean():.2f}"
                     )
                     import imageio as _io
+
                     _debug_png = VIDEO_DIR / "cartpole_first_frame.png"
                     _debug_png.parent.mkdir(parents=True, exist_ok=True)
                     _io.imwrite(str(_debug_png), frame)
@@ -160,7 +173,9 @@ def main() -> None:
     # --- Save ---
     import imageio
 
-    out_path = Path(my_args.out) if my_args.out else VIDEO_DIR / f"{my_args.task.lower()}_rollout.mp4"
+    # Strip any "Isaac-" prefix and version suffix for the default filename.
+    slug = my_args.task.lower().replace("isaac-", "").rsplit("-v", 1)[0]
+    out_path = Path(my_args.out) if my_args.out else VIDEO_DIR / f"{slug}_rollout.mp4"
     out_path.parent.mkdir(parents=True, exist_ok=True)
     imageio.mimwrite(str(out_path), frames, fps=my_args.video_fps)
     print(f"[play_video] Wrote {len(frames)} frames to {out_path}")

@@ -45,7 +45,7 @@ def hydra_task_config_with_yaml(
     overlay on top of the configclass defaults before Hydra CLI merging.
 
     Args:
-        task_name: Gym task id (e.g. ``"Isaac-Cartpole-Direct-v0"``). A colon-separated
+        task_name: Gym task id (e.g. ``"Isaacsimenvs-Cartpole-Direct-v0"``). A colon-separated
             prefix is stripped to match Isaac Lab's convention.
         agent_cfg_entry_point: Key in ``gym.register(..., kwargs=...)`` whose value
             is the agent (rl_games) config entry point. Typically
@@ -66,7 +66,6 @@ def hydra_task_config_with_yaml(
                 if agent_cfg_entry_point
                 else None
             )
-
             # Overlay the task YAML onto the configclass defaults (if registered).
             # `gym.spec(...).kwargs` is where `gym.register(kwargs=...)` puts them.
             yaml_path = gym.spec(short_name).kwargs.get(yaml_entry_point)

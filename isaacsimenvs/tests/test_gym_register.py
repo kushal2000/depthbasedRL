@@ -1,7 +1,7 @@
 """Smoke test Phase 1: verify gym.register + YAML overlay compose correctly.
 
 Confirms:
-  1. `import isaacsimenvs` triggers `gym.register("Isaac-Cartpole-Direct-v0", ...)`.
+  1. `import isaacsimenvs` triggers `gym.register("Isaacsimenvs-Cartpole-Direct-v0", ...)`.
   2. `load_cfg_from_registry` resolves each entry_point to the expected type.
   3. `env_cfg.from_dict(task_yaml)` applies overrides onto the configclass cleanly
      (the merge Phase 2's trainer will rely on).
@@ -39,7 +39,7 @@ def main() -> None:
     from isaaclab_tasks.utils.parse_cfg import load_cfg_from_registry
     from isaacsimenvs.tasks.cartpole.cartpole_env import CartpoleEnvCfg
 
-    task_id = "Isaac-Cartpole-Direct-v0"
+    task_id = "Isaacsimenvs-Cartpole-Direct-v0"
 
     # 1. Registration succeeded.
     spec = gym.spec(task_id)

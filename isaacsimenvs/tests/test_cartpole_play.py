@@ -1,7 +1,7 @@
-"""Smoke test for the `test=true` (play/eval) code path.
+"""Smoke test for the ``--test`` (play/eval) code path.
 
 Trains for 2 iters (to produce a checkpoint) then runs a short rollout in play
-mode against that checkpoint. Validates that `train.py test=true checkpoint=...`
+mode against that checkpoint. Validates that ``train.py --test --checkpoint=...``
 does not crash and that rl_games loads the saved weights.
 """
 
@@ -17,6 +17,7 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 TRAIN_SCRIPT = REPO_ROOT / "isaacsimenvs" / "train.py"
+EXP_NAME = "0_cartpole_direct"  # matches CartpolePPO.yaml params.config.name
 
 
 def _run(cmd: list[str]) -> subprocess.CompletedProcess[str]:
@@ -26,8 +27,8 @@ def _run(cmd: list[str]) -> subprocess.CompletedProcess[str]:
     result = subprocess.run(cmd, cwd=REPO_ROOT, env=env, capture_output=True, text=True)
     print(f"[play test] exit={result.returncode}", flush=True)
     out = result.stdout + result.stderr
-    if "Traceback" in out and "Error executing job" in out:
-        print(out[-3000:])
+    if "Traceback" in out and ("Error executing job" in out or result.returncode != 0):
+        print(out[-4000:])
         raise AssertionError("train.py hit a Python exception")
     assert result.returncode == 0, f"subprocess exited {result.returncode}"
     return result
@@ -41,8 +42,7 @@ def main() -> None:
 
     run_dir_train = REPO_ROOT / "runs" / "cartpole_play_train"
     run_dir_play = REPO_ROOT / "runs" / "cartpole_play_eval"
-    exp_dir = REPO_ROOT / "runs" / "0_cartpole_direct"
-    for d in (run_dir_train, run_dir_play, exp_dir):
+    for d in (run_dir_train, run_dir_play):
         if d.exists():
             shutil.rmtree(d)
 
@@ -51,18 +51,18 @@ def main() -> None:
         sys.executable,
         "-u",
         str(TRAIN_SCRIPT),
-        "train=CartpolePPO",
-        f"num_envs={my_args.num_envs}",
-        f"max_iterations={my_args.train_iters}",
-        "headless=true",
-        "wandb_activate=false",
-        "train.params.config.minibatch_size=512",
+        "--task", "Isaacsimenvs-Cartpole-Direct-v0",
+        "--agent", "rl_games_cfg_entry_point",
+        "--headless",
+        f"env.scene.num_envs={my_args.num_envs}",
+        f"agent.params.config.max_epochs={my_args.train_iters}",
+        "agent.params.config.minibatch_size=512",
         f"hydra.run.dir={run_dir_train}",
     ]
     _run(train_cmd)
 
-    # rl_games writes checkpoints under runs/<exp_name>/nn/last_*.pth
-    nn_dir = exp_dir / "nn"
+    # rl_games writes checkpoints under <train_dir>/<exp_name>/nn/last_*.pth
+    nn_dir = run_dir_train / EXP_NAME / "nn"
     ckpts = sorted(nn_dir.glob("last_*.pth"))
     assert ckpts, f"no last_*.pth under {nn_dir}"
     checkpoint = ckpts[-1]
@@ -73,20 +73,20 @@ def main() -> None:
         sys.executable,
         "-u",
         str(TRAIN_SCRIPT),
-        "train=CartpolePPO",
-        "test=true",
-        f"checkpoint={checkpoint}",
-        f"num_envs={my_args.num_envs}",
-        "headless=true",
-        "wandb_activate=false",
-        "train.params.config.minibatch_size=512",
-        "train.params.config.player.games_num=4",
+        "--task", "Isaacsimenvs-Cartpole-Direct-v0",
+        "--agent", "rl_games_cfg_entry_point",
+        "--test",
+        "--checkpoint", str(checkpoint),
+        "--headless",
+        f"env.scene.num_envs={my_args.num_envs}",
+        "agent.params.config.minibatch_size=512",
+        "agent.params.config.player.games_num=4",
         f"hydra.run.dir={run_dir_play}",
     ]
     result = _run(play_cmd)
 
     # rl_games' player prints "=> loading checkpoint '<path>'" on successful load
-    assert f"loading checkpoint" in result.stdout + result.stderr, (
+    assert "loading checkpoint" in (result.stdout + result.stderr), (
         "rl_games player did not log a checkpoint-load message"
     )
     print("[play test] OK — checkpoint loaded and play completed without error")

@@ -1,17 +1,18 @@
 """Cartpole task registration.
 
-Importing this subpackage fires `gym.register`, exposing ``Isaac-Cartpole-Direct-v0``
-to the gymnasium registry. Entry points cover:
+Importing this subpackage fires `gym.register`, exposing ``Isaacsimenvs-Cartpole-Direct-v0``
+to the gymnasium registry. The ``Isaacsimenvs-`` prefix (vs. Isaac Lab's ``Isaac-``)
+avoids collision with ``isaaclab_tasks.direct.cartpole``, which registers
+``Isaac-Cartpole-Direct-v0`` on its own import and would otherwise silently
+override our entry points, steering ``load_cfg_from_registry`` at Isaac Lab's
+stock YAML instead of ours.
 
+Entry points:
 - ``env_cfg_entry_point``     → CartpoleEnvCfg (typed defaults in code)
 - ``env_cfg_yaml_entry_point``→ cfg/task/Cartpole.yaml (overlay of defaults,
                                  read by our custom hydra decorator)
 - ``rl_games_cfg_entry_point``→ cfg/train/CartpolePPO.yaml (rl_games algo cfg)
 - ``rl_games_sapg_cfg_entry_point`` → cfg/train/CartpoleSAPG.yaml
-
-The tuple `(CartpoleEnv, CartpoleEnvCfg)` is also re-exported for the legacy
-`isaacsim_task_map` path (kept alive until Phase 2 of the @hydra_task_config
-migration deletes it).
 """
 
 from __future__ import annotations
@@ -27,7 +28,7 @@ __all__ = ["CartpoleEnv", "CartpoleEnvCfg"]
 _CFG_DIR = Path(__file__).resolve().parents[2] / "cfg"
 
 gym.register(
-    id="Isaac-Cartpole-Direct-v0",
+    id="Isaacsimenvs-Cartpole-Direct-v0",
     entry_point="isaacsimenvs.tasks.cartpole.cartpole_env:CartpoleEnv",
     disable_env_checker=True,
     kwargs={
