@@ -1,0 +1,42 @@
+# This YAML is the source of truth for CartpoleEnvCfg values.
+# Key paths mirror the configclass attribute tree exactly (snake_case).
+# `apply_task_overrides` walks this dict and setattr's each key onto env_cfg.
+# Override anything at submission time, e.g.:
+#   task.action_scale=200.0 task.rew_scale_pole_pos=-2.0 task.scene.num_envs=8192
+
+name: Cartpole
+
+# Top-level CartpoleEnvCfg scalars
+decimation: 2
+episode_length_s: 5.0
+action_scale: 100.0          # [N]
+cart_dof_name: slider_to_cart
+pole_dof_name: cart_to_pole
+
+# Reset
+max_cart_pos: 3.0            # [m]; cart terminated when |pos| > this
+initial_pole_angle_range: [-0.25, 0.25]  # scaled by pi at reset
+
+# Reward scales
+rew_scale_alive: 1.0
+rew_scale_terminated: -2.0
+rew_scale_pole_pos: -1.0
+rew_scale_cart_vel: -0.01
+rew_scale_pole_vel: -0.005
+
+# Nested: SimulationCfg
+sim:
+  dt: 0.00833333333           # 1/120
+  render_interval: 2
+
+# Nested: InteractiveSceneCfg
+scene:
+  num_envs: 4096
+  env_spacing: 4.0
+  replicate_physics: true
+  clone_in_fabric: true
+
+# NOT attributes on CartpoleEnvCfg — consumed by train.py to parameterize
+# RlGamesVecEnvWrapper. Defaults follow Isaac Lab's cartpole PPO cfg.
+clip_observations: 5.0
+clip_actions: 1.0
