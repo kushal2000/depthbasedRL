@@ -4,8 +4,6 @@
 # Override anything at submission time, e.g.:
 #   task.action_scale=200.0 task.rew_scale_pole_pos=-2.0 task.scene.num_envs=8192
 
-name: Cartpole
-
 # Top-level CartpoleEnvCfg scalars
 decimation: 2
 episode_length_s: 5.0
