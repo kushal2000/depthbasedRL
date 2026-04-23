@@ -30,18 +30,23 @@ the kp-dist metric was frozen at `0.0871` from step ~60 onward. The policy
 is clearly running (observations are being computed, actions are being
 emitted, PD targets are applied), but the object never moves.
 
-Two things to check on wake:
-1. Does `isaacsim_conversion/rollout.py` (the legacy driver, pre-port) see
-   the same 0/12 behavior? A parallel comparison is queued; check
-   `rollout_videos_legacy/trajectory.npz` vs `isaacsimenvs/rollout_videos/
-   trajectory.npz`. If legacy also sees 0/12, the port is faithful and the
-   problem is upstream — probably checkpoint mismatch (the generic
-   `pretrained_policy/model.pth` wasn't trained on fabrica/beam, see
-   `hardware_rollouts/Apr16_experiments/beam_*` for beam-specific variants).
-2. Try a beam-specific checkpoint: `hardware_rollouts/Apr16_experiments/
-   beam_multi_init_table_rand_dr/model.pth` or `beam_final_goal_only_dr/`.
-   The `isaacsim_conversion/README.md` status line claims "all 12 goals …
-   using the FGT curriculum policy" — "FGT" = `final_goal_only` variant.
+**The port is faithful.** Ran the same 6000-step rollout through legacy
+`isaacsim_conversion/rollout.py` for comparison. Trajectories are
+**bit-identical** (q[5999] and object_pose[5999] match to float32
+precision; kp_dist min/mean/max identical). So the 0/12 result is
+entirely upstream — it's not caused by anything in the isaacsimenvs port.
+
+Upstream root cause to investigate on wake:
+1. Arm IS moving (3.6 rad delta). Hand IS moving (1.7 rad). Object moves
+   ~7 cm in XY but z never changes (stays at 0.5358). The policy is
+   flailing over the object without grasping it — classic sim2sim gap
+   where contact dynamics differ enough from training that grasping fails.
+2. `isaacsim_conversion/README.md` claims "all 12 goals … FGT curriculum
+   policy." The default `pretrained_policy/model.pth` is the generic
+   SimToolReal policy, NOT FGT. A beam-specific FGT checkpoint
+   (`hardware_rollouts/Apr16_experiments/beam_final_goal_only_dr/model.pth`)
+   is queued for comparison — if it succeeds where the generic fails,
+   that's the checkpoint to default to.
 
 Artifacts of the 6000-step run:
 - `isaacsimenvs/rollout_videos/rollout_beam_2.mp4` (1.7 MB, 100 s @ 30fps)
