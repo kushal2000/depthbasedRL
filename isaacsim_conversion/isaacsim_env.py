@@ -71,13 +71,9 @@ JOINT_DAMPINGS = {
 assert len(JOINT_STIFFNESSES) == 29
 assert len(JOINT_DAMPINGS) == 29
 
-# Isaac Lab's UrdfConverter multiplies revolute joint stiffness/damping by pi/180
-# (rad→deg conversion). But our values are already in PhysX units (same as Isaac Gym).
-# So we pre-compensate by multiplying by 180/pi to cancel out the conversion.
-import math
-RAD_TO_DEG_COMPENSATION = 180.0 / math.pi
-JOINT_STIFFNESSES_COMPENSATED = {k: v * RAD_TO_DEG_COMPENSATION for k, v in JOINT_STIFFNESSES.items()}
-JOINT_DAMPINGS_COMPENSATED = {k: v * RAD_TO_DEG_COMPENSATION for k, v in JOINT_DAMPINGS.items()}
+# Isaac Lab's current URDF converter tests assert that articulation gains read
+# back from PhysX match the configured joint_drive gains directly. So we pass
+# the Isaac Gym gains through without any extra rad/deg compensation.
 
 # Match the Isaac Gym training config in isaacgymenvs/cfg/task/SimToolReal.yaml:
 # sim.dt=1/60, sim.substeps=2. In Isaac Lab, dt is the physics step, so we emulate the
@@ -188,6 +184,10 @@ class IsaacSimEnv:
             ),
             physx=PhysxCfg(
                 solver_type=1,  # TGS
+                min_position_iteration_count=8,
+                max_position_iteration_count=8,
+                min_velocity_iteration_count=0,
+                max_velocity_iteration_count=0,
                 bounce_threshold_velocity=0.2,
                 friction_offset_threshold=0.04,
                 friction_correlation_distance=0.025,
@@ -220,7 +220,7 @@ class IsaacSimEnv:
         cfg = UrdfConverterCfg(
             asset_path=urdf_path,
             usd_dir=f"{self._usd_cache_dir}/robot",
-            force_usd_conversion=True,  # Regenerate USD with updated settings
+            force_usd_conversion=False,
             make_instanceable=False,
             fix_base=True,
             merge_fixed_joints=True,  # Match Isaac Gym's collapse_fixed_joints=True
@@ -229,8 +229,8 @@ class IsaacSimEnv:
                 drive_type="force",
                 target_type="position",
                 gains=UrdfConverterCfg.JointDriveCfg.PDGainsCfg(
-                    stiffness=JOINT_STIFFNESSES_COMPENSATED,
-                    damping=JOINT_DAMPINGS_COMPENSATED,
+                    stiffness=JOINT_STIFFNESSES,
+                    damping=JOINT_DAMPINGS,
                 ),
             ),
         )
@@ -244,7 +244,7 @@ class IsaacSimEnv:
         cfg = UrdfConverterCfg(
             asset_path=urdf_path,
             usd_dir=f"{self._usd_cache_dir}/table",
-            force_usd_conversion=True,
+            force_usd_conversion=False,
             make_instanceable=False,
             fix_base=True,
             merge_fixed_joints=True,
@@ -260,7 +260,7 @@ class IsaacSimEnv:
         cfg = UrdfConverterCfg(
             asset_path=urdf_path,
             usd_dir=f"{self._usd_cache_dir}/object",
-            force_usd_conversion=True,
+            force_usd_conversion=False,
             make_instanceable=False,
             fix_base=False,
             merge_fixed_joints=True,

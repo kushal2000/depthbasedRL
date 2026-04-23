@@ -27,10 +27,8 @@ from isaacsim_conversion.isaacsim_env import (
     FINGERTIP_FRICTION,
     FINGERTIP_LINK_NAMES,
     JOINT_DAMPINGS,
-    JOINT_DAMPINGS_COMPENSATED,
     JOINT_NAMES_ISAACGYM,
     JOINT_STIFFNESSES,
-    JOINT_STIFFNESSES_COMPENSATED,
     PHYSICS_DT,
     PHYSICS_SUBSTEPS,
     _log,
@@ -337,7 +335,7 @@ class IsaacSimDistillEnv:
                     spawn=sim_utils.UrdfFileCfg(
                         asset_path=self.task_spec.robot_urdf,
                         usd_dir="/tmp/isaaclab_usd_cache_distill/robot",
-                        force_usd_conversion=True,
+                        force_usd_conversion=False,
                         make_instanceable=False,
                         fix_base=True,
                         merge_fixed_joints=True,
@@ -346,8 +344,8 @@ class IsaacSimDistillEnv:
                             drive_type="force",
                             target_type="position",
                             gains=sim_utils.UrdfConverterCfg.JointDriveCfg.PDGainsCfg(
-                                stiffness=JOINT_STIFFNESSES_COMPENSATED,
-                                damping=JOINT_DAMPINGS_COMPENSATED,
+                                stiffness=JOINT_STIFFNESSES,
+                                damping=JOINT_DAMPINGS,
                             ),
                         ),
                         rigid_props=sim_utils.RigidBodyPropertiesCfg(
@@ -388,7 +386,7 @@ class IsaacSimDistillEnv:
                     spawn=sim_utils.UrdfFileCfg(
                         asset_path=self.task_spec.table_urdf,
                         usd_dir="/tmp/isaaclab_usd_cache_distill/table",
-                        force_usd_conversion=True,
+                        force_usd_conversion=False,
                         make_instanceable=False,
                         fix_base=True,
                         merge_fixed_joints=True,
@@ -414,7 +412,7 @@ class IsaacSimDistillEnv:
                     spawn=sim_utils.UrdfFileCfg(
                         asset_path=self.task_spec.object_urdf,
                         usd_dir="/tmp/isaaclab_usd_cache_distill/object",
-                        force_usd_conversion=True,
+                        force_usd_conversion=False,
                         make_instanceable=False,
                         fix_base=False,
                         merge_fixed_joints=True,
@@ -471,7 +469,7 @@ class IsaacSimDistillEnv:
                     spawn=sim_utils.UrdfFileCfg(
                         asset_path=self.task_spec.robot_urdf,
                         usd_dir="/tmp/isaaclab_usd_cache_distill/robot",
-                        force_usd_conversion=True,
+                        force_usd_conversion=False,
                         make_instanceable=False,
                         fix_base=True,
                         merge_fixed_joints=True,
@@ -480,8 +478,8 @@ class IsaacSimDistillEnv:
                             drive_type="force",
                             target_type="position",
                             gains=sim_utils.UrdfConverterCfg.JointDriveCfg.PDGainsCfg(
-                                stiffness=JOINT_STIFFNESSES_COMPENSATED,
-                                damping=JOINT_DAMPINGS_COMPENSATED,
+                                stiffness=JOINT_STIFFNESSES,
+                                damping=JOINT_DAMPINGS,
                             ),
                         ),
                         rigid_props=sim_utils.RigidBodyPropertiesCfg(
@@ -522,7 +520,7 @@ class IsaacSimDistillEnv:
                     spawn=sim_utils.UrdfFileCfg(
                         asset_path=self.task_spec.table_urdf,
                         usd_dir="/tmp/isaaclab_usd_cache_distill/table",
-                        force_usd_conversion=True,
+                        force_usd_conversion=False,
                         make_instanceable=False,
                         fix_base=True,
                         merge_fixed_joints=True,
@@ -548,7 +546,7 @@ class IsaacSimDistillEnv:
                     spawn=sim_utils.UrdfFileCfg(
                         asset_path=self.task_spec.object_urdf,
                         usd_dir="/tmp/isaaclab_usd_cache_distill/object",
-                        force_usd_conversion=True,
+                        force_usd_conversion=False,
                         make_instanceable=False,
                         fix_base=False,
                         merge_fixed_joints=True,
@@ -597,6 +595,10 @@ class IsaacSimDistillEnv:
             ),
             physx=PhysxCfg(
                 solver_type=1,
+                min_position_iteration_count=8,
+                max_position_iteration_count=8,
+                min_velocity_iteration_count=0,
+                max_velocity_iteration_count=0,
                 bounce_threshold_velocity=0.2,
                 friction_offset_threshold=0.04,
                 friction_correlation_distance=0.025,
@@ -733,6 +735,9 @@ class IsaacSimDistillEnv:
 
         all_rigid_prim_paths = list(dict.fromkeys(all_rigid_prim_paths))
         fingertip_rigid_prim_paths = list(dict.fromkeys(fingertip_rigid_prim_paths))
+        non_fingertip_rigid_prim_paths = [
+            prim_path for prim_path in all_rigid_prim_paths if prim_path not in set(fingertip_rigid_prim_paths)
+        ]
 
         default_material_cfg = sim_utils.RigidBodyMaterialCfg(
             static_friction=self.default_asset_friction,
@@ -741,7 +746,7 @@ class IsaacSimDistillEnv:
         )
         default_material_path = "/World/PhysicsMaterials/distill_default_asset_material"
         default_material_cfg.func(default_material_path, default_material_cfg)
-        self._apply_material_to_rigid_prims(default_material_path, all_rigid_prim_paths)
+        self._apply_material_to_rigid_prims(default_material_path, non_fingertip_rigid_prim_paths)
 
         fingertip_material_cfg = sim_utils.RigidBodyMaterialCfg(
             static_friction=self.fingertip_friction,
@@ -960,7 +965,7 @@ class IsaacSimDistillEnv:
 
         self.scene.write_data_to_sim()
         self.sim.step(render=not self.headless)
-        self.scene.update(PHYSICS_DT)
+        self.scene.update(CONTROL_DT)
         if self.camera is not None:
             self.sim.render()
         if self.camera is not None:
@@ -1035,7 +1040,7 @@ class IsaacSimDistillEnv:
         self.scene.write_data_to_sim()
         for _ in range(PHYSICS_SUBSTEPS):
             self.sim.step(render=render)
-        self.scene.update(PHYSICS_DT)
+        self.scene.update(CONTROL_DT)
         self.progress_buf += 1
         if self.camera is not None and self._camera_mount_mode() == "wrist":
             self._apply_camera_world_poses()
