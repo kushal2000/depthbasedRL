@@ -36,17 +36,37 @@ emitted, PD targets are applied), but the object never moves.
 precision; kp_dist min/mean/max identical). So the 0/12 result is
 entirely upstream — it's not caused by anything in the isaacsimenvs port.
 
-Upstream root cause to investigate on wake:
-1. Arm IS moving (3.6 rad delta). Hand IS moving (1.7 rad). Object moves
-   ~7 cm in XY but z never changes (stays at 0.5358). The policy is
-   flailing over the object without grasping it — classic sim2sim gap
-   where contact dynamics differ enough from training that grasping fails.
-2. `isaacsim_conversion/README.md` claims "all 12 goals … FGT curriculum
-   policy." The default `pretrained_policy/model.pth` is the generic
-   SimToolReal policy, NOT FGT. A beam-specific FGT checkpoint
-   (`hardware_rollouts/Apr16_experiments/beam_final_goal_only_dr/model.pth`)
-   is queued for comparison — if it succeeds where the generic fails,
-   that's the checkpoint to default to.
+Upstream root cause to investigate on wake — the FGT comparison run finished
+and also hit 0/12. Both checkpoints **run** but **fail differently**:
+
+| Metric                 | Generic `pretrained_policy/` | Beam-FGT `Apr16_experiments/beam_final_goal_only_dr/` |
+|------------------------|------------------------------|-------------------------------------------------------|
+| kp_dist min            | 0.024                        | 0.048                                                 |
+| kp_dist mean           | 0.087                        | 0.656                                                 |
+| object XY delta        | 7 cm                         | 33 cm                                                 |
+| object z max reached   | **0.624** (10 cm above table)| 0.537 (never lifted)                                  |
+| object z end           | 0.536 (on table)             | **0.006** (fell to floor)                             |
+
+Takeaways:
+- Generic briefly lifts the beam 10 cm then loses grip; FGT never lifts but
+  pushes the beam ~33 cm and knocks it off the table.
+- Neither reproduces the README's "all 12 goals" claim.
+- Rollout videos for both are in `isaacsimenvs/rollout_videos/` (generic) and
+  `isaacsimenvs/rollout_videos_fgt/` (FGT) for side-by-side inspection.
+
+Since the port is bit-exact faithful to legacy, the fix is **not** in
+isaacsimenvs. Likely root causes to inspect:
+1. **Asset drift.** Git log `assets/urdf/fabrica/beam/environments/2/` and
+   `assets/urdf/fabrica/beam/trajectories/2/` since the README claim was
+   recorded. Collision mesh regeneration (coacd/sdf) can silently break
+   trained policies.
+2. **Isaac Sim version / PhysX.** Compare the Isaac Lab version in
+   `.venv_isaacsim/` now vs. when the README status was written.
+3. **Different beam / part_id.** The README doesn't name the exact
+   assembly; maybe the "all 12 goals" run was for a different fabrica part.
+4. **DexToolBench path** (`--task_source dextoolbench`) may behave
+   differently — that code path is less exercised by this port but might
+   be what the README's claim actually referred to.
 
 Artifacts of the 6000-step run:
 - `isaacsimenvs/rollout_videos/rollout_beam_2.mp4` (1.7 MB, 100 s @ 30fps)
