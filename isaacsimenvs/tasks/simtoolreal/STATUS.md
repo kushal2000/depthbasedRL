@@ -55,13 +55,20 @@ Takeaways:
   `isaacsimenvs/rollout_videos_fgt/` (FGT) for side-by-side inspection.
 
 Since the port is bit-exact faithful to legacy, the fix is **not** in
-isaacsimenvs. Likely root causes to inspect:
-1. **Asset drift.** Git log `assets/urdf/fabrica/beam/environments/2/` and
-   `assets/urdf/fabrica/beam/trajectories/2/` since the README claim was
-   recorded. Collision mesh regeneration (coacd/sdf) can silently break
-   trained policies.
-2. **Isaac Sim version / PhysX.** Compare the Isaac Lab version in
-   `.venv_isaacsim/` now vs. when the README status was written.
+isaacsimenvs. Prioritized upstream root causes:
+
+1. **Asset drift — strong lead.** `git log assets/urdf/fabrica/beam/`
+   shows commit `04948ef Re-run beam CoACD with seed 2 and generalize
+   sweep script`. The coacd collision meshes were regenerated. A policy
+   trained on the old meshes has to grasp a geometrically-different peg
+   now. This is a very plausible explanation for the contact failure
+   observed (generic policy briefly lifts to z=0.62 then drops it).
+   **Action:** checkout the repo at the commit BEFORE `04948ef`, regenerate
+   USD cache (delete `/tmp/isaaclab_usd_cache`), rerun the rollout. If
+   goals are reached, confirmed.
+2. **Isaac Sim version / PhysX.** The `.venv_isaacsim/` snapshot may have
+   updated since the README claim. `pip show isaaclab` vs the Isaac Lab
+   version referenced in the README (2.3.2.post1).
 3. **Different beam / part_id.** The README doesn't name the exact
    assembly; maybe the "all 12 goals" run was for a different fabrica part.
 4. **DexToolBench path** (`--task_source dextoolbench`) may behave
