@@ -2,9 +2,10 @@
 
 Two pieces:
 
-- `attach_record_camera(env, ...)` — spawns a `Camera` sensor in the env's scene
-  aimed at env_idx's primary articulation, returns the sensor, and stores it on
-  the env as `env._video_camera` so observers can find it.
+- `attach_record_camera(env, ...)` — spawns a `Camera` sensor, aims it using
+  the env's configured `record_camera_eye` / `record_camera_target` (env-local
+  frame), returns the sensor, and stores it on `env._video_camera` so observers
+  can find it.
 
 - `WandbVideoObserver` — rl_games `AlgoObserver` subclass. Every
   `video_interval` training iters, it starts accumulating frames via
@@ -28,11 +29,14 @@ from rl_games.common.algo_observer import AlgoObserver
 def attach_record_camera(
     env,
     env_idx: int | None = None,
-    eye_offset: tuple[float, float, float] = (-3.0, 0.0, 0.5),
     width: int = 640,
     height: int = 480,
 ) -> Camera:
-    """Attach a Camera sensor aimed at env_idx's primary articulation.
+    """Attach a Camera sensor aimed using the env cfg's record_camera_{eye,target}.
+
+    The env cfg must define `record_camera_eye` and `record_camera_target` as
+    3-tuples in env-local coords (relative to `scene.env_origins[env_idx]`).
+    Every task owns its camera framing — no articulation-tracking heuristic.
 
     If `env_idx` is None, picks the env whose origin is nearest to (0, 0, 0) —
     important when `num_envs` is large: the default GridCloner centers the grid
@@ -74,21 +78,15 @@ def attach_record_camera(
     camera = Camera(cfg=camera_cfg)
     env.sim.reset()
 
-    target = _primary_root_pos(env, env_idx)
-    eye = target + torch.tensor(eye_offset, device=env.device)
+    env_origin = env.scene.env_origins[env_idx]
+    eye_local = torch.tensor(env.cfg.record_camera_eye, device=env.device)
+    target_local = torch.tensor(env.cfg.record_camera_target, device=env.device)
+    eye = env_origin + eye_local
+    target = env_origin + target_local
     camera.set_world_poses_from_view(eye.unsqueeze(0), target.unsqueeze(0))
 
     env._video_camera = camera
     return camera
-
-
-def _primary_root_pos(env, env_idx: int) -> torch.Tensor:
-    """Return the world-space root position of the first articulation in env."""
-    articulations = getattr(env.scene, "articulations", {})
-    if not articulations:
-        return env.scene.env_origins[env_idx]
-    first = next(iter(articulations.values()))
-    return first.data.root_pos_w[env_idx]
 
 
 class WandbVideoObserver(AlgoObserver):

@@ -62,9 +62,8 @@ def main() -> None:
     env = env_cls(cfg=env_cfg)
 
     # --- Camera sensor ---
-    # Spawn with a placeholder pose; re-aim at the cart with set_world_poses_from_view
-    # after the env's initial sim.reset. The cartpole rail is along +Y, so we view
-    # from -X (perpendicular to rail) to see the cart slide + pole swing.
+    # Spawn with a placeholder pose; re-aim using env_cfg.record_camera_{eye,target}
+    # after the env's initial sim.reset.
     camera_cfg = CameraCfg(
         prim_path="/World/RecordCamera",
         update_period=0,
@@ -86,11 +85,10 @@ def main() -> None:
     camera = Camera(cfg=camera_cfg)
     env.sim.reset()
 
-    cart_pos = env.scene.articulations["cartpole"].data.root_pos_w[my_args.env_idx]
-    # Look at the cart from along -X (perpendicular to the Y-axis rail), slightly up.
+    # Aim the camera using the env cfg's recording pose (env-local frame).
     env_origin = env.scene.env_origins[my_args.env_idx]
-    eye = cart_pos + torch.tensor([-3.0, 0.0, 0.5], device=env.device)
-    target = cart_pos.clone()
+    eye = env_origin + torch.tensor(env_cfg.record_camera_eye, device=env.device)
+    target = env_origin + torch.tensor(env_cfg.record_camera_target, device=env.device)
     camera.set_world_poses_from_view(eye.unsqueeze(0), target.unsqueeze(0))
 
     # Step the sim once to flush the pose change through PhysX/Hydra so
@@ -98,8 +96,9 @@ def main() -> None:
     env.sim.step()
     camera.update(0.0)
 
-    print(f"[diag] cart root_pos_w = {cart_pos.cpu().tolist()}")
+    print(f"[diag] env_origin = {env_origin.cpu().tolist()}")
     print(f"[diag] camera eye desired = {eye.cpu().tolist()}")
+    print(f"[diag] camera target = {target.cpu().tolist()}")
     print(f"[diag] camera pos_w actual = {camera.data.pos_w[0].cpu().tolist()}")
     print(f"[diag] camera quat_w actual = {camera.data.quat_w_world[0].cpu().tolist()}")
 

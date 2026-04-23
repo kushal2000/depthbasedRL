@@ -62,6 +62,13 @@ class CartpoleEnvCfg(DirectRLEnvCfg):
     rew_scale_cart_vel = -0.01
     rew_scale_pole_vel = -0.005
 
+    # Recording camera pose, expressed in the chosen env's local frame
+    # (added to scene.env_origins[env_idx] at capture time). Cart rides a rail
+    # at z=2.0 in env-local coords, so the default camera sits 3m back along -X,
+    # 0.5m above the cart, and looks at the cart itself.
+    record_camera_eye: tuple[float, float, float] = (-3.0, 0.0, 2.5)
+    record_camera_target: tuple[float, float, float] = (0.0, 0.0, 2.0)
+
 
 class CartpoleEnv(DirectRLEnv):
     cfg: CartpoleEnvCfg

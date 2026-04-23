@@ -24,6 +24,11 @@ rew_scale_pole_pos: -1.0
 rew_scale_cart_vel: -0.01
 rew_scale_pole_vel: -0.005
 
+# Recording camera pose in env-local frame (added to env_origins[env_idx]
+# at capture time). Cart rail is at z=2.0; default: look from -X, 0.5m up.
+record_camera_eye: [-3.0, 0.0, 2.5]
+record_camera_target: [0.0, 0.0, 2.0]
+
 # Nested: SimulationCfg
 sim:
   dt: 0.00833333333           # 1/120
