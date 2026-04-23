@@ -10,6 +10,7 @@ import torch
 
 from isaacgymenvs.utils.observation_action_utils_sharpa import (
     _compute_keypoint_positions,
+    compute_joint_pos_targets,
     matrix_to_quaternion_xyzw_scipy,
     OBJECT_KEYPOINT_OFFSETS_np,
     PALM_OFFSET_np,
@@ -34,6 +35,7 @@ from isaacsim_conversion.isaacsim_env import (
     PHYSICS_SUBSTEPS,
     _log,
 )
+from isaacsim_conversion.image_robustness import ImageRobustnessCfg, VisualDRCfg
 from isaacsim_conversion.task_utils import CameraPose, TaskSpec, xyzw_to_wxyz
 from isaacsim_conversion.task_utils import CameraIntrinsics
 
@@ -110,6 +112,7 @@ class IsaacSimDistillEnv:
         enable_camera: bool = True,
         camera_backend: str = "tiled",
         ground_plane_size: float = 500.0,
+        enable_scene_query_support: bool = False,
         depth_preprocess_mode: str = "clip_divide",
         depth_min_m: float = 0.0,
         depth_max_m: float = 5.0,
@@ -128,6 +131,11 @@ class IsaacSimDistillEnv:
         object_scale_noise_multiplier_range: tuple[float, float] = (1.0, 1.0),
         default_asset_friction: float = DEFAULT_ASSET_FRICTION,
         fingertip_friction: float = FINGERTIP_FRICTION,
+        start_arm_higher: bool = False,
+        hand_moving_average: float = 0.1,
+        arm_moving_average: float = 0.1,
+        dof_speed_scale: float = 1.5,
+        image_robustness: ImageRobustnessCfg | None = None,
     ):
         self.task_spec = task_spec
         self.camera_modality = camera_modality
@@ -144,6 +152,7 @@ class IsaacSimDistillEnv:
         self.enable_camera = enable_camera
         self.camera_backend = camera_backend
         self.ground_plane_size = float(ground_plane_size)
+        self.enable_scene_query_support = bool(enable_scene_query_support)
         if self.camera_backend not in {"tiled", "standard"}:
             raise ValueError(f"Unsupported camera_backend={self.camera_backend!r}")
         if self.ground_plane_size <= 0:
@@ -169,6 +178,12 @@ class IsaacSimDistillEnv:
         )
         self.default_asset_friction = float(default_asset_friction)
         self.fingertip_friction = float(fingertip_friction)
+        self.start_arm_higher = bool(start_arm_higher)
+        self.hand_moving_average = float(hand_moving_average)
+        self.arm_moving_average = float(arm_moving_average)
+        self.dof_speed_scale = float(dof_speed_scale)
+        self.image_robustness = image_robustness or ImageRobustnessCfg()
+        self.visual_dr_cfg: VisualDRCfg = self.image_robustness.visual_dr
         if self.depth_preprocess_mode not in {"clip_divide", "window_normalize", "metric"}:
             raise ValueError(f"Unsupported depth_preprocess_mode={self.depth_preprocess_mode!r}")
         if self.depth_max_m <= self.depth_min_m:
@@ -204,6 +219,8 @@ class IsaacSimDistillEnv:
         self.object_scale_noise_multiplier = np.ones((self.num_envs, 3), dtype=np.float32)
         self.camera_world_pos = np.zeros((self.num_envs, 3), dtype=np.float32)
         self.camera_world_quat_wxyz = np.zeros((self.num_envs, 4), dtype=np.float32)
+        self.camera_pos_jitter = np.zeros((self.num_envs, 3), dtype=np.float32)
+        self.camera_rot_jitter_deg = np.zeros((self.num_envs, 3), dtype=np.float32)
         self.permutation: np.ndarray | None = None
         self.inverse_permutation: np.ndarray | None = None
         self.permutation_torch: torch.Tensor | None = None
@@ -218,6 +235,16 @@ class IsaacSimDistillEnv:
         self._object_state_queue_needs_reset = np.ones(self.num_envs, dtype=bool)
 
         self._setup_scene()
+
+    def _sample_visual_randomization(self, env_ids_np: np.ndarray):
+        if not self.visual_dr_cfg.enabled:
+            self.camera_pos_jitter[env_ids_np] = 0.0
+            self.camera_rot_jitter_deg[env_ids_np] = 0.0
+            return
+        pos_range = np.asarray(self.visual_dr_cfg.camera_pos_jitter_m, dtype=np.float32)
+        rot_range = np.asarray(self.visual_dr_cfg.camera_rot_jitter_deg, dtype=np.float32)
+        self.camera_pos_jitter[env_ids_np] = np.random.uniform(-pos_range, pos_range, size=(len(env_ids_np), 3)).astype(np.float32)
+        self.camera_rot_jitter_deg[env_ids_np] = np.random.uniform(-rot_range, rot_range, size=(len(env_ids_np), 3)).astype(np.float32)
 
     def _init_teacher_obs_queues(self):
         self.obs_queue = torch.zeros(
@@ -261,47 +288,20 @@ class IsaacSimDistillEnv:
         return getattr(self.camera_pose, "mount", "world")
 
     def _data_types_for_modality(self, modality: str) -> list[str]:
+        need_depth_for_rgb_aug = (
+            self.image_robustness.enabled
+            and self.image_robustness.rgb_aug.enabled
+            and self.image_robustness.rgb_aug.background_prob > 0.0
+        )
         if modality == "depth":
             return ["distance_to_image_plane"]
         if modality == "rgb":
-            return ["rgb"]
+            return ["rgb", "distance_to_image_plane"] if need_depth_for_rgb_aug else ["rgb"]
         if modality == "rgbd":
             return ["rgb", "distance_to_image_plane"]
         raise ValueError(f"Unsupported student camera modality: {modality}")
 
-    def _convert_robot_urdf(self, sim_utils, UrdfConverterCfg, UrdfConverter, urdf_path: str) -> str:
-        cfg = UrdfConverterCfg(
-            asset_path=urdf_path,
-            usd_dir="/tmp/isaaclab_usd_cache_distill/robot",
-            force_usd_conversion=True,
-            make_instanceable=False,
-            fix_base=True,
-            merge_fixed_joints=True,
-            self_collision=False,
-            joint_drive=UrdfConverterCfg.JointDriveCfg(
-                drive_type="force",
-                target_type="position",
-                gains=UrdfConverterCfg.JointDriveCfg.PDGainsCfg(
-                    stiffness=JOINT_STIFFNESSES_COMPENSATED,
-                    damping=JOINT_DAMPINGS_COMPENSATED,
-                ),
-            ),
-        )
-        return UrdfConverter(cfg).usd_path
-
-    def _convert_static_urdf(self, UrdfConverterCfg, UrdfConverter, urdf_path: str, usd_dir: str, fix_base: bool) -> str:
-        cfg = UrdfConverterCfg(
-            asset_path=urdf_path,
-            usd_dir=usd_dir,
-            force_usd_conversion=True,
-            make_instanceable=False,
-            fix_base=fix_base,
-            merge_fixed_joints=True,
-            joint_drive=None,
-        )
-        return UrdfConverter(cfg).usd_path
-
-    def _make_scene_cfg(self, sim_utils, robot_usd: str, table_usd: str, object_usd: str):
+    def _make_scene_cfg(self, sim_utils):
         from isaaclab.actuators import ImplicitActuatorCfg
         from isaaclab.assets import AssetBaseCfg, ArticulationCfg, RigidObjectCfg
         from isaaclab.scene import InteractiveSceneCfg
@@ -309,6 +309,11 @@ class IsaacSimDistillEnv:
 
         robot_joint_vel = {name: 0.0 for name in JOINT_NAMES_ISAACGYM}
         default_joint_pos = dict(DEFAULT_JOINT_POS)
+        if self.start_arm_higher:
+            # Match Isaac Gym eval mode (simtoolreal/env.py START_HIGHER path):
+            # raise the arm slightly before rollout to improve the grasp approach.
+            default_joint_pos["iiwa14_joint_2"] -= float(np.deg2rad(10.0))
+            default_joint_pos["iiwa14_joint_4"] += float(np.deg2rad(10.0))
         if self.enable_camera:
             from isaaclab.sensors import CameraCfg, TiledCameraCfg
 
@@ -329,8 +334,22 @@ class IsaacSimDistillEnv:
             class DistillSceneCfg(InteractiveSceneCfg):
                 robot = ArticulationCfg(
                     prim_path="{ENV_REGEX_NS}/Robot",
-                    spawn=sim_utils.UsdFileCfg(
-                        usd_path=robot_usd,
+                    spawn=sim_utils.UrdfFileCfg(
+                        asset_path=self.task_spec.robot_urdf,
+                        usd_dir="/tmp/isaaclab_usd_cache_distill/robot",
+                        force_usd_conversion=True,
+                        make_instanceable=False,
+                        fix_base=True,
+                        merge_fixed_joints=True,
+                        self_collision=False,
+                        joint_drive=sim_utils.UrdfConverterCfg.JointDriveCfg(
+                            drive_type="force",
+                            target_type="position",
+                            gains=sim_utils.UrdfConverterCfg.JointDriveCfg.PDGainsCfg(
+                                stiffness=JOINT_STIFFNESSES_COMPENSATED,
+                                damping=JOINT_DAMPINGS_COMPENSATED,
+                            ),
+                        ),
                         rigid_props=sim_utils.RigidBodyPropertiesCfg(
                             disable_gravity=True,
                             max_depenetration_velocity=1000.0,
@@ -366,8 +385,22 @@ class IsaacSimDistillEnv:
 
                 table = AssetBaseCfg(
                     prim_path="{ENV_REGEX_NS}/Table",
-                    spawn=sim_utils.UsdFileCfg(
-                        usd_path=table_usd,
+                    spawn=sim_utils.UrdfFileCfg(
+                        asset_path=self.task_spec.table_urdf,
+                        usd_dir="/tmp/isaaclab_usd_cache_distill/table",
+                        force_usd_conversion=True,
+                        make_instanceable=False,
+                        fix_base=True,
+                        merge_fixed_joints=True,
+                        joint_drive=None,
+                        rigid_props=sim_utils.RigidBodyPropertiesCfg(
+                            disable_gravity=True,
+                            linear_damping=0.0,
+                            angular_damping=0.0,
+                            max_depenetration_velocity=1000.0,
+                            solver_position_iteration_count=8,
+                            solver_velocity_iteration_count=0,
+                        ),
                         collision_props=sim_utils.CollisionPropertiesCfg(
                             contact_offset=0.002,
                             rest_offset=0.0,
@@ -378,8 +411,22 @@ class IsaacSimDistillEnv:
 
                 object = RigidObjectCfg(
                     prim_path="{ENV_REGEX_NS}/Object",
-                    spawn=sim_utils.UsdFileCfg(
-                        usd_path=object_usd,
+                    spawn=sim_utils.UrdfFileCfg(
+                        asset_path=self.task_spec.object_urdf,
+                        usd_dir="/tmp/isaaclab_usd_cache_distill/object",
+                        force_usd_conversion=True,
+                        make_instanceable=False,
+                        fix_base=False,
+                        merge_fixed_joints=True,
+                        joint_drive=None,
+                        rigid_props=sim_utils.RigidBodyPropertiesCfg(
+                            disable_gravity=False,
+                            linear_damping=0.01,
+                            angular_damping=0.01,
+                            max_depenetration_velocity=1000.0,
+                            solver_position_iteration_count=8,
+                            solver_velocity_iteration_count=0,
+                        ),
                         collision_props=sim_utils.CollisionPropertiesCfg(
                             contact_offset=0.002,
                             rest_offset=0.0,
@@ -421,8 +468,22 @@ class IsaacSimDistillEnv:
             class DistillSceneCfg(InteractiveSceneCfg):
                 robot = ArticulationCfg(
                     prim_path="{ENV_REGEX_NS}/Robot",
-                    spawn=sim_utils.UsdFileCfg(
-                        usd_path=robot_usd,
+                    spawn=sim_utils.UrdfFileCfg(
+                        asset_path=self.task_spec.robot_urdf,
+                        usd_dir="/tmp/isaaclab_usd_cache_distill/robot",
+                        force_usd_conversion=True,
+                        make_instanceable=False,
+                        fix_base=True,
+                        merge_fixed_joints=True,
+                        self_collision=False,
+                        joint_drive=sim_utils.UrdfConverterCfg.JointDriveCfg(
+                            drive_type="force",
+                            target_type="position",
+                            gains=sim_utils.UrdfConverterCfg.JointDriveCfg.PDGainsCfg(
+                                stiffness=JOINT_STIFFNESSES_COMPENSATED,
+                                damping=JOINT_DAMPINGS_COMPENSATED,
+                            ),
+                        ),
                         rigid_props=sim_utils.RigidBodyPropertiesCfg(
                             disable_gravity=True,
                             max_depenetration_velocity=1000.0,
@@ -458,8 +519,22 @@ class IsaacSimDistillEnv:
 
                 table = AssetBaseCfg(
                     prim_path="{ENV_REGEX_NS}/Table",
-                    spawn=sim_utils.UsdFileCfg(
-                        usd_path=table_usd,
+                    spawn=sim_utils.UrdfFileCfg(
+                        asset_path=self.task_spec.table_urdf,
+                        usd_dir="/tmp/isaaclab_usd_cache_distill/table",
+                        force_usd_conversion=True,
+                        make_instanceable=False,
+                        fix_base=True,
+                        merge_fixed_joints=True,
+                        joint_drive=None,
+                        rigid_props=sim_utils.RigidBodyPropertiesCfg(
+                            disable_gravity=True,
+                            linear_damping=0.0,
+                            angular_damping=0.0,
+                            max_depenetration_velocity=1000.0,
+                            solver_position_iteration_count=8,
+                            solver_velocity_iteration_count=0,
+                        ),
                         collision_props=sim_utils.CollisionPropertiesCfg(
                             contact_offset=0.002,
                             rest_offset=0.0,
@@ -470,8 +545,22 @@ class IsaacSimDistillEnv:
 
                 object = RigidObjectCfg(
                     prim_path="{ENV_REGEX_NS}/Object",
-                    spawn=sim_utils.UsdFileCfg(
-                        usd_path=object_usd,
+                    spawn=sim_utils.UrdfFileCfg(
+                        asset_path=self.task_spec.object_urdf,
+                        usd_dir="/tmp/isaaclab_usd_cache_distill/object",
+                        force_usd_conversion=True,
+                        make_instanceable=False,
+                        fix_base=False,
+                        merge_fixed_joints=True,
+                        joint_drive=None,
+                        rigid_props=sim_utils.RigidBodyPropertiesCfg(
+                            disable_gravity=False,
+                            linear_damping=0.01,
+                            angular_damping=0.01,
+                            max_depenetration_velocity=1000.0,
+                            solver_position_iteration_count=8,
+                            solver_velocity_iteration_count=0,
+                        ),
                         collision_props=sim_utils.CollisionPropertiesCfg(
                             contact_offset=0.002,
                             rest_offset=0.0,
@@ -490,7 +579,6 @@ class IsaacSimDistillEnv:
         import isaaclab.sim as sim_utils
         from isaaclab.scene import InteractiveScene
         from isaaclab.sim import PhysxCfg, SimulationCfg, SimulationContext
-        from isaaclab.sim.converters import UrdfConverter, UrdfConverterCfg
 
         # IsaacLab's default ground plane is 100m x 100m. With many envs at
         # env_spacing=4.0, far envs can render off-plane as a white background,
@@ -501,6 +589,7 @@ class IsaacSimDistillEnv:
             dt=PHYSICS_DT,
             render_interval=PHYSICS_SUBSTEPS,
             gravity=(0.0, 0.0, -9.81),
+            enable_scene_query_support=self.enable_scene_query_support,
             physics_material=sim_utils.RigidBodyMaterialCfg(
                 static_friction=DEFAULT_ASSET_FRICTION,
                 dynamic_friction=DEFAULT_ASSET_FRICTION,
@@ -516,24 +605,22 @@ class IsaacSimDistillEnv:
         self.sim = SimulationContext(sim_cfg)
         _log(
             "SimulationContext created "
-            f"(control_dt={CONTROL_DT:.6f}, physics_dt={PHYSICS_DT:.6f}, substeps={PHYSICS_SUBSTEPS})"
+            f"(control_dt={CONTROL_DT:.6f}, physics_dt={PHYSICS_DT:.6f}, substeps={PHYSICS_SUBSTEPS}, "
+            f"enable_scene_query_support={self.enable_scene_query_support})"
         )
 
-        robot_usd = self._convert_robot_urdf(sim_utils, UrdfConverterCfg, UrdfConverter, self.task_spec.robot_urdf)
-        table_usd = self._convert_static_urdf(
-            UrdfConverterCfg, UrdfConverter, self.task_spec.table_urdf, "/tmp/isaaclab_usd_cache_distill/table", True
-        )
-        object_usd = self._convert_static_urdf(
-            UrdfConverterCfg, UrdfConverter, self.task_spec.object_urdf, "/tmp/isaaclab_usd_cache_distill/object", False
-        )
-
-        scene_cfg_type = self._make_scene_cfg(sim_utils, robot_usd, table_usd, object_usd)
+        scene_cfg_type = self._make_scene_cfg(sim_utils)
         self.scene = InteractiveScene(
             scene_cfg_type(
                 num_envs=self.num_envs,
                 env_spacing=self.env_spacing,
                 lazy_sensor_update=False,
-                replicate_physics=True,
+                # Single-env debugging is easier and more faithful when we do
+                # not replicate physics as instanced prims: it avoids a class
+                # of "cannot modify collision properties on instanced prims"
+                # issues during peg contact debugging. Multi-env runs still use
+                # replication for performance.
+                replicate_physics=self.num_envs > 1,
             )
         )
         self.robot = self.scene.articulations["robot"]
@@ -552,6 +639,7 @@ class IsaacSimDistillEnv:
         self._apply_physics_material_overrides(sim_utils)
         self.sim.reset()
         self.scene.reset()
+        self._log_object_asset_diagnostics()
         self._validate_joint_ordering()
         if self.camera is not None:
             _log(
@@ -613,47 +701,38 @@ class IsaacSimDistillEnv:
             prim = prims_to_visit.pop()
             if prim.GetName() == "collisions":
                 collision_paths.append(str(prim.GetPath()))
+                descendant_stack = list(prim.GetChildren())
+                while descendant_stack:
+                    child = descendant_stack.pop()
+                    collision_paths.append(str(child.GetPath()))
+                    descendant_stack.extend(list(child.GetChildren()))
             prims_to_visit.extend(list(prim.GetChildren()))
-        return collision_paths
+        return list(dict.fromkeys(collision_paths))
 
-    def _set_collision_offsets(self, collision_prim_paths: list[str], contact_offset: float, rest_offset: float):
-        from isaaclab.sim.utils import get_current_stage
-        from pxr import PhysxSchema
-
-        stage = get_current_stage()
-        for prim_path in collision_prim_paths:
-            prim = stage.GetPrimAtPath(prim_path)
-            if not prim.IsValid():
-                continue
-            physx_collision_api = PhysxSchema.PhysxCollisionAPI(prim)
-            if not physx_collision_api:
-                physx_collision_api = PhysxSchema.PhysxCollisionAPI.Apply(prim)
-            physx_collision_api.CreateContactOffsetAttr().Set(contact_offset)
-            physx_collision_api.CreateRestOffsetAttr().Set(rest_offset)
-
-    def _apply_material_to_collision_prims(self, material_path: str, collision_prim_paths: list[str]):
+    def _apply_material_to_rigid_prims(self, material_path: str, prim_paths: list[str]):
         from isaaclab.sim.utils import bind_physics_material
 
         raw_bind_physics_material = getattr(bind_physics_material, "__wrapped__", bind_physics_material)
-        for prim_path in collision_prim_paths:
+        for prim_path in prim_paths:
             raw_bind_physics_material(prim_path, material_path)
 
     def _apply_physics_material_overrides(self, sim_utils):
-        all_collision_paths: list[str] = []
-        fingertip_collision_paths: list[str] = []
+        all_rigid_prim_paths: list[str] = []
+        fingertip_rigid_prim_paths: list[str] = []
         for env_id in range(self.num_envs):
             env_ns = f"/World/envs/env_{env_id}"
             robot_root = f"{env_ns}/Robot"
             table_root = f"{env_ns}/Table"
             object_root = f"{env_ns}/Object"
-            all_collision_paths.extend(self._iter_collision_prim_paths(robot_root))
-            all_collision_paths.extend(self._iter_collision_prim_paths(table_root))
-            all_collision_paths.extend(self._iter_collision_prim_paths(object_root))
-            fingertip_collision_paths.extend(
-                f"{robot_root}/{link_name}/collisions" for link_name in FINGERTIP_LINK_NAMES
-            )
+            for root in (robot_root, table_root, object_root):
+                for collision_path in self._iter_collision_prim_paths(root):
+                    if "/collisions" in collision_path:
+                        all_rigid_prim_paths.append(collision_path.split("/collisions", 1)[0])
+            for link_name in FINGERTIP_LINK_NAMES:
+                fingertip_rigid_prim_paths.append(f"{robot_root}/{link_name}")
 
-        self._set_collision_offsets(all_collision_paths, contact_offset=0.002, rest_offset=0.0)
+        all_rigid_prim_paths = list(dict.fromkeys(all_rigid_prim_paths))
+        fingertip_rigid_prim_paths = list(dict.fromkeys(fingertip_rigid_prim_paths))
 
         default_material_cfg = sim_utils.RigidBodyMaterialCfg(
             static_friction=self.default_asset_friction,
@@ -662,7 +741,7 @@ class IsaacSimDistillEnv:
         )
         default_material_path = "/World/PhysicsMaterials/distill_default_asset_material"
         default_material_cfg.func(default_material_path, default_material_cfg)
-        self._apply_material_to_collision_prims(default_material_path, all_collision_paths)
+        self._apply_material_to_rigid_prims(default_material_path, all_rigid_prim_paths)
 
         fingertip_material_cfg = sim_utils.RigidBodyMaterialCfg(
             static_friction=self.fingertip_friction,
@@ -671,12 +750,105 @@ class IsaacSimDistillEnv:
         )
         fingertip_material_path = "/World/PhysicsMaterials/distill_fingertip_material"
         fingertip_material_cfg.func(fingertip_material_path, fingertip_material_cfg)
-        self._apply_material_to_collision_prims(fingertip_material_path, fingertip_collision_paths)
+        self._apply_material_to_rigid_prims(fingertip_material_path, fingertip_rigid_prim_paths)
         _log(
             "Distill physics materials applied "
             f"(default_friction={self.default_asset_friction}, fingertip_friction={self.fingertip_friction}, "
-            f"colliders={len(all_collision_paths)})"
+            f"rigid_prims={len(all_rigid_prim_paths)}, offsets_via_spawn_cfg=True)"
         )
+
+    def _log_object_asset_diagnostics(self):
+        from isaaclab.sim.utils import get_current_stage
+        from pxr import Usd, UsdPhysics
+
+        stage = get_current_stage()
+        object_root = stage.GetPrimAtPath("/World/envs/env_0/Object")
+        if not object_root.IsValid():
+            _log("Object diagnostics skipped: /World/envs/env_0/Object not found")
+            return
+
+        collision_paths = self._iter_collision_prim_paths("/World/envs/env_0/Object")
+        _log(f"Object diagnostics: collision_prim_count={len(collision_paths)}")
+
+        for prim in Usd.PrimRange(object_root):
+            prim_path = str(prim.GetPath())
+            mass_api = UsdPhysics.MassAPI(prim)
+            rigid_api = UsdPhysics.RigidBodyAPI(prim)
+            if not mass_api and not rigid_api:
+                continue
+            mass_attr = mass_api.GetMassAttr() if mass_api else None
+            com_attr = mass_api.GetCenterOfMassAttr() if mass_api else None
+            inertia_attr = mass_api.GetDiagonalInertiaAttr() if mass_api else None
+            principal_axes_attr = mass_api.GetPrincipalAxesAttr() if mass_api else None
+            mass_val = mass_attr.Get() if mass_attr and mass_attr.HasAuthoredValueOpinion() else None
+            com_val = com_attr.Get() if com_attr and com_attr.HasAuthoredValueOpinion() else None
+            inertia_val = (
+                inertia_attr.Get() if inertia_attr and inertia_attr.HasAuthoredValueOpinion() else None
+            )
+            axes_val = (
+                principal_axes_attr.Get()
+                if principal_axes_attr and principal_axes_attr.HasAuthoredValueOpinion()
+                else None
+            )
+            _log(
+                "Object mass diagnostics: "
+                f"prim={prim_path}, mass={mass_val}, com={com_val}, inertia={inertia_val}, principal_axes={axes_val}"
+            )
+
+    def _iter_gprims(self, root_prim_path: str):
+        from isaaclab.sim.utils import get_current_stage
+        from pxr import Usd, UsdGeom
+
+        stage = get_current_stage()
+        root_prim = stage.GetPrimAtPath(root_prim_path)
+        if not root_prim.IsValid():
+            return []
+        gprims = []
+        for prim in Usd.PrimRange(root_prim):
+            gprim = UsdGeom.Gprim(prim)
+            if gprim:
+                gprims.append(gprim)
+        return gprims
+
+    def _apply_display_color(self, root_prim_path: str, rgb: tuple[float, float, float]):
+        from pxr import Gf
+
+        for gprim in self._iter_gprims(root_prim_path):
+            try:
+                gprim.GetDisplayColorAttr().Set([Gf.Vec3f(*rgb)])
+            except Exception:
+                continue
+
+    def _apply_visual_randomization(self, env_ids_np: np.ndarray):
+        if not self.visual_dr_cfg.enabled:
+            return
+        from isaaclab.sim.utils import get_current_stage
+        from pxr import Gf
+
+        stage = get_current_stage()
+        if self.visual_dr_cfg.dome_light_randomization:
+            dome = stage.GetPrimAtPath("/World/DomeLight")
+            if dome.IsValid():
+                intensity = float(np.random.uniform(*self.visual_dr_cfg.dome_light_intensity_range))
+                dome.GetAttribute("inputs:intensity").Set(intensity)
+                base = np.array([0.9, 0.9, 0.9], dtype=np.float32)
+                jitter = np.random.uniform(
+                    -self.visual_dr_cfg.dome_light_color_jitter,
+                    self.visual_dr_cfg.dome_light_color_jitter,
+                    size=3,
+                ).astype(np.float32)
+                color = np.clip(base + jitter, 0.2, 1.0)
+                dome.GetAttribute("inputs:color").Set(Gf.Vec3f(*[float(x) for x in color]))
+        if not self.visual_dr_cfg.material_color_randomization:
+            return
+        for env_id in env_ids_np:
+            env_ns = f"/World/envs/env_{env_id}"
+            obj_val = tuple(float(x) for x in np.random.uniform(*self.visual_dr_cfg.object_color_range, size=3))
+            table_val = tuple(float(x) for x in np.random.uniform(*self.visual_dr_cfg.table_color_range, size=3))
+            robot_val = tuple(float(x) for x in np.random.uniform(*self.visual_dr_cfg.robot_color_range, size=3))
+            self._apply_display_color(f"{env_ns}/Object", obj_val)
+            self._apply_display_color(f"{env_ns}/Table", table_val)
+            self._apply_display_color(f"{env_ns}/Robot", robot_val)
 
     def _apply_camera_world_poses(self, env_ids: torch.Tensor | None = None):
         if self.camera is None:
@@ -688,8 +860,12 @@ class IsaacSimDistillEnv:
             positions, orientations = self._compute_wrist_camera_world_poses(env_ids_np)
         else:
             env_origins = self.env_origins[env_ids].detach().cpu().numpy()
-            positions = env_origins + np.asarray(self.camera_pose.pos, dtype=np.float32)[None, :]
-            orientations = np.repeat(np.asarray(self.camera_pose.quat_wxyz, dtype=np.float32)[None, :], len(env_ids_np), axis=0)
+            base_pos = np.asarray(self.camera_pose.pos, dtype=np.float32)[None, :]
+            positions = env_origins + base_pos + self.camera_pos_jitter[env_ids_np]
+            base_rot = R.from_quat(np.asarray(self.camera_pose.quat_wxyz, dtype=np.float32)[[1, 2, 3, 0]])
+            jitter = R.from_euler("xyz", self.camera_rot_jitter_deg[env_ids_np], degrees=True)
+            orientations_xyzw = (jitter * base_rot).as_quat().astype(np.float32)
+            orientations = orientations_xyzw[:, [3, 0, 1, 2]]
         if self.camera_backend == "tiled":
             self.camera_world_pos[env_ids_np] = positions
             self.camera_world_quat_wxyz[env_ids_np] = orientations
@@ -711,12 +887,13 @@ class IsaacSimDistillEnv:
         link_quat_wxyz = body_state[:, 3:7].detach().cpu().numpy()
         link_rot = R.from_quat(link_quat_wxyz[:, [1, 2, 3, 0]]).as_matrix()
 
-        cam_offset = np.asarray(self.camera_pose.pos, dtype=np.float32)[None, :]
+        cam_offset = np.asarray(self.camera_pose.pos, dtype=np.float32)[None, :] + self.camera_pos_jitter[env_ids_np]
         cam_pos = link_pos + np.einsum("nij,nj->ni", link_rot, cam_offset)
 
         rel_quat_wxyz = np.asarray(self.camera_pose.quat_wxyz, dtype=np.float32)
         rel_rot = R.from_quat(rel_quat_wxyz[[1, 2, 3, 0]]).as_matrix()
-        cam_rot = link_rot @ rel_rot[None, :, :]
+        jitter_rot = R.from_euler("xyz", self.camera_rot_jitter_deg[env_ids_np], degrees=True).as_matrix()
+        cam_rot = link_rot @ rel_rot[None, :, :] @ jitter_rot
         cam_quat_xyzw = matrix_to_quaternion_xyzw_scipy(cam_rot)
         cam_quat_wxyz = cam_quat_xyzw[:, [3, 0, 1, 2]].astype(np.float32)
         return cam_pos.astype(np.float32), cam_quat_wxyz
@@ -773,11 +950,13 @@ class IsaacSimDistillEnv:
 
         start_poses = self._sample_start_poses()[env_ids_np]
         self.current_start_pose[env_ids_np] = start_poses
+        self._sample_visual_randomization(env_ids_np)
         object_pose_w = self._local_pose_to_world_pose(self.current_start_pose)
         zeros_vel = torch.zeros((len(env_ids_np), 6), dtype=torch.float32, device=self.device)
         self.object_rigid.write_root_pose_to_sim(object_pose_w[env_ids], env_ids=env_ids)
         self.object_rigid.write_root_velocity_to_sim(zeros_vel, env_ids=env_ids)
         self._apply_camera_world_poses(env_ids)
+        self._apply_visual_randomization(env_ids_np)
 
         self.scene.write_data_to_sim()
         self.sim.step(render=not self.headless)
@@ -816,6 +995,23 @@ class IsaacSimDistillEnv:
         self._obs_queue_needs_reset[env_ids_np] = True
         self._action_queue_needs_reset[env_ids_np] = True
         self._object_state_queue_needs_reset[env_ids_np] = True
+        self._post_reset_zero_action_step(env_ids_np)
+
+    def _post_reset_zero_action_step(self, env_ids_np: np.ndarray):
+        zero_actions = np.zeros((len(env_ids_np), self.action_dim), dtype=np.float32)
+        prev_targets_subset = self.prev_targets[env_ids_np].astype(np.float32)
+        zero_targets = compute_joint_pos_targets(
+            actions=zero_actions,
+            prev_targets=prev_targets_subset,
+            hand_moving_average=self.hand_moving_average,
+            arm_moving_average=self.arm_moving_average,
+            hand_dof_speed_scale=self.dof_speed_scale,
+            dt=CONTROL_DT,
+        )
+        full_targets = self.prev_targets.copy()
+        full_targets[env_ids_np] = zero_targets
+        self.apply_action(full_targets)
+        self.step(render=not self.headless)
 
     def apply_action(self, targets: np.ndarray):
         self.prev_targets = targets.copy()
@@ -1139,15 +1335,16 @@ class IsaacSimDistillEnv:
         modality = camera_modality or self.camera_modality
         outputs = self._read_camera_outputs()
         image_dict: dict[str, torch.Tensor] = {}
-        if modality in ("depth", "rgbd"):
-            depth = outputs.get("distance_to_image_plane")
-            if depth is None:
-                raise RuntimeError(f"Depth output missing. Available camera outputs: {list(outputs.keys())}")
+        depth = outputs.get("distance_to_image_plane")
+        if depth is not None:
             if depth.dim() == 4 and depth.shape[-1] == 1:
                 depth = depth.permute(0, 3, 1, 2)
             elif depth.dim() == 3:
                 depth = depth.unsqueeze(1)
             image_dict["depth"] = self._preprocess_depth(depth)
+        if modality in ("depth", "rgbd"):
+            if "depth" not in image_dict:
+                raise RuntimeError(f"Depth output missing. Available camera outputs: {list(outputs.keys())}")
         if modality in ("rgb", "rgbd"):
             rgb = outputs.get("rgb")
             if rgb is None:

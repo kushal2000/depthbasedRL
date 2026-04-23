@@ -16,6 +16,12 @@ import yaml
 from deployment.rl_player import RlPlayer
 from isaacgymenvs.utils.observation_action_utils_sharpa import compute_joint_pos_targets
 from isaacsim_conversion.distill_env import IsaacSimDistillEnv
+from isaacsim_conversion.image_robustness import (
+    ImageRobustnessCfg,
+    TrainImageRobustifier,
+    image_robustness_cfg_from_dict,
+    preprocess_policy_images,
+)
 from isaacsim_conversion.isaacsim_env import CONTROL_DT, _log
 from isaacsim_conversion.interactive_viewer import write_pose_viewer_html
 from isaacsim_conversion.student_policy import (
@@ -23,7 +29,6 @@ from isaacsim_conversion.student_policy import (
     MLPRecurrentPolicy,
     MonoTransformerRecurrentPolicy,
     preprocess_image,
-    resize_image,
 )
 from isaacsim_conversion.task_utils import (
     CameraIntrinsics,
@@ -33,6 +38,18 @@ from isaacsim_conversion.task_utils import (
     load_task_spec,
     load_yaml,
 )
+
+PEG_ISAACGYM_EVAL_OVERRIDES = {
+    "useActionDelay": False,
+    "useObsDelay": False,
+    "useObjectStateDelayNoise": False,
+    "objectScaleNoiseMultiplierRange": [1.0, 1.0],
+    "goalXyObsNoise": 0.0,
+    "startArmHigher": True,
+    "evalSuccessTolerance": 0.01,
+    "fixedSizeKeypointReward": True,
+    "useFixedInitObjectPose": True,
+}
 
 
 def launch_app():
@@ -60,6 +77,8 @@ def launch_app():
         default="preInsertAndFinal",
     )
     parser.add_argument("--peg_force_identity_start_quat", action="store_true")
+    parser.add_argument("--peg_start_quat_mode", choices=["identity", "x_up"], default=None)
+    parser.add_argument("--peg_match_isaacgym_eval", action="store_true")
     parser.add_argument("--teacher_checkpoint", default="pretrained_policy/model.pth")
     parser.add_argument("--teacher_config", default="pretrained_policy/config.yaml")
     parser.add_argument("--student_checkpoint", default=None)
@@ -78,6 +97,7 @@ def launch_app():
     parser.add_argument("--fingertip_friction_override", type=float, default=None)
     parser.add_argument("--env_spacing", type=float, default=None)
     parser.add_argument("--ground_plane_size", type=float, default=None)
+    parser.add_argument("--enable_scene_query_support", action="store_true")
     parser.add_argument("--object_start_mode", choices=["fixed", "randomized"], default=None)
     parser.add_argument(
         "--beta_mode",
@@ -162,6 +182,7 @@ class DistillSettings:
     online_num_iters: int = 10000
     online_log_interval: int = 500
     online_update_interval: int = 1
+    image_robustness: dict = None
 
 
 class BetaScheduler:
@@ -236,6 +257,8 @@ def load_distill_settings(path: Path, args) -> DistillSettings:
 
 
 def validate_distill_settings(settings: DistillSettings):
+    if settings.image_robustness is None:
+        settings.image_robustness = {}
     if settings.monitor_num_envs < 0:
         raise ValueError("monitor_num_envs must be >= 0")
     if settings.monitor_num_envs >= settings.num_envs:
@@ -337,17 +360,35 @@ def compute_subset_progress_metrics(env: IsaacSimDistillEnv, sim_state, mask: np
     }
 
 
-def stack_student_image(student_obs: dict[str, torch.Tensor], modality: str, settings: DistillSettings) -> torch.Tensor:
-    images = student_obs["images"]
+def get_image_robustness_cfg(settings: DistillSettings) -> ImageRobustnessCfg:
+    return image_robustness_cfg_from_dict(settings.image_robustness)
+
+
+def stack_student_image(
+    student_obs: dict[str, torch.Tensor],
+    modality: str,
+    settings: DistillSettings,
+    image_cfg: ImageRobustnessCfg,
+) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
+    processed_images = {}
+    raw_images = student_obs["images"]
     if modality == "depth":
-        image = preprocess_image(images["depth"], modality)
+        processed_images["depth"] = preprocess_image(raw_images["depth"], modality)
     elif modality == "rgb":
-        image = preprocess_image(images["rgb"], modality)
+        processed_images["rgb"] = preprocess_image(raw_images["rgb"], modality)
     elif modality == "rgbd":
-        image = torch.cat([images["rgb"], images["depth"]], dim=1)
+        processed_images["rgb"] = raw_images["rgb"]
+        processed_images["depth"] = raw_images["depth"]
     else:
         raise ValueError(f"Unsupported modality: {modality}")
-    return resize_image(image, settings.image_height, settings.image_width)
+    image, processed_images = preprocess_policy_images(
+        processed_images,
+        modality=modality,
+        out_height=settings.image_height,
+        out_width=settings.image_width,
+        preprocess_cfg=image_cfg.preprocess,
+    )
+    return image, processed_images
 
 
 def parse_env_id_list(value: str, num_envs: int) -> list[int]:
@@ -393,10 +434,15 @@ def append_debug_policy_image_stats(
         "env_ids": ",".join(str(env_id) for env_id in env_ids),
     }
     images = student_obs["images"]
+    processed_images = student_obs.get("processed_images", {})
     if "rgb" in images:
         row.update(tensor_image_stats(images["rgb"], env_ids, "raw_rgb"))
     if "depth" in images:
         row.update(tensor_image_stats(images["depth"], env_ids, "raw_depth"))
+    if "rgb" in processed_images:
+        row.update(tensor_image_stats(processed_images["rgb"], env_ids, "processed_rgb"))
+    if "depth" in processed_images:
+        row.update(tensor_image_stats(processed_images["depth"], env_ids, "processed_depth"))
     row.update(tensor_image_stats(student_image, env_ids, "policy_image"))
     path = run_dir / "policy_image_stats.csv"
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -652,17 +698,26 @@ def _extract_policy_debug_frames(
         return {}
     outputs: dict[str, list[np.ndarray]] = {"policy_input": []}
     images = student_obs["images"]
+    processed_images = student_obs.get("processed_images", {})
     num_envs = student_image.shape[0]
     if "rgb" in images:
         outputs["raw_rgb"] = []
     if "depth" in images:
         outputs["raw_depth"] = []
+    if "rgb" in processed_images:
+        outputs["processed_rgb"] = []
+    if "depth" in processed_images:
+        outputs["processed_depth"] = []
     for env_id in range(num_envs):
         outputs["policy_input"].append(_tensor_chw_to_hwc_u8(student_image[env_id]))
         if "rgb" in images:
             outputs["raw_rgb"].append(_tensor_chw_to_hwc_u8(images["rgb"][env_id]))
         if "depth" in images:
             outputs["raw_depth"].append(_tensor_chw_to_hwc_u8(images["depth"][env_id]))
+        if "rgb" in processed_images:
+            outputs["processed_rgb"].append(_tensor_chw_to_hwc_u8(processed_images["rgb"][env_id]))
+        if "depth" in processed_images:
+            outputs["processed_depth"].append(_tensor_chw_to_hwc_u8(processed_images["depth"][env_id]))
     return outputs
 
 
@@ -802,6 +857,8 @@ def run_episode(
     capture_viewer_wandb_key: str = "interactive_viewer",
     capture_viewer_video_wandb_key: str = "rollout_video",
     capture_viewer_video_fps: int = 60,
+    image_robustifier: TrainImageRobustifier | None = None,
+    image_cfg: ImageRobustnessCfg | None = None,
 ) -> tuple[dict[str, float], dict[str, float] | None]:
     episode_start_time = time.perf_counter()
     teacher.reset()
@@ -838,7 +895,16 @@ def run_episode(
             student_action = student_out.action
         else:
             student_obs = env.build_student_obs(sim_state, camera_modality=env.camera_modality)
-            student_image = stack_student_image(student_obs, env.camera_modality, settings)
+            student_image, processed_images = stack_student_image(
+                student_obs,
+                env.camera_modality,
+                settings,
+                image_cfg or ImageRobustnessCfg(),
+            )
+            student_obs["processed_images"] = processed_images
+            if mode == "train" and image_robustifier is not None:
+                processed_images, student_image = image_robustifier.apply_train_time(processed_images, student_image)
+                student_obs["processed_images"] = processed_images
             if mode == "train":
                 student_out, student_hidden = student(student_image, student_obs["proprio"], student_hidden)
             else:
@@ -891,6 +957,8 @@ def run_episode(
         reset_env_ids = env.reset_done_envs(next_sim_state)
         if reset_env_ids.size > 0:
             student_hidden = reset_hidden_state(student_hidden, reset_env_ids)
+            if image_robustifier is not None:
+                image_robustifier.reset(torch.as_tensor(reset_env_ids, device=env.device, dtype=torch.long))
             next_sim_state = env.compute_sim_state()
 
         if student_out is None:
@@ -1006,6 +1074,8 @@ def compute_distill_step(
     iter_idx: int | None = None,
     debug_policy_image_stats: bool = False,
     debug_policy_image_stats_env_ids: list[int] | None = None,
+    image_robustifier: TrainImageRobustifier | None = None,
+    image_cfg: ImageRobustnessCfg | None = None,
 ):
     sim_state = env.compute_sim_state()
     teacher_obs = env.build_teacher_obs(sim_state)
@@ -1023,7 +1093,16 @@ def compute_distill_step(
                 student_out, student_hidden = student(teacher_obs_tensor, student_hidden)
     else:
         student_obs = env.build_student_obs(sim_state, camera_modality=env.camera_modality)
-        student_image = stack_student_image(student_obs, env.camera_modality, settings)
+        student_image, processed_images = stack_student_image(
+            student_obs,
+            env.camera_modality,
+            settings,
+            image_cfg or ImageRobustnessCfg(),
+        )
+        student_obs["processed_images"] = processed_images
+        if train and image_robustifier is not None:
+            processed_images, student_image = image_robustifier.apply_train_time(processed_images, student_image)
+            student_obs["processed_images"] = processed_images
         if debug_policy_image_stats and run_dir is not None and iter_idx is not None:
             append_debug_policy_image_stats(
                 run_dir=run_dir,
@@ -1083,6 +1162,8 @@ def run_online_dagger(
     capture_viewer_wandb_key: str = "interactive_viewer",
     capture_viewer_video_wandb_key: str = "rollout_video",
     capture_viewer_video_fps: int = 60,
+    image_robustifier: TrainImageRobustifier | None = None,
+    image_cfg: ImageRobustnessCfg | None = None,
 ) -> float:
     teacher.reset()
     env.reset()
@@ -1130,6 +1211,8 @@ def run_online_dagger(
                 and ((iter_idx + 1) == 1 or (iter_idx + 1) % max(_args.debug_policy_image_stats_stride, 1) == 0)
             ),
             debug_policy_image_stats_env_ids=debug_policy_image_stats_env_ids,
+            image_robustifier=image_robustifier,
+            image_cfg=image_cfg,
         )
         accumulated_loss = total_loss if accumulated_loss is None else accumulated_loss + total_loss
         accumulated_steps += 1
@@ -1198,6 +1281,8 @@ def run_online_dagger(
         reset_env_ids = env.reset_done_envs(next_sim_state)
         if reset_env_ids.size > 0:
             student_hidden = reset_hidden_state(student_hidden, reset_env_ids)
+            if image_robustifier is not None:
+                image_robustifier.reset(torch.as_tensor(reset_env_ids, device=env.device, dtype=torch.long))
 
         action_loss_np = action_loss_per_env.detach().cpu().numpy()
         aux_loss_np = aux_loss_per_env.detach().cpu().numpy()
@@ -1453,6 +1538,7 @@ def main():
     teacher_checkpoint = resolve_repo_path(repo_root, args.teacher_checkpoint)
     settings = load_distill_settings(Path(resolve_repo_path(repo_root, args.distill_config)), args)
     validate_distill_settings(settings)
+    image_cfg = get_image_robustness_cfg(settings)
     if (
         args.mode == "student_eval"
         and args.student_input == "camera"
@@ -1483,6 +1569,9 @@ def main():
         or args.student_input == "camera"
     )
 
+    peg_start_quat_mode = args.peg_start_quat_mode
+    peg_force_identity_start_quat = args.peg_force_identity_start_quat
+
     task_spec = load_task_spec(
         repo_root=repo_root,
         task_source=args.task_source,
@@ -1497,9 +1586,13 @@ def main():
         peg_idx=args.peg_idx,
         peg_tol_slot_idx=args.peg_tol_slot_idx,
         peg_goal_mode=args.peg_goal_mode,
-        peg_force_identity_start_quat=args.peg_force_identity_start_quat,
+        peg_force_identity_start_quat=peg_force_identity_start_quat,
+        peg_start_quat_mode=peg_start_quat_mode,
     )
-    teacher_env_cfg = (load_yaml(teacher_config).get("task") or {}).get("env") or {}
+    teacher_env_cfg = dict(((load_yaml(teacher_config).get("task") or {}).get("env") or {}))
+    if args.task_source == "peg_in_hole" and args.peg_match_isaacgym_eval:
+        teacher_env_cfg.update(PEG_ISAACGYM_EVAL_OVERRIDES)
+        _log("Applying peg IsaacGym eval semantic overrides in Isaac Sim")
     env = IsaacSimDistillEnv(
         task_spec=task_spec,
         app=app,
@@ -1511,6 +1604,7 @@ def main():
         num_envs=settings.num_envs,
         env_spacing=settings.env_spacing,
         ground_plane_size=settings.ground_plane_size,
+        enable_scene_query_support=args.enable_scene_query_support,
         object_start_mode=settings.object_start_mode,
         object_pos_noise_xyz=settings.object_pos_noise_xyz,
         object_yaw_noise_deg=settings.object_yaw_noise_deg,
@@ -1543,6 +1637,11 @@ def main():
             if args.fingertip_friction_override is not None
             else float(teacher_env_cfg.get("fingerTipFriction", 1.5))
         ),
+        start_arm_higher=bool(teacher_env_cfg.get("startArmHigher", False)),
+        hand_moving_average=settings.hand_moving_average,
+        arm_moving_average=settings.arm_moving_average,
+        dof_speed_scale=settings.dof_speed_scale,
+        image_robustness=image_cfg,
     )
     teacher_inference_batch_size = 128 if args.mode == "teacher_eval" else 32
     teacher = RlPlayer(
@@ -1556,6 +1655,11 @@ def main():
     )
     student = None if args.mode == "teacher_eval" else build_student(args, env, settings)
     optimizer = None if student is None else torch.optim.Adam(student.parameters(), lr=settings.learning_rate)
+    image_robustifier = (
+        TrainImageRobustifier(image_cfg, settings.num_envs, env.device)
+        if args.student_input == "camera"
+        else None
+    )
     if args.student_checkpoint and student is not None and optimizer is not None:
         load_student_checkpoint(resolve_repo_path(repo_root, args.student_checkpoint), student, optimizer)
     run_dir = ensure_run_dir(repo_root, args, settings)
@@ -1611,6 +1715,8 @@ def main():
             capture_viewer_wandb_key=args.capture_viewer_wandb_key,
             capture_viewer_video_wandb_key=args.capture_viewer_video_wandb_key,
             capture_viewer_video_fps=args.capture_viewer_video_fps,
+            image_robustifier=image_robustifier,
+            image_cfg=image_cfg,
         )
         _log(f"Online DAgger complete. best_goal_completion_ratio={best_metric:.3f}")
         if wandb_run is not None:
@@ -1631,6 +1737,8 @@ def main():
             run_dir=None,
             capture_frames=False,
             capture_frame_stride=args.capture_frame_stride,
+            image_robustifier=None,
+            image_cfg=image_cfg,
         )
         _log(
             f"[teacher baseline] goal_completion_ratio={teacher_metrics['goal_completion_ratio']:.3f}, "
@@ -1665,6 +1773,8 @@ def main():
             capture_viewer_wandb_key=args.capture_viewer_wandb_key,
             capture_viewer_video_wandb_key=args.capture_viewer_video_wandb_key,
             capture_viewer_video_fps=args.capture_viewer_video_fps,
+            image_robustifier=image_robustifier if args.mode == "train" else None,
+            image_cfg=image_cfg,
         )
         _log(
             f"[episode {episode}] mode={args.mode}, goal_completion_ratio={metrics['goal_completion_ratio']:.3f}, "
