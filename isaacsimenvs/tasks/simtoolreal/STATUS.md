@@ -10,7 +10,7 @@ Port landed 2026-04-23 (overnight, kk837 asleep). Goal from the evening:
   `isaacsimenvs/tasks/simtoolreal/play_simtoolreal.py`. The rollout loop
   (140-dim obs → rl_games LSTM → 29-dim action → PD targets → 2-substep
   120 Hz physics step) completes without crashing and produces an mp4 plus a
-  `trajectory.npz`.
+  `trajectory.npz`. Verified at both 240-step and 6000-step scales.
 - **Task is registered.** `gym.spec("Isaacsimenvs-SimToolReal-Direct-v0")`
   resolves; `load_cfg_from_registry(task, "env_cfg_entry_point")` returns
   `SimToolRealEnvCfg()`, `rl_games_cfg_entry_point` returns the rl_games dict.
@@ -21,6 +21,32 @@ Port landed 2026-04-23 (overnight, kk837 asleep). Goal from the evening:
 - **Same prefix policy as Cartpole.** Task id uses the `Isaacsimenvs-` prefix
   (from the Phase 2 commit note) so it doesn't collide with Isaac Lab's stock
   `Isaac-*-Direct-v0` registrations.
+
+## Rollout behavior: 0/12 goals reached
+
+The 6000-step beam-2 rollout finished with **0/12 goals hit** — the object
+stayed parked at `z=0.536` (roughly table height) for the entire run, and
+the kp-dist metric was frozen at `0.0871` from step ~60 onward. The policy
+is clearly running (observations are being computed, actions are being
+emitted, PD targets are applied), but the object never moves.
+
+Two things to check on wake:
+1. Does `isaacsim_conversion/rollout.py` (the legacy driver, pre-port) see
+   the same 0/12 behavior? A parallel comparison is queued; check
+   `rollout_videos_legacy/trajectory.npz` vs `isaacsimenvs/rollout_videos/
+   trajectory.npz`. If legacy also sees 0/12, the port is faithful and the
+   problem is upstream — probably checkpoint mismatch (the generic
+   `pretrained_policy/model.pth` wasn't trained on fabrica/beam, see
+   `hardware_rollouts/Apr16_experiments/beam_*` for beam-specific variants).
+2. Try a beam-specific checkpoint: `hardware_rollouts/Apr16_experiments/
+   beam_multi_init_table_rand_dr/model.pth` or `beam_final_goal_only_dr/`.
+   The `isaacsim_conversion/README.md` status line claims "all 12 goals …
+   using the FGT curriculum policy" — "FGT" = `final_goal_only` variant.
+
+Artifacts of the 6000-step run:
+- `isaacsimenvs/rollout_videos/rollout_beam_2.mp4` (1.7 MB, 100 s @ 30fps)
+- `isaacsimenvs/rollout_videos/trajectory.npz` (985 KB, 6000 steps of q,
+  object_pose, kp_dist, goal_idx — useful for the behavioral diagnosis)
 
 ## What doesn't work / is stub
 
