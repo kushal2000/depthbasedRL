@@ -750,7 +750,7 @@ class IsaacSimDistillEnv:
         robot_base_pose = np.zeros(7, dtype=np.float32)
         robot_base_pose[:3] = robot_root_state[:3] - env_origin
         robot_base_pose[3:] = robot_root_state[3:7][[1, 2, 3, 0]]
-        table_pose = np.array([0.0, 0.0, 0.38, 0.0, 0.0, 0.0, 1.0], dtype=np.float32)
+        table_pose = self.task_spec.table_pose.astype(np.float32)
         return {
             "env_id": int(env_id),
             "robot_joint_names": list(self.robot.joint_names),

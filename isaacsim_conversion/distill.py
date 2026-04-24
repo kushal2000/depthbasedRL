@@ -44,13 +44,22 @@ def launch_app():
         choices=["train", "train_online", "teacher_eval", "student_eval", "mixed_eval", "camera_debug"],
         default="train",
     )
-    parser.add_argument("--task_source", choices=["fabrica", "dextoolbench"], default="dextoolbench")
+    parser.add_argument("--task_source", choices=["fabrica", "dextoolbench", "peg_in_hole"], default="dextoolbench")
     parser.add_argument("--assembly", default="beam")
     parser.add_argument("--part_id", default="2")
     parser.add_argument("--collision_method", default="coacd")
     parser.add_argument("--object_category", default="hammer")
     parser.add_argument("--object_name", default="claw_hammer")
     parser.add_argument("--task_name", default="swing_down")
+    parser.add_argument("--peg_scene_idx", type=int, default=50)
+    parser.add_argument("--peg_idx", type=int, default=5)
+    parser.add_argument("--peg_tol_slot_idx", type=int, default=5)
+    parser.add_argument(
+        "--peg_goal_mode",
+        choices=["dense", "preInsertAndFinal", "finalGoalOnly"],
+        default="preInsertAndFinal",
+    )
+    parser.add_argument("--peg_force_identity_start_quat", action="store_true")
     parser.add_argument("--teacher_checkpoint", default="pretrained_policy/model.pth")
     parser.add_argument("--teacher_config", default="pretrained_policy/config.yaml")
     parser.add_argument("--student_checkpoint", default=None)
@@ -623,6 +632,7 @@ def _log_viewer_artifacts(
     video_key: str,
     video_fps: int,
     num_goals: int,
+    task_spec=None,
 ):
     if not frames:
         return
@@ -644,6 +654,13 @@ def _log_viewer_artifacts(
         "goal_idx": [int(f["goal_idx"]) for f in frames],
         "kp_dist": [float(f["kp_dist"]) for f in frames],
     }
+    if task_spec is not None:
+        if getattr(task_spec, "viewer_table_urdf_path", None) is not None:
+            payload["viewer_table_urdf_path"] = task_spec.viewer_table_urdf_path
+        if getattr(task_spec, "viewer_object_urdf_path", None) is not None:
+            payload["viewer_object_urdf_path"] = task_spec.viewer_object_urdf_path
+        if getattr(task_spec, "viewer_object_github_relpath", None) is not None:
+            payload["viewer_object_github_relpath"] = task_spec.viewer_object_github_relpath
     viewer_path = run_dir / "interactive_viewer" / f"{mode}_rollout.html"
     html_text = write_pose_viewer_html(viewer_path, payload, title=f"{mode} rollout")
     _log(f"Saved interactive viewer: {viewer_path}")
@@ -812,6 +829,7 @@ def run_episode(
             video_key=capture_viewer_video_wandb_key,
             video_fps=capture_viewer_video_fps,
             num_goals=len(env.task_spec.goals),
+            task_spec=env.task_spec,
         )
 
     final_state = env.compute_sim_state()
@@ -1010,6 +1028,7 @@ def run_online_dagger(
                     video_key=capture_viewer_video_wandb_key,
                     video_fps=capture_viewer_video_fps,
                     num_goals=len(env.task_spec.goals),
+                    task_spec=env.task_spec,
                 )
                 viewer_logged = True
         env.maybe_advance_goal(next_sim_state)
@@ -1083,6 +1102,7 @@ def run_online_dagger(
             video_key=capture_viewer_video_wandb_key,
             video_fps=capture_viewer_video_fps,
             num_goals=len(env.task_spec.goals),
+            task_spec=env.task_spec,
         )
 
     return best_metric
@@ -1261,6 +1281,11 @@ def main():
         object_name=args.object_name,
         task_name=args.task_name,
         teacher_config_path=teacher_config,
+        peg_scene_idx=args.peg_scene_idx,
+        peg_idx=args.peg_idx,
+        peg_tol_slot_idx=args.peg_tol_slot_idx,
+        peg_goal_mode=args.peg_goal_mode,
+        peg_force_identity_start_quat=args.peg_force_identity_start_quat,
     )
     env = IsaacSimDistillEnv(
         task_spec=task_spec,

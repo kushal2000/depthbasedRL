@@ -217,6 +217,10 @@ def _read_table_urdf() -> str:
     return table_path.read_text(encoding="utf-8")
 
 
+def _read_urdf_text(path: str | Path) -> str:
+    return Path(path).read_text(encoding="utf-8")
+
+
 def _check_viewer_urls(urls: list[str], url_check: str) -> set[str]:
     if url_check == "skip":
         print("[viewer] URL check skipped; browser mesh loading may fail silently.")
@@ -251,21 +255,43 @@ def write_pose_viewer_html(path: Path, payload: dict, *, title: str) -> str:
         github_raw_base
         + "assets/urdf/kuka_sharpa_description/iiwa14_left_sharpa_adjusted_restricted.urdf"
     )
-    object_urdf_url = (
-        github_raw_base
-        + "assets/urdf/dextoolbench/hammer/claw_hammer/claw_hammer.urdf"
-    )
-    _check_viewer_urls([robot_urdf_url, object_urdf_url], url_check)
+    object_github_relpath = payload.get("viewer_object_github_relpath", "assets/urdf/dextoolbench/hammer/claw_hammer/claw_hammer.urdf")
+    object_urdf_url = github_raw_base + object_github_relpath
 
-    robots = [
-        make_url_robot(name="robot", urdf_url=robot_urdf_url, animated=True),
-        make_embedded_robot(name="table", urdf_text=_read_table_urdf()),
-        make_url_robot(name="object", urdf_url=object_urdf_url),
-        make_url_robot(
+    urls_to_check = [robot_urdf_url]
+    if payload.get("viewer_object_urdf_path") is None:
+        urls_to_check.append(object_urdf_url)
+    _check_viewer_urls(urls_to_check, url_check)
+
+    table_robot = (
+        make_embedded_robot(name="table", urdf_text=_read_urdf_text(payload["viewer_table_urdf_path"]))
+        if payload.get("viewer_table_urdf_path") is not None
+        else make_embedded_robot(name="table", urdf_text=_read_table_urdf())
+    )
+    object_robot = (
+        make_embedded_robot(name="object", urdf_text=_read_urdf_text(payload["viewer_object_urdf_path"]))
+        if payload.get("viewer_object_urdf_path") is not None
+        else make_url_robot(name="object", urdf_url=object_urdf_url)
+    )
+    goal_robot = (
+        make_embedded_robot(
+            name="goal",
+            urdf_text=_read_urdf_text(payload["viewer_object_urdf_path"]),
+            color_override=(0.20, 0.72, 0.31),
+        )
+        if payload.get("viewer_object_urdf_path") is not None
+        else make_url_robot(
             name="goal",
             urdf_url=object_urdf_url,
             color_override=(0.20, 0.72, 0.31),
-        ),
+        )
+    )
+
+    robots = [
+        make_url_robot(name="robot", urdf_url=robot_urdf_url, animated=True),
+        table_robot,
+        object_robot,
+        goal_robot,
     ]
 
     html_text = create_html(
