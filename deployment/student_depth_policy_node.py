@@ -17,10 +17,7 @@ from geometry_msgs.msg import PoseStamped
 from sensor_msgs.msg import JointState
 from termcolor import colored
 
-from isaacgymenvs.utils.observation_action_utils_sharpa import (
-    JOINT_NAMES_ISAACGYM,
-    compute_joint_pos_targets,
-)
+from isaacgymenvs.utils.observation_action_utils_sharpa import compute_joint_pos_targets
 from isaacsim_conversion.image_robustness import (
     PreprocessCfg,
     preprocess_policy_images,
@@ -59,18 +56,6 @@ def load_student_checkpoint(path: Path, student: torch.nn.Module):
     return ckpt
 
 
-IIWA_JOINT_NAMES = [
-    "iiwa_joint_1",
-    "iiwa_joint_2",
-    "iiwa_joint_3",
-    "iiwa_joint_4",
-    "iiwa_joint_5",
-    "iiwa_joint_6",
-    "iiwa_joint_7",
-]
-
-SHARPA_JOINT_NAMES = [f"joint_{i}.0" for i in range(22)]
-
 T_W_R = np.eye(4, dtype=np.float32)
 T_W_R[:3, 3] = np.array([0.0, 0.8, 0.0], dtype=np.float32)
 T_R_W = np.linalg.inv(T_W_R)
@@ -97,24 +82,6 @@ def init_zed(serial_number: str, exposure: int, gain: int, resolution: str):
     runtime_parameters = sl.RuntimeParameters()
     depth_mat = sl.Mat()
     return zed, runtime_parameters, depth_mat
-
-
-def reorder_joint_state(msg: JointState, expected_names: list[str]) -> tuple[np.ndarray, np.ndarray]:
-    if len(msg.name) == len(expected_names) and list(msg.name) == expected_names:
-        return np.asarray(msg.position, dtype=np.float32), np.asarray(msg.velocity, dtype=np.float32)
-
-    if not msg.name:
-        raise ValueError("JointState message has no names; cannot safely reorder.")
-
-    name_to_index = {name: i for i, name in enumerate(msg.name)}
-    missing = [name for name in expected_names if name not in name_to_index]
-    if missing:
-        raise ValueError(f"Missing expected joints in JointState: {missing}")
-
-    pos = np.array([msg.position[name_to_index[name]] for name in expected_names], dtype=np.float32)
-    vel = np.array([msg.velocity[name_to_index[name]] for name in expected_names], dtype=np.float32)
-    return pos, vel
-
 
 def read_depth_frame(
     zed,
@@ -303,13 +270,10 @@ class StudentDepthPolicyNode:
 
         iiwa_msg = self.iiwa_joint_state_msg
         sharpa_msg = self.sharpa_joint_state_msg
-        try:
-            iiwa_position, iiwa_velocity = reorder_joint_state(iiwa_msg, IIWA_JOINT_NAMES)
-            sharpa_position, sharpa_velocity = reorder_joint_state(sharpa_msg, SHARPA_JOINT_NAMES)
-        except ValueError as exc:
-            warn_every(f"JointState ordering error: {exc}", 1.0, key="joint_state_ordering")
-            return None, None, None, None, None, None
-
+        iiwa_position = np.asarray(iiwa_msg.position, dtype=np.float32)
+        iiwa_velocity = np.asarray(iiwa_msg.velocity, dtype=np.float32)
+        sharpa_position = np.asarray(sharpa_msg.position, dtype=np.float32)
+        sharpa_velocity = np.asarray(sharpa_msg.velocity, dtype=np.float32)
         q = np.concatenate([iiwa_position, sharpa_position])
         qd = np.concatenate([iiwa_velocity, sharpa_velocity])
         if q.shape != (29,) or qd.shape != (29,):
