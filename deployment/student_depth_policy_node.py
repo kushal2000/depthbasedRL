@@ -13,10 +13,12 @@ import rospy
 import torch
 import tyro
 import yaml
+from geometry_msgs.msg import PoseStamped
 from sensor_msgs.msg import JointState
 from termcolor import colored
 
 from isaacgymenvs.utils.observation_action_utils_sharpa import (
+    JOINT_NAMES_ISAACGYM,
     compute_joint_pos_targets,
 )
 from isaacsim_conversion.image_robustness import (
@@ -57,6 +59,23 @@ def load_student_checkpoint(path: Path, student: torch.nn.Module):
     return ckpt
 
 
+IIWA_JOINT_NAMES = [
+    "iiwa_joint_1",
+    "iiwa_joint_2",
+    "iiwa_joint_3",
+    "iiwa_joint_4",
+    "iiwa_joint_5",
+    "iiwa_joint_6",
+    "iiwa_joint_7",
+]
+
+SHARPA_JOINT_NAMES = [f"joint_{i}.0" for i in range(22)]
+
+T_W_R = np.eye(4, dtype=np.float32)
+T_W_R[:3, 3] = np.array([0.0, 0.8, 0.0], dtype=np.float32)
+T_R_W = np.linalg.inv(T_W_R)
+
+
 def init_zed(serial_number: str, exposure: int, gain: int, resolution: str):
     zed = sl.Camera()
     init_params = sl.InitParameters()
@@ -78,6 +97,23 @@ def init_zed(serial_number: str, exposure: int, gain: int, resolution: str):
     runtime_parameters = sl.RuntimeParameters()
     depth_mat = sl.Mat()
     return zed, runtime_parameters, depth_mat
+
+
+def reorder_joint_state(msg: JointState, expected_names: list[str]) -> tuple[np.ndarray, np.ndarray]:
+    if len(msg.name) == len(expected_names) and list(msg.name) == expected_names:
+        return np.asarray(msg.position, dtype=np.float32), np.asarray(msg.velocity, dtype=np.float32)
+
+    if not msg.name:
+        raise ValueError("JointState message has no names; cannot safely reorder.")
+
+    name_to_index = {name: i for i, name in enumerate(msg.name)}
+    missing = [name for name in expected_names if name not in name_to_index]
+    if missing:
+        raise ValueError(f"Missing expected joints in JointState: {missing}")
+
+    pos = np.array([msg.position[name_to_index[name]] for name in expected_names], dtype=np.float32)
+    vel = np.array([msg.velocity[name_to_index[name]] for name in expected_names], dtype=np.float32)
+    return pos, vel
 
 
 def read_depth_frame(
@@ -125,8 +161,8 @@ def preprocess_depth_metric(
 
 @dataclass
 class StudentDepthPolicyNodeArgs:
-    student_checkpoint: Path
-    distill_config: Path
+    student_checkpoint: Path = Path("distillation_runs/local_policy_rollouts_2026_04_21/checkpoints/img80_depth_third_best.pt")
+    distill_config: Path = Path("isaacsim_conversion/configs/hammer_distill_depth_80x45_window_online_dagger_512.yaml")
     device: str = "cuda"
     iiwa_joint_state_topic: str = "/iiwa/joint_states"
     sharpa_joint_state_topic: str = "/sharpa/joint_states"
@@ -142,6 +178,12 @@ class StudentDepthPolicyNodeArgs:
     hand_moving_average: float = 0.1
     arm_moving_average: float = 0.1
     hand_dof_speed_scale: float = 1.5
+    publish_object_pos_topic: str = "/robot_frame/current_object_pose"
+    object_pos_frame_id: str = "robot_frame"
+    debug_print_proprio_every: int = 0
+    debug_save_depth_dir: Optional[Path] = None
+    debug_save_depth_every: int = 0
+    debug_save_depth_video: Optional[Path] = None
 
 
 class StudentDepthPolicyNode:
@@ -151,6 +193,7 @@ class StudentDepthPolicyNode:
 
         self.iiwa_joint_cmd_pub = rospy.Publisher(args.iiwa_joint_cmd_topic, JointState, queue_size=1)
         self.sharpa_joint_cmd_pub = rospy.Publisher(args.sharpa_joint_cmd_topic, JointState, queue_size=1)
+        self.object_pos_pub = rospy.Publisher(args.publish_object_pos_topic, PoseStamped, queue_size=1)
 
         self.iiwa_joint_state_msg = None
         self.sharpa_joint_state_msg = None
@@ -163,6 +206,7 @@ class StudentDepthPolicyNode:
         self.depth_preprocess_mode = str(settings["depth_preprocess_mode"])
         self.depth_min_m = float(settings["depth_min_m"])
         self.depth_max_m = float(settings["depth_max_m"])
+        self.control_dt = float(settings.get("control_dt", 1.0 / args.control_hz))
         preprocess_settings = ((settings.get("image_robustness") or {}).get("preprocess") or {})
         self.preprocess_cfg = PreprocessCfg(
             resize_mode=str(preprocess_settings.get("resize_mode", "exact")),
@@ -188,6 +232,13 @@ class StudentDepthPolicyNode:
         self.hidden_state = self.student.initial_state(batch_size=1, device=self.device)
 
         self.prev_targets: Optional[np.ndarray] = None
+        self._loop_counter = 0
+        self._last_rate_log_time = time.time()
+        self._last_rate_log_step = 0
+        self._depth_video_writer = None
+
+        if args.debug_save_depth_dir is not None:
+            args.debug_save_depth_dir.mkdir(parents=True, exist_ok=True)
 
         self.zed, self.runtime_parameters, self.depth_mat = init_zed(
             serial_number=args.serial_number,
@@ -195,6 +246,36 @@ class StudentDepthPolicyNode:
             gain=args.zed_gain,
             resolution=args.zed_resolution,
         )
+        camera_info = self.zed.get_camera_information()
+        cam_cfg = camera_info.camera_configuration
+        info(
+            "Loaded student policy "
+            f"(checkpoint={args.student_checkpoint}, image_channels=1, proprio_dim=88, action_dim=29, "
+            f"trained_image={self.image_width}x{self.image_height}, depth_mode={self.depth_preprocess_mode})"
+        )
+        info(
+            "Student inputs: depth image + proprio=[q(29), qd(29), prev_targets(29), task_progress(1)]"
+        )
+        info(
+            f"ZED opened (serial={args.serial_number}, requested_resolution={args.zed_resolution}, "
+            f"native_resolution={cam_cfg.resolution.width}x{cam_cfg.resolution.height}, "
+            f"policy_resolution={self.image_width}x{self.image_height})"
+        )
+        info(
+            f"ROS I/O: joint_states=({args.iiwa_joint_state_topic}, {args.sharpa_joint_state_topic}), "
+            f"joint_cmd=({args.iiwa_joint_cmd_topic}, {args.sharpa_joint_cmd_topic}), "
+            f"object_pose_topic={args.publish_object_pos_topic}"
+        )
+        expected_hz = 1.0 / self.control_dt if self.control_dt > 0 else float("nan")
+        info(f"Configured control rate: requested={args.control_hz:.1f} Hz, distill_cfg={expected_hz:.1f} Hz")
+        if abs(args.control_hz - expected_hz) > 1e-3:
+            warn(
+                f"control_hz ({args.control_hz}) does not match distill control_dt ({expected_hz:.3f} Hz equivalent)"
+            )
+        if args.debug_save_depth_dir is not None:
+            info(f"Depth PNG debug enabled: dir={args.debug_save_depth_dir}, every={args.debug_save_depth_every} steps")
+        if args.debug_save_depth_video is not None:
+            info(f"Depth video debug enabled: path={args.debug_save_depth_video}")
 
     def iiwa_joint_state_callback(self, msg: JointState):
         self.iiwa_joint_state_msg = msg
@@ -202,21 +283,30 @@ class StudentDepthPolicyNode:
     def sharpa_joint_state_callback(self, msg: JointState):
         self.sharpa_joint_state_msg = msg
 
-    def create_student_inputs(self) -> tuple[Optional[torch.Tensor], Optional[torch.Tensor], Optional[np.ndarray]]:
+    def create_student_inputs(
+        self,
+    ) -> tuple[Optional[torch.Tensor], Optional[torch.Tensor], Optional[np.ndarray], Optional[np.ndarray], Optional[np.ndarray]]:
         if self.iiwa_joint_state_msg is None or self.sharpa_joint_state_msg is None:
             warn_every(
                 "Waiting for iiwa and sharpa joint states before student policy inference",
                 n_seconds=1.0,
             )
-            return None, None, None
+            return None, None, None, None, None
 
         iiwa_msg = self.iiwa_joint_state_msg
         sharpa_msg = self.sharpa_joint_state_msg
-        q = np.concatenate([np.asarray(iiwa_msg.position, dtype=np.float32), np.asarray(sharpa_msg.position, dtype=np.float32)])
-        qd = np.concatenate([np.asarray(iiwa_msg.velocity, dtype=np.float32), np.asarray(sharpa_msg.velocity, dtype=np.float32)])
+        try:
+            iiwa_position, iiwa_velocity = reorder_joint_state(iiwa_msg, IIWA_JOINT_NAMES)
+            sharpa_position, sharpa_velocity = reorder_joint_state(sharpa_msg, SHARPA_JOINT_NAMES)
+        except ValueError as exc:
+            warn_every(f"JointState ordering error: {exc}", 1.0, key="joint_state_ordering")
+            return None, None, None, None, None
+
+        q = np.concatenate([iiwa_position, sharpa_position])
+        qd = np.concatenate([iiwa_velocity, sharpa_velocity])
         if q.shape != (29,) or qd.shape != (29,):
             warn_every(f"Expected 29 joint positions/velocities, got q={q.shape}, qd={qd.shape}", 1.0)
-            return None, None, None
+            return None, None, None, None, None
 
         if self.prev_targets is None:
             self.prev_targets = q.copy()
@@ -231,7 +321,7 @@ class StudentDepthPolicyNode:
         )
         if depth_m is None:
             warn_every("ZED grab failed, skipping control step", 1.0)
-            return None, None, None
+            return None, None, None, None, None
 
         depth_proc = preprocess_depth_metric(
             depth_m,
@@ -257,7 +347,68 @@ class StudentDepthPolicyNode:
             ]
         )
         proprio_tensor = torch.from_numpy(proprio).unsqueeze(0).to(self.device)
-        return image_tensor, proprio_tensor, q
+        return image_tensor, proprio_tensor, q, qd, depth_proc
+
+    def _save_depth_debug(self, depth_proc: np.ndarray):
+        if self.args.debug_save_depth_every <= 0:
+            return
+        if self._loop_counter % self.args.debug_save_depth_every != 0:
+            return
+
+        import cv2
+
+        vis = np.clip(depth_proc, 0.0, 1.0)
+        vis_u8 = (vis * 255.0).astype(np.uint8)
+        if self.args.debug_save_depth_dir is not None:
+            out_path = self.args.debug_save_depth_dir / f"depth_{self._loop_counter:06d}.png"
+            cv2.imwrite(str(out_path), vis_u8)
+
+        if self.args.debug_save_depth_video is not None:
+            if self._depth_video_writer is None:
+                fourcc = cv2.VideoWriter_fourcc(*"mp4v")
+                self._depth_video_writer = cv2.VideoWriter(
+                    str(self.args.debug_save_depth_video),
+                    fourcc,
+                    self.args.control_hz,
+                    (self.image_width, self.image_height),
+                    False,
+                )
+            self._depth_video_writer.write(vis_u8)
+
+    def _publish_object_pos(self, student_out):
+        object_pos = student_out.aux.get("object_pos")
+        if object_pos is None:
+            return
+        pos_world_like = object_pos.detach().cpu().numpy().reshape(-1)
+        if pos_world_like.shape != (3,):
+            warn_every(f"Unexpected object_pos shape: {pos_world_like.shape}", 1.0, key="object_pos_shape")
+            return
+        pos_h = np.ones(4, dtype=np.float32)
+        pos_h[:3] = pos_world_like.astype(np.float32)
+        pos_robot = (T_R_W @ pos_h)[:3]
+        msg = PoseStamped()
+        msg.header.stamp = rospy.Time.now()
+        msg.header.frame_id = self.args.object_pos_frame_id
+        msg.pose.position.x = float(pos_robot[0])
+        msg.pose.position.y = float(pos_robot[1])
+        msg.pose.position.z = float(pos_robot[2])
+        msg.pose.orientation.x = 0.0
+        msg.pose.orientation.y = 0.0
+        msg.pose.orientation.z = 0.0
+        msg.pose.orientation.w = 1.0
+        self.object_pos_pub.publish(msg)
+
+    def _log_proprio_debug(self, q: np.ndarray, qd: np.ndarray):
+        if self.args.debug_print_proprio_every <= 0:
+            return
+        if self._loop_counter % self.args.debug_print_proprio_every != 0:
+            return
+        info(
+            "Proprio "
+            f"q[:7]={np.array2string(q[:7], precision=3, suppress_small=True)} "
+            f"qd[:7]={np.array2string(qd[:7], precision=3, suppress_small=True)} "
+            f"prev[:7]={np.array2string(self.prev_targets[:7], precision=3, suppress_small=True)}"
+        )
 
     def publish_targets(self, joint_pos_targets: np.ndarray):
         joint_pos_targets = joint_pos_targets[0]
@@ -291,13 +442,15 @@ class StudentDepthPolicyNode:
         )
         while not rospy.is_shutdown():
             loop_start = time.time()
-            image_tensor, proprio_tensor, q = self.create_student_inputs()
-            if image_tensor is None or proprio_tensor is None or q is None:
+            image_tensor, proprio_tensor, q, qd, depth_proc = self.create_student_inputs()
+            if image_tensor is None or proprio_tensor is None or q is None or qd is None or depth_proc is None:
                 rate.sleep()
                 continue
 
             with torch.no_grad():
                 student_out, self.hidden_state = self.student(image_tensor, proprio_tensor, self.hidden_state)
+            self._save_depth_debug(depth_proc)
+            self._publish_object_pos(student_out)
             normalized_action = student_out.action.detach().cpu().numpy()
             joint_pos_targets = compute_joint_pos_targets(
                 actions=normalized_action,
@@ -309,13 +462,30 @@ class StudentDepthPolicyNode:
             )
             self.prev_targets = joint_pos_targets[0].copy()
             self.publish_targets(joint_pos_targets)
-
-            if int(time.time() * 2) % 10 == 0:
-                info(
-                    f"Loop OK: action_norm={float(np.linalg.norm(normalized_action)):.3f}, "
-                    f"step_ms={(time.time() - loop_start) * 1000.0:.1f}"
+            self._loop_counter += 1
+            self._log_proprio_debug(q, qd)
+            elapsed = time.time() - loop_start
+            if elapsed > (1.0 / self.args.control_hz):
+                warn_every(
+                    f"Control loop overrun: step_ms={elapsed * 1000.0:.1f} > budget_ms={(1000.0 / self.args.control_hz):.1f}",
+                    1.0,
+                    key="loop_overrun",
                 )
+
+            now = time.time()
+            if now - self._last_rate_log_time >= 2.0:
+                dt = now - self._last_rate_log_time
+                hz = (self._loop_counter - self._last_rate_log_step) / max(dt, 1e-6)
+                info(
+                    f"Loop rate={hz:.1f} Hz, step_ms={elapsed * 1000.0:.1f}, "
+                    f"action_norm={float(np.linalg.norm(normalized_action)):.3f}"
+                )
+                self._last_rate_log_time = now
+                self._last_rate_log_step = self._loop_counter
             rate.sleep()
+
+        if self._depth_video_writer is not None:
+            self._depth_video_writer.release()
 
 
 def main():
