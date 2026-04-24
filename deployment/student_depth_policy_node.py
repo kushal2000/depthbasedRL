@@ -286,13 +286,20 @@ class StudentDepthPolicyNode:
 
     def create_student_inputs(
         self,
-    ) -> tuple[Optional[torch.Tensor], Optional[torch.Tensor], Optional[np.ndarray], Optional[np.ndarray], Optional[np.ndarray]]:
+    ) -> tuple[
+        Optional[torch.Tensor],
+        Optional[torch.Tensor],
+        Optional[np.ndarray],
+        Optional[np.ndarray],
+        Optional[np.ndarray],
+        Optional[np.ndarray],
+    ]:
         if self.iiwa_joint_state_msg is None or self.sharpa_joint_state_msg is None:
             warn_every(
                 "Waiting for iiwa and sharpa joint states before student policy inference",
                 n_seconds=1.0,
             )
-            return None, None, None, None, None
+            return None, None, None, None, None, None
 
         iiwa_msg = self.iiwa_joint_state_msg
         sharpa_msg = self.sharpa_joint_state_msg
@@ -301,13 +308,13 @@ class StudentDepthPolicyNode:
             sharpa_position, sharpa_velocity = reorder_joint_state(sharpa_msg, SHARPA_JOINT_NAMES)
         except ValueError as exc:
             warn_every(f"JointState ordering error: {exc}", 1.0, key="joint_state_ordering")
-            return None, None, None, None, None
+            return None, None, None, None, None, None
 
         q = np.concatenate([iiwa_position, sharpa_position])
         qd = np.concatenate([iiwa_velocity, sharpa_velocity])
         if q.shape != (29,) or qd.shape != (29,):
             warn_every(f"Expected 29 joint positions/velocities, got q={q.shape}, qd={qd.shape}", 1.0)
-            return None, None, None, None, None
+            return None, None, None, None, None, None
 
         if self.prev_targets is None:
             self.prev_targets = q.copy()
@@ -322,7 +329,7 @@ class StudentDepthPolicyNode:
         )
         if depth_m is None:
             warn_every("ZED grab failed, skipping control step", 1.0)
-            return None, None, None, None, None
+            return None, None, None, None, None, None
 
         depth_proc = preprocess_depth_metric(
             depth_m,
@@ -348,9 +355,9 @@ class StudentDepthPolicyNode:
             ]
         )
         proprio_tensor = torch.from_numpy(proprio).unsqueeze(0).to(self.device)
-        return image_tensor, proprio_tensor, q, qd, depth_proc
+        return image_tensor, proprio_tensor, q, qd, depth_m, depth_proc
 
-    def _save_depth_debug(self, depth_proc: np.ndarray):
+    def _save_depth_debug(self, depth_m: np.ndarray, depth_proc: np.ndarray):
         if self.args.debug_save_depth_every <= 0:
             return
         if self._loop_counter % self.args.debug_save_depth_every != 0:
@@ -358,11 +365,28 @@ class StudentDepthPolicyNode:
 
         import cv2
 
-        vis = np.clip(depth_proc, 0.0, 1.0)
-        vis_u8 = (vis * 255.0).astype(np.uint8)
+        raw_vis = np.zeros_like(depth_m, dtype=np.float32)
+        raw_valid = depth_m > 0.0
+        if np.any(raw_valid):
+            raw_vis[raw_valid] = np.clip(
+                (depth_m[raw_valid] - self.depth_min_m) / max(self.depth_max_m - self.depth_min_m, 1e-6),
+                0.0,
+                1.0,
+            )
+        raw_vis_u8 = (raw_vis * 255.0).astype(np.uint8)
+
+        policy_vis = np.clip(depth_proc, 0.0, 1.0)
+        policy_vis_u8 = (policy_vis * 255.0).astype(np.uint8)
+
         if self.args.debug_save_depth_dir is not None:
-            out_path = self.args.debug_save_depth_dir / f"depth_{self._loop_counter:06d}.png"
-            cv2.imwrite(str(out_path), vis_u8)
+            raw_png = self.args.debug_save_depth_dir / f"depth_raw_m_{self._loop_counter:06d}.png"
+            raw_npy = self.args.debug_save_depth_dir / f"depth_raw_m_{self._loop_counter:06d}.npy"
+            policy_png = self.args.debug_save_depth_dir / f"depth_policy_{self._loop_counter:06d}.png"
+            policy_npy = self.args.debug_save_depth_dir / f"depth_policy_{self._loop_counter:06d}.npy"
+            cv2.imwrite(str(raw_png), raw_vis_u8)
+            cv2.imwrite(str(policy_png), policy_vis_u8)
+            np.save(raw_npy, depth_m.astype(np.float32))
+            np.save(policy_npy, depth_proc.astype(np.float32))
 
         if self.args.debug_save_depth_video is not None:
             if self._depth_video_writer is None:
@@ -374,7 +398,7 @@ class StudentDepthPolicyNode:
                     (self.image_width, self.image_height),
                     False,
                 )
-            self._depth_video_writer.write(vis_u8)
+            self._depth_video_writer.write(policy_vis_u8)
 
     def _publish_object_pos(self, student_out):
         object_pos = student_out.aux.get("object_pos")
@@ -446,14 +470,21 @@ class StudentDepthPolicyNode:
         )
         while not rospy.is_shutdown():
             loop_start = time.time()
-            image_tensor, proprio_tensor, q, qd, depth_proc = self.create_student_inputs()
-            if image_tensor is None or proprio_tensor is None or q is None or qd is None or depth_proc is None:
+            image_tensor, proprio_tensor, q, qd, depth_m, depth_proc = self.create_student_inputs()
+            if (
+                image_tensor is None
+                or proprio_tensor is None
+                or q is None
+                or qd is None
+                or depth_m is None
+                or depth_proc is None
+            ):
                 rate.sleep()
                 continue
 
             with torch.no_grad():
                 student_out, self.hidden_state = self.student(image_tensor, proprio_tensor, self.hidden_state)
-            self._save_depth_debug(depth_proc)
+            self._save_depth_debug(depth_m, depth_proc)
             self._publish_object_pos(student_out)
             normalized_action = student_out.action.detach().cpu().numpy()
             joint_pos_targets = compute_joint_pos_targets(
