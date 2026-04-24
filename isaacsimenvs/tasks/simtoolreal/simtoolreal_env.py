@@ -1,107 +1,90 @@
-"""SimToolReal task — Isaac Sim port of isaacgymenvs/tasks/simtoolreal/env.py.
+"""SimToolReal DirectRLEnv — thin hook dispatcher.
 
-**Status (overnight port, 2026-04-23):** inference-only wrapper around the
-existing `isaacsim_conversion.IsaacSimEnv` setup. The DirectRLEnv skeleton +
-configclass exist for registry parity with Cartpole, but the full DirectRLEnv
-step / reward / reset path is **not** ported — the stock isaacgymenvs env is
-6000+ lines, and our goal here is to validate that the pretrained policy runs
-in Isaac Sim, not to retrain from scratch.
+All phase-specific math lives in :mod:`.utils`. This class is just the
+DirectRLEnv wiring and state holder: it (a) overrides obs/state_space from
+the configured field lists so rl_games sees the right shapes, (b) allocates
+per-env buffers after ``super().__init__`` runs ``_setup_scene``, and (c)
+dispatches each hook to the appropriate utility module:
 
-For a working rollout: see `play_simtoolreal.py` (single-env direct-sim loop;
-no `gym.make` needed). For future training: port the reward/reset/obs pipeline
-from `isaacgymenvs/tasks/simtoolreal/env.py` into `SimToolRealEnv._*` hooks.
+  - ``_setup_scene``        → :func:`utils.scene_utils.setup_scene`
+  - ``_pre_physics_step``   → :func:`utils.action_utils.apply_action_pipeline`
+                              + :func:`utils.action_utils.apply_wrench_dr`
+  - ``_apply_action``       → direct call on the articulation (one line)
+  - ``_get_observations``   → :func:`utils.obs_utils.build_observations`
+  - ``_get_rewards``        → :func:`utils.reward_utils.compute_rewards`
+  - ``_get_dones``          → :func:`utils.termination_utils.update_tolerance_curriculum`
+                              + :func:`utils.obs_utils.compute_intermediate_values`
+                              + :func:`utils.termination_utils.compute_terminations`
+  - ``_reset_idx``          → :func:`utils.reset_utils.reset_env_state`
 
-Observation dim = 140, action dim = 29 (7-DOF IIWA + 22-DOF Sharpa left hand).
+Mid-episode goal-hit triggers :func:`utils.reset_utils.reset_goal_trackers`
+directly from :func:`utils.termination_utils.compute_terminations` — no
+method on this class wraps it.
+
+**Startup cost warning:** ``setup_scene`` uses ``force_usd_conversion=True``
+on every procedural URDF, which regenerates 100 × N_handle_head_types USDs
+from scratch each launch (default 600). Expect several minutes first time.
 """
 
 from __future__ import annotations
 
-from isaaclab.envs import DirectRLEnv, DirectRLEnvCfg
-from isaaclab.sim import SimulationCfg
-from isaaclab.scene import InteractiveSceneCfg
-from isaaclab.utils import configclass
+import torch
+
+from isaaclab.envs import DirectRLEnv
+
+from .simtoolreal_env_cfg import SimToolRealEnvCfg
+from .utils.action_utils import apply_action_pipeline, apply_wrench_dr
+from .utils.obs_utils import build_observations, compute_intermediate_values, compute_obs_dim
+from .utils.reset_utils import allocate_state_buffers, reset_env_state
+from .utils.reward_utils import compute_rewards
+from .utils.scene_utils import setup_scene
+from .utils.termination_utils import compute_terminations, update_tolerance_curriculum
 
 
-@configclass
-class SimToolRealEnvCfg(DirectRLEnvCfg):
-    """Configclass mirroring the key fields from isaacgymenvs/cfg/task/SimToolReal.yaml.
-
-    Only the subset needed for single-env pretrained-policy inference is modeled.
-    Training-time fields (DR ranges, reward scales, curriculum) are intentionally
-    omitted — they belong on a future full-port of the env.
-    """
-
-    # DirectRLEnvCfg required fields
-    decimation = 1  # control runs at physics rate (60 Hz)
-    episode_length_s = 10.0
-    action_space = 29
-    observation_space = 140
-    state_space = 140
-
-    sim: SimulationCfg = SimulationCfg(dt=1.0 / 120.0, render_interval=2)
-    scene: InteractiveSceneCfg = InteractiveSceneCfg(
-        num_envs=1, env_spacing=1.2, replicate_physics=True, clone_in_fabric=True
-    )
-
-    # Asset paths (relative to repo root) — populated by play_simtoolreal.py
-    # from gym.register kwargs. Left empty here because the configclass is shared
-    # across tasks that differ only by assembly/part and the play script overrides.
-    robot_urdf: str = "assets/urdf/kuka_sharpa_description/iiwa14_left_sharpa_adjusted_restricted.urdf"
-    table_urdf: str = ""
-    object_urdf: str = ""
-    trajectory_path: str = ""
-
-    # Recording camera pose in env-local frame (mirrors Cartpole pattern).
-    # Default matches isaacsim_conversion/rollout.py: (0, -1, 1.03) looking at (0, 0, 0.53).
-    record_camera_eye: tuple[float, float, float] = (0.0, -1.0, 1.03)
-    record_camera_target: tuple[float, float, float] = (0.0, 0.0, 0.53)
-
-    # Moving-average action smoothing (hardcoded in the pretrained rollout loop;
-    # documented here so a future training port can parametrize them).
-    hand_moving_average: float = 0.1
-    arm_moving_average: float = 0.1
-    dof_speed_scale: float = 1.5
-
-    # Keypoint reward / success-detection thresholds (from SimToolReal.yaml).
-    keypoint_scale: float = 1.5
-    target_success_tolerance: float = 0.01
-    success_steps: int = 10
+__all__ = ["SimToolRealEnv", "SimToolRealEnvCfg"]
 
 
 class SimToolRealEnv(DirectRLEnv):
-    """Stub DirectRLEnv for registry parity. Not usable for training yet.
-
-    The pretrained policy rollout is driven by ``play_simtoolreal.py``, which
-    bypasses the gym API and drives the scene directly via
-    ``isaacsim_conversion.IsaacSimEnv``. That path is the one validated to work
-    against the checkpoint shipped in ``pretrained_policy/model.pth``.
-    """
-
     cfg: SimToolRealEnvCfg
 
-    def __init__(self, cfg: SimToolRealEnvCfg, render_mode: str | None = None, **kwargs):
-        raise NotImplementedError(
-            "SimToolRealEnv's training path is not yet ported. "
-            "Use isaacsimenvs.tasks.simtoolreal.play_simtoolreal for pretrained-policy inference."
+    def __init__(
+        self, cfg: SimToolRealEnvCfg, render_mode: str | None = None, **kwargs
+    ) -> None:
+        # Override obs/state space from configured field lists before
+        # DirectRLEnv / rl_games observes the configclass.
+        cfg.observation_space = compute_obs_dim(cfg.obs.obs_list)
+        cfg.state_space = compute_obs_dim(cfg.obs.state_list)
+
+        super().__init__(cfg, render_mode, **kwargs)  # runs _setup_scene
+        allocate_state_buffers(self)
+
+    def _setup_scene(self) -> None:
+        setup_scene(self)
+
+    def _pre_physics_step(self, actions: torch.Tensor) -> None:
+        apply_action_pipeline(self, actions)
+        apply_wrench_dr(self)
+
+    def _apply_action(self) -> None:
+        # Called decimation times per policy step; idempotent.
+        self.robot.set_joint_position_target(self._cur_targets)
+
+    def _get_observations(self) -> dict[str, torch.Tensor]:
+        return build_observations(self)
+
+    def _get_rewards(self) -> torch.Tensor:
+        return compute_rewards(self)
+
+    def _get_dones(self) -> tuple[torch.Tensor, torch.Tensor]:
+        update_tolerance_curriculum(self)
+        compute_intermediate_values(self)
+        return compute_terminations(self)
+
+    def _reset_idx(self, env_ids) -> None:
+        if env_ids is None:
+            env_ids = torch.arange(self.num_envs, device=self.device)
+        super()._reset_idx(env_ids)
+        reset_env_state(
+            self,
+            torch.as_tensor(env_ids, device=self.device, dtype=torch.long),
         )
-
-    def _setup_scene(self):
-        raise NotImplementedError
-
-    def _pre_physics_step(self, actions):
-        raise NotImplementedError
-
-    def _apply_action(self):
-        raise NotImplementedError
-
-    def _get_observations(self):
-        raise NotImplementedError
-
-    def _get_rewards(self):
-        raise NotImplementedError
-
-    def _get_dones(self):
-        raise NotImplementedError
-
-    def _reset_idx(self, env_ids):
-        raise NotImplementedError

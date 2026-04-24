@@ -1,18 +1,19 @@
-# SimToolReal rl_games PPO config — LSTM Asymmetric baseline.
+# SimToolReal rl_games SAPG config — LSTM Asymmetric SAPG (DEFAULT train cfg).
 #
-# Ported from isaacgymenvs/cfg/train/SimToolRealLSTMAsymmetricPPO.yaml (which
-# extends SimToolRealPPO.yaml). Non-SAPG variant — SAPG lives in SimToolRealSAPG.yaml
-# and is the default train config for this task (see __init__.py).
+# SAPG is not a separate algorithm in our vendored rl_games fork — it's PPO
+# with a flag overlay on a2c_common.py (matches CartpoleSAPG.yaml pattern).
+# Activates via:
+#   use_others_experience=lf, expl_type=mixed_expl_learn_param,
+#   expl_coef_block_size, expl_reward_coef_scale, fixed_sigma=coef_cond.
 #
-# Network: 4×MLP [1024, 1024, 512, 512] + LSTM (units=1024, layers=1,
-# before_mlp=True, layer_norm=True). Asymmetric actor-critic via
-# central_value_config, with its own 4×MLP [1024, 1024, 512, 512].
+# Backbone (MLP [1024,1024,512,512] + LSTM 1024 + asymmetric central_value_config)
+# is identical to SimToolRealPPO.yaml; only the SAPG-specific fields differ.
 #
-# Placeholders resolved at runtime / in Phase D:
-#   - num_actors pulls from env.scene.num_envs via Hydra interpolation
-#   - central_value_config.network.mlp.input_shape — rl_games infers from
-#     state_space once SimToolRealEnv._get_observations returns
-#     {"policy", "critic"} (Phase D).
+# Constraint: num_envs % expl_coef_block_size == 0. With legacy default
+# expl_coef_block_size=4096, num_envs must be a multiple of 4096
+# (e.g. 8192 or 24576 both valid).
+#
+# Placeholders resolved at runtime / in Phase D (same as SimToolRealPPO.yaml).
 
 params:
   seed: 42
@@ -39,7 +40,7 @@ params:
         sigma_init:
           name: const_initializer
           val: 0
-        fixed_sigma: 'fixed'   # our fork needs a string ('fixed' | 'coef_cond' | 'obs_cond'), not bool
+        fixed_sigma: coef_cond    # SAPG requires coef_cond (not 'fixed')
     mlp:
       units: [1024, 1024, 512, 512]
       activation: elu
@@ -60,7 +61,7 @@ params:
 
   config:
     # Must start with `<int>_` — our vendored rl_games parses policy_idx from the prefix.
-    name: 0_simtoolreal
+    name: 0_simtoolreal_sapg
     full_experiment_name: ${.name}
     env_name: rlgpu
     device: 'cuda:0'
@@ -119,10 +120,14 @@ params:
           regularizer:
             name: None
 
-    # Required by our vendored rl_games fork (a2c_common.py:398 does an unguarded
-    # .startswith on expl_type). PPO stays "none"; SAPG overrides to mixed_expl_*.
-    expl_type: none
-    use_others_experience: none
+    # === SAPG ===
+    use_others_experience: lf
+    off_policy_ratio: 1.0
+    expl_type: mixed_expl_learn_param
+    expl_reward_type: entropy
+    expl_reward_coef_embd_size: 32
+    expl_reward_coef_scale: 0.005
+    expl_coef_block_size: 4096
 
     player:
       deterministic: False

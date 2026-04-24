@@ -1,0 +1,617 @@
+"""Scene-setup helpers for SimToolRealEnv._setup_scene.
+
+Isolates:
+  - Per-joint PD gain tables (arm + hand, 29 DOFs total), default arm pose.
+  - Body/joint name constants used for downstream lookups.
+  - ArticulationCfg / RigidObjectCfg builders for robot and table.
+  - Per-env distinct-USD spawning via MultiUsdFileCfg (one of the procedural
+    handle-head USDs is bound into each env's Object + GoalViz).
+  - Physics-material attachment (default friction + fingertip override).
+
+Gains are taken from isaacsim_conversion/isaacsim_env.py (lines 24-80) — they
+originate in isaacgymenvs/tasks/simtoolreal/utils.py and were verified to work
+with the pretrained checkpoint via the bit-exact rollout path. ImplicitActuatorCfg
+runs its own implicit PD on top of the USD, so we pass RAW values here (no
+180/π compensation — that compensation is only needed when routing gains
+through UrdfConverter's joint_drive, which we skip in favor of explicit actuator
+configs).
+"""
+
+from __future__ import annotations
+
+import tempfile
+from typing import Optional
+
+import torch
+
+import isaaclab.sim as sim_utils
+from isaaclab.actuators import ImplicitActuatorCfg
+from isaaclab.assets import Articulation, ArticulationCfg, RigidObject, RigidObjectCfg
+from isaaclab.sim.converters import UrdfConverter, UrdfConverterCfg
+from isaaclab.sim.spawners import UrdfFileCfg
+from isaaclab.sim.spawners.from_files import GroundPlaneCfg, spawn_ground_plane
+from isaaclab.sim.spawners.wrappers import MultiUsdFileCfg
+from isaaclab.sim.schemas import (
+    ArticulationRootPropertiesCfg,
+    CollisionPropertiesCfg,
+    RigidBodyPropertiesCfg,
+)
+from isaaclab.sim.spawners.materials import RigidBodyMaterialCfg
+from isaaclab.sim.utils import (
+    bind_physics_material,
+    find_matching_prim_paths,
+    get_current_stage,
+)
+
+from .generate_objects import generate_handle_head_urdfs
+
+
+# ----------------------------------------------------------------------------
+# Joint names / regexes / body names
+# ----------------------------------------------------------------------------
+
+
+ARM_JOINT_REGEX = "iiwa14_joint_.*"
+HAND_JOINT_REGEX = "left_.*"
+
+
+# Canonical 29-DOF joint order from the legacy isaacgymenvs training pipeline
+# (isaacgymenvs/utils/observation_action_utils_sharpa.py:51). The pretrained
+# policy and any external code (deployment/, isaacsim_conversion/) consume
+# joint tensors in THIS order — depth-first per finger, with `left_1`..`left_5`
+# prefixes inserted into the URDF so isaacgym's alphabetical sort lands on it.
+#
+# Isaac Lab's articulation parser uses a different order (breadth-first across
+# fingers: all MCP_FE → all MCP_AA → all PIP → all DIP). The env reads/writes
+# joint tensors in Lab order internally and converts to/from this canonical
+# order at the policy I/O boundary — see action_utils.apply_action_pipeline
+# and obs_utils.build_observations.
+JOINT_NAMES_CANONICAL: tuple[str, ...] = (
+    "iiwa14_joint_1", "iiwa14_joint_2", "iiwa14_joint_3", "iiwa14_joint_4",
+    "iiwa14_joint_5", "iiwa14_joint_6", "iiwa14_joint_7",
+    "left_1_thumb_CMC_FE", "left_thumb_CMC_AA", "left_thumb_MCP_FE",
+    "left_thumb_MCP_AA", "left_thumb_IP",
+    "left_2_index_MCP_FE", "left_index_MCP_AA", "left_index_PIP",
+    "left_index_DIP",
+    "left_3_middle_MCP_FE", "left_middle_MCP_AA", "left_middle_PIP",
+    "left_middle_DIP",
+    "left_4_ring_MCP_FE", "left_ring_MCP_AA", "left_ring_PIP",
+    "left_ring_DIP",
+    "left_5_pinky_CMC", "left_pinky_MCP_FE", "left_pinky_MCP_AA",
+    "left_pinky_PIP", "left_pinky_DIP",
+)
+assert len(JOINT_NAMES_CANONICAL) == 29
+PALM_BODY_NAME = "iiwa14_link_7"
+# Fingertip body = the merged DP link. Both Isaac Lab and isaacgym
+# collapse the DP / elastomer / fingertip chain when merge=True (the
+# default we keep), so DP holds the merged body. There is a small (~2mm)
+# parser drift between the two sims on the merged body's anchor — see
+# dextoolbench/diff_simtoolreal_obs.py and STATUS.md. Switching merge=False
+# bypasses that drift but creates a worse problem (different inertia
+# aggregation between sims).
+FINGERTIP_BODY_REGEX = "left_(index|middle|ring|thumb|pinky)_DP"
+FINGERTIP_LINK_NAMES: tuple[str, ...] = (
+    "left_index_DP",
+    "left_middle_DP",
+    "left_ring_DP",
+    "left_thumb_DP",
+    "left_pinky_DP",
+)
+
+
+# ----------------------------------------------------------------------------
+# Per-joint PD gains (verified with pretrained checkpoint)
+# ----------------------------------------------------------------------------
+
+
+ARM_JOINT_STIFFNESS: dict[str, float] = {
+    "iiwa14_joint_1": 600.0,
+    "iiwa14_joint_2": 600.0,
+    "iiwa14_joint_3": 500.0,
+    "iiwa14_joint_4": 400.0,
+    "iiwa14_joint_5": 200.0,
+    "iiwa14_joint_6": 200.0,
+    "iiwa14_joint_7": 200.0,
+}
+
+ARM_JOINT_DAMPING: dict[str, float] = {
+    "iiwa14_joint_1": 27.027026473513512,
+    "iiwa14_joint_2": 27.027026473513512,
+    "iiwa14_joint_3": 24.672186769721083,
+    "iiwa14_joint_4": 22.067474708266914,
+    "iiwa14_joint_5": 9.752538131173853,
+    "iiwa14_joint_6": 9.147747263670984,
+    "iiwa14_joint_7": 9.147747263670984,
+}
+
+HAND_JOINT_STIFFNESS: dict[str, float] = {
+    # Thumb (5 DOF)
+    "left_1_thumb_CMC_FE": 6.95, "left_thumb_CMC_AA": 13.2,
+    "left_thumb_MCP_FE": 4.76, "left_thumb_MCP_AA": 6.62, "left_thumb_IP": 0.9,
+    # Index (4 DOF)
+    "left_2_index_MCP_FE": 4.76, "left_index_MCP_AA": 6.62,
+    "left_index_PIP": 0.9, "left_index_DIP": 0.9,
+    # Middle (4 DOF)
+    "left_3_middle_MCP_FE": 4.76, "left_middle_MCP_AA": 6.62,
+    "left_middle_PIP": 0.9, "left_middle_DIP": 0.9,
+    # Ring (4 DOF)
+    "left_4_ring_MCP_FE": 4.76, "left_ring_MCP_AA": 6.62,
+    "left_ring_PIP": 0.9, "left_ring_DIP": 0.9,
+    # Pinky (5 DOF)
+    "left_5_pinky_CMC": 1.38, "left_pinky_MCP_FE": 4.76,
+    "left_pinky_MCP_AA": 6.62, "left_pinky_PIP": 0.9, "left_pinky_DIP": 0.9,
+}
+
+HAND_JOINT_DAMPING: dict[str, float] = {
+    "left_1_thumb_CMC_FE": 0.28676845, "left_thumb_CMC_AA": 0.40845109,
+    "left_thumb_MCP_FE": 0.20394083, "left_thumb_MCP_AA": 0.24044435,
+    "left_thumb_IP": 0.04190723,
+    "left_2_index_MCP_FE": 0.20859232, "left_index_MCP_AA": 0.24595532,
+    "left_index_PIP": 0.04243185, "left_index_DIP": 0.03504461,
+    "left_3_middle_MCP_FE": 0.2085923, "left_middle_MCP_AA": 0.24595532,
+    "left_middle_PIP": 0.04243185, "left_middle_DIP": 0.03504461,
+    "left_4_ring_MCP_FE": 0.20859226, "left_ring_MCP_AA": 0.24595528,
+    "left_ring_PIP": 0.04243183, "left_ring_DIP": 0.0350446,
+    "left_5_pinky_CMC": 0.02782345, "left_pinky_MCP_FE": 0.20859229,
+    "left_pinky_MCP_AA": 0.24595528, "left_pinky_PIP": 0.04243183,
+    "left_pinky_DIP": 0.0350446,
+}
+
+assert len(ARM_JOINT_STIFFNESS) == 7 and len(ARM_JOINT_DAMPING) == 7
+assert len(HAND_JOINT_STIFFNESS) == 22 and len(HAND_JOINT_DAMPING) == 22
+
+
+# Proven-working default arm pose (isaacsim_conversion/isaacsim_env.py:101-109).
+ARM_DEFAULT_JOINT_POS: dict[str, float] = {
+    "iiwa14_joint_1": -1.571,
+    "iiwa14_joint_2": 1.571,
+    "iiwa14_joint_3": 0.0,
+    "iiwa14_joint_4": 1.376,
+    "iiwa14_joint_5": 0.0,
+    "iiwa14_joint_6": 1.485,
+    "iiwa14_joint_7": 1.308,
+}
+
+
+# ----------------------------------------------------------------------------
+# Cfg builders
+# ----------------------------------------------------------------------------
+
+
+def build_robot_articulation_cfg(assets_cfg, usd_dir: str | None = None) -> ArticulationCfg:
+    """Assemble the IIWA14 + SHARPA hand `ArticulationCfg`.
+
+    Robot is fixed-base, gravity disabled, self-collisions off. Joint drives use
+    explicit `ImplicitActuatorCfg` groups so the USD-level drive (whatever
+    UrdfConverter produces) is not relied on.
+
+    `usd_dir` overrides Isaac Lab's default `/tmp/IsaacLab/usd_<ts>_<id>`
+    cache — required on shared filesystems where the default parent dir is
+    owned by whichever user ran first and others hit EACCES.
+    """
+    return ArticulationCfg(
+        prim_path="/World/envs/env_.*/Robot",
+        spawn=UrdfFileCfg(
+            asset_path=assets_cfg.robot_urdf,
+            usd_dir=usd_dir,
+            fix_base=True,
+            merge_fixed_joints=True,
+            self_collision=False,
+            # make_instanceable=False so per-link material binding (fingertip
+            # friction override) can reach individual collider prims under
+            # /World/envs/env_*/Robot/<link>/collisions.
+            make_instanceable=False,
+            # ImplicitActuatorCfg below runs the PD controller; the USD-level
+            # joint drive is therefore irrelevant. Set to None so UrdfConverter
+            # doesn't demand stiffness values.
+            joint_drive=None,
+            rigid_props=RigidBodyPropertiesCfg(
+                disable_gravity=True,
+                max_depenetration_velocity=1000.0,
+            ),
+            collision_props=CollisionPropertiesCfg(
+                contact_offset=0.002,
+                rest_offset=0.0,
+            ),
+            articulation_props=ArticulationRootPropertiesCfg(
+                enabled_self_collisions=False,
+                solver_position_iteration_count=8,
+                solver_velocity_iteration_count=0,
+            ),
+        ),
+        init_state=ArticulationCfg.InitialStateCfg(
+            pos=(0.0, 0.8, 0.0),
+            rot=(1.0, 0.0, 0.0, 0.0),
+            joint_pos={
+                **ARM_DEFAULT_JOINT_POS,
+                **{name: 0.0 for name in HAND_JOINT_STIFFNESS},
+            },
+            joint_vel={".*": 0.0},
+        ),
+        actuators={
+            "arm": ImplicitActuatorCfg(
+                joint_names_expr=[ARM_JOINT_REGEX],
+                stiffness=ARM_JOINT_STIFFNESS,
+                damping=ARM_JOINT_DAMPING,
+            ),
+            "hand": ImplicitActuatorCfg(
+                joint_names_expr=[HAND_JOINT_REGEX],
+                stiffness=HAND_JOINT_STIFFNESS,
+                damping=HAND_JOINT_DAMPING,
+            ),
+        },
+    )
+
+
+def build_table_rigid_object_cfg(
+    assets_cfg, z: float, usd_dir: str | None = None
+) -> RigidObjectCfg:
+    """Table as a static (kinematic) rigid body at world height `z`.
+
+    fix_base=False on purpose: with fix_base=True, UrdfConverter inserts a
+    fixed PhysicsJoint between world and the base link, which PhysX rejects
+    as a "joint between static bodies" once each env owns its own copy of
+    the prim (the legacy instance-proxy flow swallowed the error). The
+    kinematic_enabled rigid prop is what actually pins the table in place
+    — kinematic bodies don't fall under gravity and only move when their
+    pose is explicitly written, so we don't need the URDF root joint.
+    """
+    return RigidObjectCfg(
+        prim_path="/World/envs/env_.*/Table",
+        spawn=UrdfFileCfg(
+            asset_path=assets_cfg.table_urdf,
+            usd_dir=usd_dir,
+            fix_base=False,
+            merge_fixed_joints=True,
+            make_instanceable=False,
+            joint_drive=None,
+            rigid_props=RigidBodyPropertiesCfg(
+                kinematic_enabled=True,
+                disable_gravity=True,
+            ),
+            collision_props=CollisionPropertiesCfg(
+                contact_offset=0.002,
+                rest_offset=0.0,
+            ),
+            articulation_props=ArticulationRootPropertiesCfg(articulation_enabled=False),
+        ),
+        init_state=RigidObjectCfg.InitialStateCfg(
+            pos=(0.0, 0.0, z),
+            rot=(1.0, 0.0, 0.0, 0.0),
+        ),
+    )
+
+
+# ----------------------------------------------------------------------------
+# Per-env distinct-USD object cfg builders (MultiUsdFileCfg cycling)
+# ----------------------------------------------------------------------------
+
+
+def build_object_rigid_object_cfg(usd_paths: list[str]) -> RigidObjectCfg:
+    """Dynamic Object cfg — MultiUsdFileCfg cycles `usd_paths` across envs.
+
+    With InteractiveSceneCfg.replicate_physics=False, the env xforms exist
+    before _setup_scene runs. spawn_multi_usd_file then resolves the regex
+    prim_path to all env_* prims and copies a different proto USD into each
+    via deterministic cycling (env at source-prim-path index `i` receives
+    `usd_paths[i % len(usd_paths)]`).
+
+    articulation_props=articulation_enabled=False is required: UrdfConverter
+    authors an ArticulationRootAPI on single-link URDFs even with
+    fix_base=False, and when each env owns an independent copy of the prim
+    PhysX treats them all as top-level articulations — the resulting
+    per-env articulation count collides with the RigidObject view's
+    expectation of num_envs plain rigid bodies and triggers a device-side
+    assert inside GpuRigidBodyView during set_transforms. The legacy
+    instance-proxy flow dodged this because articulation parsing was
+    deferred on inherited prims.
+    """
+    return RigidObjectCfg(
+        prim_path="/World/envs/env_.*/Object",
+        spawn=MultiUsdFileCfg(
+            usd_path=list(usd_paths),
+            random_choice=False,
+            rigid_props=RigidBodyPropertiesCfg(
+                kinematic_enabled=False,
+                disable_gravity=False,
+                max_depenetration_velocity=1000.0,
+            ),
+            collision_props=CollisionPropertiesCfg(
+                contact_offset=0.002,
+                rest_offset=0.0,
+            ),
+            articulation_props=ArticulationRootPropertiesCfg(articulation_enabled=False),
+        ),
+    )
+
+
+def build_goal_viz_rigid_object_cfg(usd_paths: list[str]) -> RigidObjectCfg:
+    """Kinematic visual twin of Object — same cycling, gravity disabled."""
+    return RigidObjectCfg(
+        prim_path="/World/envs/env_.*/GoalViz",
+        spawn=MultiUsdFileCfg(
+            usd_path=list(usd_paths),
+            random_choice=False,
+            rigid_props=RigidBodyPropertiesCfg(
+                kinematic_enabled=True,
+                disable_gravity=True,
+            ),
+            collision_props=CollisionPropertiesCfg(
+                contact_offset=0.002,
+                rest_offset=0.0,
+            ),
+            articulation_props=ArticulationRootPropertiesCfg(articulation_enabled=False),
+        ),
+    )
+
+
+# ----------------------------------------------------------------------------
+# Physics materials (default friction + fingertip override)
+# ----------------------------------------------------------------------------
+
+
+def _iter_collision_prim_paths(root_prim_path: str) -> list[str]:
+    """Collect every collider prim under a root (children named 'collisions')."""
+    stage = get_current_stage()
+    root = stage.GetPrimAtPath(root_prim_path)
+    if not root.IsValid():
+        return []
+    paths: list[str] = []
+    stack = [root]
+    while stack:
+        prim = stack.pop()
+        if prim.GetName() == "collisions":
+            paths.append(str(prim.GetPath()))
+        stack.extend(list(prim.GetChildren()))
+    return paths
+
+
+def _bind_material(material_path: str, collider_paths: list[str]) -> None:
+    """Bind a material prim to a list of collider prims (unwrapping decorators)."""
+    fn = getattr(bind_physics_material, "__wrapped__", bind_physics_material)
+    for collider in collider_paths:
+        fn(collider, material_path)
+
+
+_DEFAULT_MATERIAL_PATH = "/World/PhysicsMaterials/simtoolreal_default"
+_FINGERTIP_MATERIAL_PATH = "/World/PhysicsMaterials/simtoolreal_fingertip"
+
+
+def author_physics_materials(assets_cfg) -> None:
+    """Author the two shared material prims once (idempotent)."""
+    if not assets_cfg.modify_asset_frictions:
+        return
+    default_cfg = RigidBodyMaterialCfg(
+        static_friction=assets_cfg.robot_friction,
+        dynamic_friction=assets_cfg.robot_friction,
+        restitution=0.0,
+    )
+    default_cfg.func(_DEFAULT_MATERIAL_PATH, default_cfg)
+    fingertip_cfg = RigidBodyMaterialCfg(
+        static_friction=assets_cfg.finger_tip_friction,
+        dynamic_friction=assets_cfg.finger_tip_friction,
+        restitution=0.0,
+    )
+    fingertip_cfg.func(_FINGERTIP_MATERIAL_PATH, fingertip_cfg)
+
+
+def _split_fingertip_colliders(
+    robot_colliders: list[str], robot_prim_root: str
+) -> tuple[list[str], list[str]]:
+    """Partition robot collider paths into (fingertip, non-fingertip)."""
+    prefix = robot_prim_root.rstrip("/") + "/"
+    fingertip, non_fingertip = [], []
+    for path in robot_colliders:
+        if not path.startswith(prefix):
+            non_fingertip.append(path)
+            continue
+        # path = {robot_prim_root}/<link>/<sub...>/collisions
+        rel = path[len(prefix):]
+        link_name = rel.split("/", 1)[0]
+        if link_name in FINGERTIP_LINK_NAMES:
+            fingertip.append(path)
+        else:
+            non_fingertip.append(path)
+    return fingertip, non_fingertip
+
+
+def bind_physics_materials_for_env(
+    *,
+    robot_prim_root: str,
+    table_prim_root: str,
+    object_prim_root: str,
+    goal_viz_prim_root: Optional[str],
+    assets_cfg,
+) -> None:
+    """Bind the shared materials to one env's colliders.
+
+    Authors materials via ``author_physics_materials`` must have been called
+    once beforehand (outside the per-env loop). This is the per-env half of
+    the original isaacsim_conversion pattern at isaacsim_env.py:370-403.
+    """
+    if not assets_cfg.modify_asset_frictions:
+        return
+
+    robot_colliders = _iter_collision_prim_paths(robot_prim_root)
+    fingertip_colliders, robot_non_fingertip = _split_fingertip_colliders(
+        robot_colliders, robot_prim_root
+    )
+    table_colliders = _iter_collision_prim_paths(table_prim_root)
+    object_colliders = _iter_collision_prim_paths(object_prim_root)
+    goal_viz_colliders = (
+        _iter_collision_prim_paths(goal_viz_prim_root) if goal_viz_prim_root else []
+    )
+    _bind_material(
+        _DEFAULT_MATERIAL_PATH,
+        robot_non_fingertip + table_colliders + object_colliders + goal_viz_colliders,
+    )
+    if fingertip_colliders:
+        _bind_material(_FINGERTIP_MATERIAL_PATH, fingertip_colliders)
+
+
+# ----------------------------------------------------------------------------
+# Scene orchestrator (Phase B)
+# ----------------------------------------------------------------------------
+
+
+def setup_scene(env) -> None:
+    """Top-level ``_setup_scene`` body — spawns robot, table, per-env
+    distinct-USD object + goal-viz, ground plane + lighting, and binds
+    physics materials.
+
+    Mutates env: sets ``env.robot``, ``env.table``, ``env.object``,
+    ``env.goal_viz``, ``env._object_scale_per_env``, ``env._tmp_asset_dir``.
+    Also registers the assets with ``env.scene`` so the framework refreshes
+    their tensors each step.
+
+    Cloning model: ``InteractiveSceneCfg.replicate_physics=False`` is set
+    so PhysX parses each env independently (required for MultiUsdFileCfg's
+    distinct per-env meshes). InteractiveScene only creates env_0 by
+    default and its built-in clone_environments() is a no-op against an
+    empty source, so we materialize env_1..env_{N-1} as empty Xform prims
+    ourselves. Each spawner below (Robot/Table via ``@clone``,
+    Object/GoalViz via ``MultiUsdFileCfg``) then resolves its regex
+    prim_path against all env_* and fills them in.
+    """
+    assets_cfg = env.cfg.assets
+
+    # 1. Generate procedural URDFs (100 per handle-head type by default).
+    env._tmp_asset_dir = tempfile.mkdtemp(prefix="simtoolreal_assets_")
+    urdf_paths, object_scales_normalized = generate_handle_head_urdfs(
+        handle_head_types=tuple(assets_cfg.handle_head_types),
+        num_per_type=assets_cfg.num_assets_per_type,
+        out_dir=env._tmp_asset_dir,
+    )
+
+    # 2. Force-convert URDFs → USDs. force_usd_conversion=True regenerates
+    #    every launch for determinism. joint_drive=None since procedural
+    #    objects have no joints. usd_dir routes the per-converter cache to
+    #    the per-process tmpdir instead of Isaac Lab's default /tmp/IsaacLab,
+    #    which collides on shared hosts (the default parent dir is
+    #    created by whichever user runs first and other users hit EACCES).
+    usd_paths: list[str] = []
+    for urdf in urdf_paths:
+        converter = UrdfConverter(
+            UrdfConverterCfg(
+                asset_path=urdf,
+                usd_dir=env._tmp_asset_dir,
+                fix_base=False,
+                merge_fixed_joints=True,
+                force_usd_conversion=True,
+                make_instanceable=False,
+                joint_drive=None,
+            )
+        )
+        usd_paths.append(converter.usd_path)
+
+    # 3. Pre-create empty env_1..env_{N-1} Xform prims so subsequent regex
+    #    spawns (Robot/Table via @clone, Object/GoalViz via MultiUsdFileCfg)
+    #    resolve to all envs. InteractiveScene only creates env_0 by
+    #    default, and its clone_environments() with replicate_physics=False
+    #    is a no-op against an empty source — so we materialize the prims
+    #    here ourselves and let each spawner fill them in.
+    stage = get_current_stage()
+    for env_path in env.scene.env_prim_paths:
+        if not stage.GetPrimAtPath(env_path).IsValid():
+            stage.DefinePrim(env_path, "Xform")
+
+    # 4. Robot + table — homogeneous regex spawn. The @clone-decorated
+    #    UrdfFileCfg spawner now resolves the regex to all env_* prims and
+    #    writes a copy of the converted USD into each. usd_dir routes the
+    #    converter's USD cache to the per-process tmpdir (avoids the
+    #    /tmp/IsaacLab shared-host EACCES).
+    env.robot = Articulation(
+        build_robot_articulation_cfg(assets_cfg, usd_dir=env._tmp_asset_dir)
+    )
+    env.table = RigidObject(
+        build_table_rigid_object_cfg(
+            assets_cfg, z=env.cfg.reset.table_reset_z, usd_dir=env._tmp_asset_dir,
+        )
+    )
+
+    # 5. Object + GoalViz — per-env distinct USDs via MultiUsdFileCfg.
+    #    Deterministic cycling: env at source-prim-path index i receives
+    #    usd_paths[i % len(usd_paths)]. Per-env size variability still gets
+    #    further multiplied at runtime by the `_object_scale_multiplier` DR
+    #    knob (applied to keypoint offsets and object_scales obs).
+    env.object = RigidObject(build_object_rigid_object_cfg(usd_paths))
+    env.goal_viz = RigidObject(build_goal_viz_rigid_object_cfg(usd_paths))
+
+    # 6. Ground plane + dome light (global, outside env_*).
+    spawn_ground_plane(prim_path="/World/ground", cfg=GroundPlaneCfg())
+    light_cfg = sim_utils.DomeLightCfg(intensity=2000.0, color=(0.75, 0.75, 0.75))
+    light_cfg.func("/World/Light", light_cfg)
+
+    # 7. Filter cross-env collisions against the global ground prim. With
+    #    replicate_physics=False the scene doesn't auto-filter, so we call
+    #    explicitly. (filter_collisions is required on CPU; on GPU it's
+    #    still safer to scope ground-vs-env collisions.)
+    if env.device == "cpu":
+        env.scene.filter_collisions(global_prim_paths=["/World/ground"])
+
+    # 8. Build per-env scale tensor by parsing env_K from each spawned
+    #    Object prim path. spawn_multi_asset iterates the regex-matched
+    #    source_prim_paths with `index % len(usd_paths)` cycling, so the
+    #    source_idx → usd_idx mapping is direct; we then store the scale
+    #    indexed by env_id (parsed from ".../env_K/Object").
+    num_envs = env.num_envs
+    object_prim_paths = find_matching_prim_paths("/World/envs/env_.*/Object")
+    if len(object_prim_paths) != num_envs:
+        raise RuntimeError(
+            f"Expected {num_envs} Object prims after MultiUsdFileCfg spawn, "
+            f"got {len(object_prim_paths)}. Cloner-drop bug may have returned."
+        )
+    # object_scales_normalized[i] is a (sx, sy, sz) 3-tuple, so the
+    # per-env tensor is shape (N, 3) — matches the legacy `torch.tensor(
+    # [scales[chosen]] * N)` allocation that downstream obs/reward code
+    # expects.
+    env._object_scale_per_env = torch.zeros(
+        num_envs, 3, device=env.device, dtype=torch.float32
+    )
+    for source_idx, obj_path in enumerate(object_prim_paths):
+        env_segment = obj_path.rsplit("/", 2)[-2]  # ".../env_K/Object" → "env_K"
+        env_id = int(env_segment.removeprefix("env_"))
+        env._object_scale_per_env[env_id] = torch.tensor(
+            object_scales_normalized[source_idx % len(usd_paths)],
+            device=env.device,
+            dtype=torch.float32,
+        )
+
+    # 9. Register with scene so DirectRLEnv refreshes their tensors each step.
+    env.scene.articulations["robot"] = env.robot
+    env.scene.rigid_objects["table"] = env.table
+    env.scene.rigid_objects["object"] = env.object
+    env.scene.rigid_objects["goal_viz"] = env.goal_viz
+
+    # 10. Physics materials: author once, bind per env.
+    author_physics_materials(assets_cfg)
+    for env_id in range(num_envs):
+        bind_physics_materials_for_env(
+            robot_prim_root=f"/World/envs/env_{env_id}/Robot",
+            table_prim_root=f"/World/envs/env_{env_id}/Table",
+            object_prim_root=f"/World/envs/env_{env_id}/Object",
+            goal_viz_prim_root=f"/World/envs/env_{env_id}/GoalViz",
+            assets_cfg=assets_cfg,
+        )
+
+
+__all__ = [
+    "ARM_JOINT_REGEX",
+    "HAND_JOINT_REGEX",
+    "JOINT_NAMES_CANONICAL",
+    "PALM_BODY_NAME",
+    "FINGERTIP_BODY_REGEX",
+    "FINGERTIP_LINK_NAMES",
+    "ARM_JOINT_STIFFNESS",
+    "ARM_JOINT_DAMPING",
+    "HAND_JOINT_STIFFNESS",
+    "HAND_JOINT_DAMPING",
+    "ARM_DEFAULT_JOINT_POS",
+    "build_robot_articulation_cfg",
+    "build_table_rigid_object_cfg",
+    "build_object_rigid_object_cfg",
+    "build_goal_viz_rigid_object_cfg",
+    "author_physics_materials",
+    "bind_physics_materials_for_env",
+    "setup_scene",
+]

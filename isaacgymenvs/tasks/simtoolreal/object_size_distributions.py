@@ -107,27 +107,35 @@ OBJECT_SIZE_DISTRIBUTIONS: List[ObjectSizeDistribution] = [
     #         (y) [5cm, 12cm]
     #         (z) [2cm, 6cm]
     #         (shape) box
+    # NOTE: min == max so np.random.uniform is deterministic — keeps this
+    # legacy isaacgymenvs pool and the isaacsimenvs port emitting
+    # byte-equivalent first-asset URDFs for side-by-side obs diffing
+    # (dextoolbench/diff_simtoolreal_obs.py). Restore range when retraining.
     ObjectSizeDistribution(
         type="hammer",
-        handle_min_lengths=(0.15, 0.02, 0.015),  # Box
-        handle_max_lengths=(0.3, 0.04, 0.03),
-        head_min_lengths=(0.02, 0.05, 0.02),
-        head_max_lengths=(0.06, 0.12, 0.06),
-        handle_min_density=LOW_DENSITY_MIN,
-        handle_max_density=LOW_DENSITY_MAX,
-        head_min_density=HIGH_DENSITY_MIN,
-        head_max_density=HIGH_DENSITY_MAX,
+        # Box handle 3D-equal to the cylinder variant's expanded form
+        # (h, d, d) = (0.225, 0.0225, 0.0225) so shuffle order between the
+        # two hammer entries doesn't change the normalized scale.
+        handle_min_lengths=(0.225, 0.0225, 0.0225),  # Box (collapsed for diff)
+        handle_max_lengths=(0.225, 0.0225, 0.0225),
+        head_min_lengths=(0.04, 0.085, 0.04),
+        head_max_lengths=(0.04, 0.085, 0.04),
+        handle_min_density=450.0,
+        handle_max_density=450.0,
+        head_min_density=1400.0,
+        head_max_density=1400.0,
     ),
+    # Hammer — cylinder handle (collapsed for diff — see note above).
     ObjectSizeDistribution(
         type="hammer",
-        handle_min_lengths=(0.15, 0.015),  # Cylinder
-        handle_max_lengths=(0.3, 0.03),
-        head_min_lengths=(0.02, 0.05, 0.02),
-        head_max_lengths=(0.06, 0.12, 0.06),
-        handle_min_density=LOW_DENSITY_MIN,
-        handle_max_density=LOW_DENSITY_MAX,
-        head_min_density=HIGH_DENSITY_MIN,
-        head_max_density=HIGH_DENSITY_MAX,
+        handle_min_lengths=(0.225, 0.0225),  # Cylinder (collapsed for diff)
+        handle_max_lengths=(0.225, 0.0225),
+        head_min_lengths=(0.04, 0.085, 0.04),
+        head_max_lengths=(0.04, 0.085, 0.04),
+        handle_min_density=450.0,
+        handle_max_density=450.0,
+        head_min_density=1400.0,
+        head_max_density=1400.0,
     ),
     # Screwdriver
     # Handle: (x) Lengths are [7cm, 12cm]
