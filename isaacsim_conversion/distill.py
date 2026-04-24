@@ -1265,8 +1265,15 @@ def run_online_dagger(
         metrics["action_rmse"] = float(np.sqrt(max(metrics["action_loss"], 0.0)))
         metrics["aux_object_pos_rmse_m"] = float(np.sqrt(max(metrics["aux_object_pos_loss"], 0.0)))
         _log(
-            f"[online iter {iter_idx + 1}] goal_completion_ratio={metrics['goal_completion_ratio']:.3f}, "
-            f"goal_idx={metrics['goal_idx']:.2f}, action_rmse={metrics['action_rmse']:.3f}, "
+            f"[online iter {iter_idx + 1}] "
+            f"best_goal_completion_ratio={metrics['goal_completion_ratio_best_avg']:.3f}, "
+            f"best_goal_idx={metrics['goal_idx_best_avg']:.2f}, "
+            f"current_goal_completion_ratio={metrics['goal_completion_ratio_current_avg']:.3f}, "
+            f"current_goal_idx={metrics['goal_idx_current_avg']:.2f}, "
+            f"recent_reset_goal_completion_ratio={metrics['recent_reset_goal_completion_ratio_avg']:.3f}, "
+            f"recent_reset_goal_idx={metrics['recent_reset_goal_idx_avg']:.2f}, "
+            f"recent_reset_count={metrics['recent_reset_count']:.0f}, "
+            f"action_rmse={metrics['action_rmse']:.3f}, "
             f"pos_rmse_cm={100.0 * metrics['aux_object_pos_rmse_m']:.2f}, env_steps_s={metrics['env_steps_per_s']:.0f}"
         )
         record_metrics(
@@ -1291,6 +1298,7 @@ def run_online_dagger(
         interval_action_loss[:] = 0
         interval_aux_loss[:] = 0
         interval_start = time.perf_counter()
+        env.clear_recent_reset_metrics()
 
     if capture_viewer and viewer_frames:
         viewer_chunk_idx += 1

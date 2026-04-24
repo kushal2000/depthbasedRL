@@ -188,6 +188,11 @@ class IsaacSimDistillEnv:
         self.near_goal_steps = np.zeros(self.num_envs, dtype=np.int32)
         self.progress_buf = np.zeros(self.num_envs, dtype=np.int32)
         self.lifted_object = np.zeros(self.num_envs, dtype=bool)
+        self.recent_reset_goal_idx_sum = 0.0
+        self.recent_reset_goal_completion_sum = 0.0
+        self.recent_reset_kp_dist_sum = 0.0
+        self.recent_reset_near_goal_steps_sum = 0.0
+        self.recent_reset_count = 0
         self.reset_reason_counts = {
             "object_z_low": 0,
             "time_limit": 0,
@@ -799,6 +804,11 @@ class IsaacSimDistillEnv:
         for key in self.reset_reason_counts:
             self.reset_reason_counts[key] = 0
         self.max_goal_idx[:] = 0
+        self.recent_reset_goal_idx_sum = 0.0
+        self.recent_reset_goal_completion_sum = 0.0
+        self.recent_reset_kp_dist_sum = 0.0
+        self.recent_reset_near_goal_steps_sum = 0.0
+        self.recent_reset_count = 0
         self._reset_envs(torch.arange(self.num_envs, device=self.device, dtype=torch.long))
 
     def _reset_envs(self, env_ids: torch.Tensor, reset_reasons: dict[str, np.ndarray] | None = None):
@@ -978,6 +988,13 @@ class IsaacSimDistillEnv:
         done_env_ids = np.where(done_mask)[0].astype(np.int64)
         if done_env_ids.size == 0:
             return done_env_ids
+        done_goal_idx = self.goal_idx[done_env_ids].astype(np.float32)
+        done_goal_completion = done_goal_idx / len(self.task_spec.goals)
+        self.recent_reset_goal_idx_sum += float(np.sum(done_goal_idx))
+        self.recent_reset_goal_completion_sum += float(np.sum(done_goal_completion))
+        self.recent_reset_kp_dist_sum += float(np.sum(sim_state.kp_dist[done_env_ids]))
+        self.recent_reset_near_goal_steps_sum += float(np.sum(self.near_goal_steps[done_env_ids]))
+        self.recent_reset_count += int(done_env_ids.size)
         reason_subset = {key: mask[done_env_ids] for key, mask in reset_masks.items()}
         self._reset_envs(torch.tensor(done_env_ids, device=self.device, dtype=torch.long), reset_reasons=reason_subset)
         return done_env_ids
@@ -988,12 +1005,37 @@ class IsaacSimDistillEnv:
     def compute_progress_metrics(self, sim_state: SimState) -> dict[str, float]:
         progress_goal_idx = np.maximum(self.goal_idx, self.max_goal_idx)
         goal_completion = progress_goal_idx.astype(np.float32) / len(self.task_spec.goals)
+        current_goal_idx = self.goal_idx.astype(np.float32)
+        current_goal_completion = current_goal_idx / len(self.task_spec.goals)
+        recent_reset_count = max(self.recent_reset_count, 1)
         return {
             "goal_idx": float(np.mean(progress_goal_idx)),
             "goal_completion_ratio": float(np.mean(goal_completion)),
+            "goal_idx_best_avg": float(np.mean(progress_goal_idx)),
+            "goal_completion_ratio_best_avg": float(np.mean(goal_completion)),
+            "goal_idx_current_avg": float(np.mean(current_goal_idx)),
+            "goal_completion_ratio_current_avg": float(np.mean(current_goal_completion)),
             "kp_dist": float(np.mean(sim_state.kp_dist)),
+            "kp_dist_current_avg": float(np.mean(sim_state.kp_dist)),
             "near_goal_steps": float(np.mean(self.near_goal_steps)),
+            "near_goal_steps_current_avg": float(np.mean(self.near_goal_steps)),
+            "recent_reset_goal_idx_avg": float(self.recent_reset_goal_idx_sum / recent_reset_count),
+            "recent_reset_goal_completion_ratio_avg": float(
+                self.recent_reset_goal_completion_sum / recent_reset_count
+            ),
+            "recent_reset_kp_dist_avg": float(self.recent_reset_kp_dist_sum / recent_reset_count),
+            "recent_reset_near_goal_steps_avg": float(
+                self.recent_reset_near_goal_steps_sum / recent_reset_count
+            ),
+            "recent_reset_count": float(self.recent_reset_count),
         }
+
+    def clear_recent_reset_metrics(self) -> None:
+        self.recent_reset_goal_idx_sum = 0.0
+        self.recent_reset_goal_completion_sum = 0.0
+        self.recent_reset_kp_dist_sum = 0.0
+        self.recent_reset_near_goal_steps_sum = 0.0
+        self.recent_reset_count = 0
 
     def reset_dropped_envs(self, sim_state: SimState) -> np.ndarray:
         reset_masks = {"object_z_low": sim_state.object_pose[:, 2] < 0.1}
