@@ -50,6 +50,7 @@ class TaskSpec:
     viewer_object_urdf_path: str | None = None
     viewer_object_github_relpath: str | None = None
     metadata: dict | None = None
+    hole_pose: np.ndarray | None = None
 
 
 REAL_CAMERA_T_W_R = np.eye(4)
@@ -182,6 +183,7 @@ def load_task_spec(
             keypoint_tolerance=float(target_tol) * 1.5,
             camera_pose=default_real_camera_pose(),
             table_pose=np.array([0.0, 0.0, 0.38, 0.0, 0.0, 0.0, 1.0], dtype=np.float32),
+            hole_pose=np.array([0.0, 0.0, 0.38, 0.0, 0.0, 0.0, 1.0], dtype=np.float32),
             viewer_table_urdf_path=table_urdf,
             viewer_object_urdf_path=str(obj_info.urdf_path),
             metadata={
@@ -231,6 +233,7 @@ def load_task_spec(
         keypoint_tolerance=0.015,
         camera_pose=default_real_camera_pose(),
         table_pose=np.array([0.0, 0.0, 0.38, 0.0, 0.0, 0.0, 1.0], dtype=np.float32),
+        hole_pose=None,
         viewer_table_urdf_path=table_urdf,
         viewer_object_github_relpath="assets/urdf/dextoolbench/hammer/claw_hammer/claw_hammer.urdf",
         metadata={"task_source": task_source},

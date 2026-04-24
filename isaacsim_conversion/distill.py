@@ -19,12 +19,15 @@ from isaacgymenvs.utils.observation_action_utils_sharpa import compute_joint_pos
 from isaacsim_conversion.distill_env import IsaacSimDistillEnv
 from isaacsim_conversion.isaacsim_env import CONTROL_DT, _log
 from isaacsim_conversion.interactive_viewer import write_pose_viewer_html
+from isaacsim_conversion.image_robustness import (
+    TrainImageRobustifier,
+    image_robustness_cfg_from_dict,
+    preprocess_policy_images,
+)
 from isaacsim_conversion.student_policy import (
     MLPPolicy,
     MLPRecurrentPolicy,
     MonoTransformerRecurrentPolicy,
-    preprocess_image,
-    resize_image,
 )
 from isaacsim_conversion.task_utils import (
     CameraIntrinsics,
@@ -152,6 +155,11 @@ class DistillSettings:
     object_pos_noise_xyz: tuple[float, float, float] = (0.03, 0.03, 0.01)
     object_yaw_noise_deg: float = 20.0
     object_rotation_noise_mode: str = "yaw"
+    camera_pos_noise_xyz: tuple[float, float, float] = (0.0, 0.0, 0.0)
+    camera_rot_noise_deg: tuple[float, float, float] = (0.0, 0.0, 0.0)
+    hole_pos_noise_xyz: tuple[float, float, float] = (0.0, 0.0, 0.0)
+    hole_yaw_noise_deg: float = 0.0
+    image_robustness: dict | None = None
     monitor_num_envs: int = 0
     monitor_log_window: int = 10
     camera_backend: str = "tiled"
@@ -339,16 +347,46 @@ def compute_subset_progress_metrics(env: IsaacSimDistillEnv, sim_state, mask: np
 
 
 def stack_student_image(student_obs: dict[str, torch.Tensor], modality: str, settings: DistillSettings) -> torch.Tensor:
-    images = student_obs["images"]
-    if modality == "depth":
-        image = preprocess_image(images["depth"], modality)
-    elif modality == "rgb":
-        image = preprocess_image(images["rgb"], modality)
-    elif modality == "rgbd":
-        image = torch.cat([images["rgb"], images["depth"]], dim=1)
-    else:
-        raise ValueError(f"Unsupported modality: {modality}")
-    return resize_image(image, settings.image_height, settings.image_width)
+    preprocess_cfg = image_robustness_cfg_from_dict(settings.image_robustness).preprocess
+    preprocess_cfg.pad_to_size = True
+    image, _ = preprocess_policy_images(
+        student_obs["images"],
+        modality,
+        settings.image_height,
+        settings.image_width,
+        preprocess_cfg,
+    )
+    return image
+
+
+def make_image_robustifier(settings: DistillSettings, env: IsaacSimDistillEnv) -> TrainImageRobustifier | None:
+    cfg = image_robustness_cfg_from_dict(settings.image_robustness)
+    cfg.preprocess.pad_to_size = True
+    if not cfg.enabled:
+        return None
+    return TrainImageRobustifier(cfg=cfg, num_envs=env.num_envs, device=env.device)
+
+
+def build_student_image(
+    student_obs: dict[str, torch.Tensor],
+    modality: str,
+    settings: DistillSettings,
+    image_robustifier: TrainImageRobustifier | None,
+    train: bool,
+    reset_env_ids: torch.Tensor | None = None,
+) -> torch.Tensor:
+    preprocess_cfg = image_robustness_cfg_from_dict(settings.image_robustness).preprocess
+    preprocess_cfg.pad_to_size = True
+    image, processed_images = preprocess_policy_images(
+        student_obs["images"],
+        modality,
+        settings.image_height,
+        settings.image_width,
+        preprocess_cfg,
+    )
+    if train and image_robustifier is not None:
+        _, image = image_robustifier.apply_train_time(processed_images, image, reset_env_ids=reset_env_ids)
+    return image
 
 
 def parse_env_id_list(value: str, num_envs: int) -> list[int]:
@@ -822,6 +860,9 @@ def run_episode(
     episode_start_time = time.perf_counter()
     teacher.reset()
     env.reset()
+    image_robustifier = make_image_robustifier(settings, env) if _args.student_input == "camera" else None
+    if image_robustifier is not None:
+        image_robustifier.reset()
     student_hidden = None if student is None else student.initial_state(batch_size=env.num_envs, device=env.device)
     total_action_loss_per_env = np.zeros(env.num_envs, dtype=np.float64)
     total_aux_loss_per_env = np.zeros(env.num_envs, dtype=np.float64)
@@ -855,7 +896,13 @@ def run_episode(
             student_action = student_out.action
         else:
             student_obs = env.build_student_obs(sim_state, camera_modality=env.camera_modality)
-            student_image = stack_student_image(student_obs, env.camera_modality, settings)
+            student_image = build_student_image(
+                student_obs,
+                env.camera_modality,
+                settings,
+                image_robustifier=image_robustifier,
+                train=mode in ("train", "mixed_eval"),
+            )
             if mode == "train":
                 student_out, student_hidden = student(student_image, student_obs["proprio"], student_hidden)
             else:
@@ -910,6 +957,8 @@ def run_episode(
         reset_env_ids = env.reset_done_envs(next_sim_state)
         if reset_env_ids.size > 0:
             student_hidden = reset_hidden_state(student_hidden, reset_env_ids)
+            if image_robustifier is not None:
+                image_robustifier.reset(torch.as_tensor(reset_env_ids, device=env.device, dtype=torch.long))
             next_sim_state = env.compute_sim_state()
 
         if student_out is None:
@@ -1047,6 +1096,8 @@ def compute_distill_step(
     iter_idx: int | None = None,
     debug_policy_image_stats: bool = False,
     debug_policy_image_stats_env_ids: list[int] | None = None,
+    image_robustifier: TrainImageRobustifier | None = None,
+    reset_env_ids: torch.Tensor | None = None,
 ):
     sim_state = env.compute_sim_state()
     teacher_obs = env.build_teacher_obs(sim_state)
@@ -1064,7 +1115,14 @@ def compute_distill_step(
                 student_out, student_hidden = student(teacher_obs_tensor, student_hidden)
     else:
         student_obs = env.build_student_obs(sim_state, camera_modality=env.camera_modality)
-        student_image = stack_student_image(student_obs, env.camera_modality, settings)
+        student_image = build_student_image(
+            student_obs,
+            env.camera_modality,
+            settings,
+            image_robustifier=image_robustifier,
+            train=train,
+            reset_env_ids=reset_env_ids,
+        )
         if debug_policy_image_stats and run_dir is not None and iter_idx is not None:
             append_debug_policy_image_stats(
                 run_dir=run_dir,
@@ -1126,6 +1184,9 @@ def run_online_dagger(
 ) -> float:
     teacher.reset()
     env.reset()
+    image_robustifier = make_image_robustifier(settings, env) if _args.student_input == "camera" else None
+    if image_robustifier is not None:
+        image_robustifier.reset()
     student_hidden = student.initial_state(batch_size=env.num_envs, device=env.device)
     best_metric = -1.0
     interval_action_loss = np.zeros(env.num_envs, dtype=np.float64)
@@ -1140,6 +1201,7 @@ def run_online_dagger(
         _args.debug_policy_image_stats_env_ids,
         env.num_envs,
     ) if _args.debug_policy_image_stats else []
+    pending_reset_env_ids_t: torch.Tensor | None = None
 
     for iter_idx in range(settings.online_num_iters):
         (
@@ -1166,7 +1228,10 @@ def run_online_dagger(
                 and ((iter_idx + 1) == 1 or (iter_idx + 1) % max(_args.debug_policy_image_stats_stride, 1) == 0)
             ),
             debug_policy_image_stats_env_ids=debug_policy_image_stats_env_ids,
+            image_robustifier=image_robustifier,
+            reset_env_ids=pending_reset_env_ids_t,
         )
+        pending_reset_env_ids_t = None
         accumulated_loss = total_loss if accumulated_loss is None else accumulated_loss + total_loss
         accumulated_steps += 1
         if accumulated_steps >= settings.online_update_interval:
@@ -1232,6 +1297,8 @@ def run_online_dagger(
         reset_env_ids = env.reset_done_envs(next_sim_state)
         if reset_env_ids.size > 0:
             student_hidden = reset_hidden_state(student_hidden, reset_env_ids)
+            if image_robustifier is not None:
+                pending_reset_env_ids_t = torch.as_tensor(reset_env_ids, device=env.device, dtype=torch.long)
 
         action_loss_np = action_loss_per_env.detach().cpu().numpy()
         aux_loss_np = aux_loss_per_env.detach().cpu().numpy()
@@ -1542,6 +1609,10 @@ def main():
         object_pos_noise_xyz=settings.object_pos_noise_xyz,
         object_yaw_noise_deg=settings.object_yaw_noise_deg,
         object_rotation_noise_mode=settings.object_rotation_noise_mode,
+        camera_pos_noise_xyz=settings.camera_pos_noise_xyz,
+        camera_rot_noise_deg=settings.camera_rot_noise_deg,
+        hole_pos_noise_xyz=settings.hole_pos_noise_xyz,
+        hole_yaw_noise_deg=settings.hole_yaw_noise_deg,
         camera_backend=args.camera_backend or settings.camera_backend,
         depth_preprocess_mode=settings.depth_preprocess_mode,
         depth_min_m=settings.depth_min_m,

@@ -133,6 +133,10 @@ class IsaacSimDistillEnv:
         object_pos_noise_xyz: tuple[float, float, float] = (0.03, 0.03, 0.01),
         object_yaw_noise_deg: float = 20.0,
         object_rotation_noise_mode: str = "yaw",
+        camera_pos_noise_xyz: tuple[float, float, float] = (0.0, 0.0, 0.0),
+        camera_rot_noise_deg: tuple[float, float, float] = (0.0, 0.0, 0.0),
+        hole_pos_noise_xyz: tuple[float, float, float] = (0.0, 0.0, 0.0),
+        hole_yaw_noise_deg: float = 0.0,
         enable_camera: bool = True,
         camera_backend: str = "tiled",
         ground_plane_size: float = 500.0,
@@ -151,6 +155,10 @@ class IsaacSimDistillEnv:
         self.object_pos_noise_xyz = np.array(object_pos_noise_xyz, dtype=np.float32)
         self.object_yaw_noise_deg = float(object_yaw_noise_deg)
         self.object_rotation_noise_mode = object_rotation_noise_mode
+        self.camera_pos_noise_xyz = np.array(camera_pos_noise_xyz, dtype=np.float32)
+        self.camera_rot_noise_deg = np.array(camera_rot_noise_deg, dtype=np.float32)
+        self.hole_pos_noise_xyz = np.array(hole_pos_noise_xyz, dtype=np.float32)
+        self.hole_yaw_noise_deg = float(hole_yaw_noise_deg)
         self.app = app
         self.headless = headless
         self.camera_pose = camera_pose_override or task_spec.camera_pose
@@ -202,6 +210,14 @@ class IsaacSimDistillEnv:
         }
         self.goal_pose = np.repeat(self.task_spec.goals[0][None], self.num_envs, axis=0).astype(np.float32)
         self.current_start_pose = np.repeat(self.task_spec.start_pose[None], self.num_envs, axis=0).astype(np.float32)
+        self.current_table_pose = np.repeat(self.task_spec.table_pose[None], self.num_envs, axis=0).astype(np.float32)
+        self.current_goals = np.repeat(np.stack(self.task_spec.goals, axis=0)[None], self.num_envs, axis=0).astype(np.float32)
+        self.camera_pos_jitter = np.zeros((self.num_envs, 3), dtype=np.float32)
+        self.camera_rot_jitter_wxyz = np.repeat(
+            np.array([[1.0, 0.0, 0.0, 0.0]], dtype=np.float32),
+            self.num_envs,
+            axis=0,
+        )
         self.prev_targets: np.ndarray | None = None
         self.camera_world_pos = np.zeros((self.num_envs, 3), dtype=np.float32)
         self.camera_world_quat_wxyz = np.zeros((self.num_envs, 4), dtype=np.float32)
@@ -324,16 +340,19 @@ class IsaacSimDistillEnv:
                     },
                 )
 
-                table = AssetBaseCfg(
+                table = RigidObjectCfg(
                     prim_path="{ENV_REGEX_NS}/Table",
                     spawn=sim_utils.UsdFileCfg(
                         usd_path=table_usd,
+                        articulation_props=sim_utils.ArticulationRootPropertiesCfg(
+                            articulation_enabled=False,
+                        ),
                         collision_props=sim_utils.CollisionPropertiesCfg(
                             contact_offset=0.002,
                             rest_offset=0.0,
                         ),
                     ),
-                    init_state=AssetBaseCfg.InitialStateCfg(pos=(0.0, 0.0, 0.38)),
+                    init_state=RigidObjectCfg.InitialStateCfg(pos=(0.0, 0.0, 0.38)),
                 )
 
                 object = RigidObjectCfg(
@@ -419,16 +438,19 @@ class IsaacSimDistillEnv:
                     },
                 )
 
-                table = AssetBaseCfg(
+                table = RigidObjectCfg(
                     prim_path="{ENV_REGEX_NS}/Table",
                     spawn=sim_utils.UsdFileCfg(
                         usd_path=table_usd,
+                        articulation_props=sim_utils.ArticulationRootPropertiesCfg(
+                            articulation_enabled=False,
+                        ),
                         collision_props=sim_utils.CollisionPropertiesCfg(
                             contact_offset=0.002,
                             rest_offset=0.0,
                         ),
                     ),
-                    init_state=AssetBaseCfg.InitialStateCfg(pos=(0.0, 0.0, 0.38)),
+                    init_state=RigidObjectCfg.InitialStateCfg(pos=(0.0, 0.0, 0.38)),
                 )
 
                 object = RigidObjectCfg(
@@ -500,6 +522,7 @@ class IsaacSimDistillEnv:
             )
         )
         self.robot = self.scene.articulations["robot"]
+        self.table_rigid = self.scene.rigid_objects["table"]
         self.object_rigid = self.scene.rigid_objects["object"]
         self.camera = self.scene.sensors["camera"] if self.enable_camera else None
         self.env_origins = self.scene.env_origins
@@ -722,6 +745,51 @@ class IsaacSimDistillEnv:
             f"colliders={len(all_collision_paths)})"
         )
 
+    def _sample_camera_randomization(self, env_ids_np: np.ndarray) -> None:
+        if env_ids_np.size == 0:
+            return
+        pos_noise = (
+            np.random.uniform(-1.0, 1.0, size=(len(env_ids_np), 3)).astype(np.float32)
+            * self.camera_pos_noise_xyz[None]
+        )
+        rot_noise_deg = (
+            np.random.uniform(-1.0, 1.0, size=(len(env_ids_np), 3)).astype(np.float32)
+            * self.camera_rot_noise_deg[None]
+        )
+        self.camera_pos_jitter[env_ids_np] = pos_noise
+        rot_xyzw = R.from_euler("xyz", rot_noise_deg, degrees=True).as_quat().astype(np.float32)
+        self.camera_rot_jitter_wxyz[env_ids_np] = rot_xyzw[:, [3, 0, 1, 2]]
+
+    def _sample_table_poses(self, env_ids_np: np.ndarray) -> np.ndarray:
+        table_pose = np.repeat(self.task_spec.table_pose[None], len(env_ids_np), axis=0).astype(np.float32)
+        if np.any(self.hole_pos_noise_xyz > 0.0):
+            noise = (
+                np.random.uniform(-1.0, 1.0, size=(len(env_ids_np), 3)).astype(np.float32)
+                * self.hole_pos_noise_xyz[None]
+            )
+            table_pose[:, :3] += noise
+        if self.hole_yaw_noise_deg > 0.0:
+            yaw_noise = np.deg2rad(
+                np.random.uniform(-self.hole_yaw_noise_deg, self.hole_yaw_noise_deg, size=len(env_ids_np)).astype(np.float32)
+            )
+            for i in range(len(env_ids_np)):
+                base = R.from_quat(table_pose[i, 3:7])
+                yaw = R.from_euler("z", float(yaw_noise[i]))
+                table_pose[i, 3:7] = (yaw * base).as_quat().astype(np.float32)
+        return table_pose
+
+    def _transform_poses_with_table_delta(self, poses_xyzw: np.ndarray, table_pose_xyzw: np.ndarray) -> np.ndarray:
+        base_table = self.task_spec.table_pose.astype(np.float32)
+        base_rot = R.from_quat(base_table[3:7])
+        new_rot = R.from_quat(table_pose_xyzw[3:7])
+        delta_rot = new_rot * base_rot.inv()
+        out = poses_xyzw.copy().astype(np.float32)
+        rel_pos = poses_xyzw[:, :3] - base_table[None, :3]
+        out[:, :3] = delta_rot.apply(rel_pos) + table_pose_xyzw[None, :3]
+        pose_rot = R.from_quat(poses_xyzw[:, 3:7])
+        out[:, 3:7] = (delta_rot * pose_rot).as_quat().astype(np.float32)
+        return out
+
     def _apply_camera_world_poses(self, env_ids: torch.Tensor | None = None):
         if self.camera is None:
             return
@@ -732,8 +800,12 @@ class IsaacSimDistillEnv:
             positions, orientations = self._compute_wrist_camera_world_poses(env_ids_np)
         else:
             env_origins = self.env_origins[env_ids].detach().cpu().numpy()
-            positions = env_origins + np.asarray(self.camera_pose.pos, dtype=np.float32)[None, :]
-            orientations = np.repeat(np.asarray(self.camera_pose.quat_wxyz, dtype=np.float32)[None, :], len(env_ids_np), axis=0)
+            positions = env_origins + np.asarray(self.camera_pose.pos, dtype=np.float32)[None, :] + self.camera_pos_jitter[env_ids_np]
+            base_quat_xyzw = np.asarray(self.camera_pose.quat_wxyz, dtype=np.float32)[[1, 2, 3, 0]]
+            base_rot = R.from_quat(base_quat_xyzw)
+            jitter_xyzw = self.camera_rot_jitter_wxyz[env_ids_np][:, [1, 2, 3, 0]]
+            orientations_xyzw = (R.from_quat(jitter_xyzw) * base_rot).as_quat().astype(np.float32)
+            orientations = orientations_xyzw[:, [3, 0, 1, 2]]
         if self.camera_backend == "tiled":
             self.camera_world_pos[env_ids_np] = positions
             self.camera_world_quat_wxyz[env_ids_np] = orientations
@@ -755,12 +827,14 @@ class IsaacSimDistillEnv:
         link_quat_wxyz = body_state[:, 3:7].detach().cpu().numpy()
         link_rot = R.from_quat(link_quat_wxyz[:, [1, 2, 3, 0]]).as_matrix()
 
-        cam_offset = np.asarray(self.camera_pose.pos, dtype=np.float32)[None, :]
+        cam_offset = np.asarray(self.camera_pose.pos, dtype=np.float32)[None, :] + self.camera_pos_jitter[env_ids_np]
         cam_pos = link_pos + np.einsum("nij,nj->ni", link_rot, cam_offset)
 
         rel_quat_wxyz = np.asarray(self.camera_pose.quat_wxyz, dtype=np.float32)
-        rel_rot = R.from_quat(rel_quat_wxyz[[1, 2, 3, 0]]).as_matrix()
-        cam_rot = link_rot @ rel_rot[None, :, :]
+        rel_rot = R.from_quat(rel_quat_wxyz[[1, 2, 3, 0]])
+        jitter_rot = R.from_quat(self.camera_rot_jitter_wxyz[env_ids_np][:, [1, 2, 3, 0]])
+        rel_rot_mat = (jitter_rot * rel_rot).as_matrix()
+        cam_rot = link_rot @ rel_rot_mat
         cam_quat_xyzw = matrix_to_quaternion_xyzw_scipy(cam_rot)
         cam_quat_wxyz = cam_quat_xyzw[:, [3, 0, 1, 2]].astype(np.float32)
         return cam_pos.astype(np.float32), cam_quat_wxyz
@@ -829,6 +903,14 @@ class IsaacSimDistillEnv:
         self.robot.write_joint_state_to_sim(joint_pos[env_ids], joint_vel[env_ids], env_ids=env_ids)
         self.robot.set_joint_position_target(joint_pos[env_ids], env_ids=env_ids)
 
+        table_poses = self._sample_table_poses(env_ids_np)
+        self.current_table_pose[env_ids_np] = table_poses
+        table_pose_w = self._local_pose_to_world_pose(self.current_table_pose)
+        self.table_rigid.write_root_pose_to_sim(table_pose_w[env_ids], env_ids=env_ids)
+        table_vel = torch.zeros((len(env_ids_np), 6), dtype=torch.float32, device=self.device)
+        self.table_rigid.write_root_velocity_to_sim(table_vel, env_ids=env_ids)
+        self._sample_camera_randomization(env_ids_np)
+
         start_poses = self._sample_start_poses()[env_ids_np]
         self.current_start_pose[env_ids_np] = start_poses
         object_pose_w = self._local_pose_to_world_pose(self.current_start_pose)
@@ -853,7 +935,10 @@ class IsaacSimDistillEnv:
         self.near_goal_steps[env_ids_np] = 0
         self.progress_buf[env_ids_np] = 0
         self.lifted_object[env_ids_np] = False
-        self.goal_pose[env_ids_np] = np.repeat(self.task_spec.goals[0][None], len(env_ids_np), axis=0).astype(np.float32)
+        base_goals = np.stack(self.task_spec.goals, axis=0).astype(np.float32)
+        for local_i, env_id in enumerate(env_ids_np):
+            self.current_goals[env_id] = self._transform_poses_with_table_delta(base_goals, table_poses[local_i])
+        self.goal_pose[env_ids_np] = self.current_goals[env_ids_np, 0]
 
     def apply_action(self, targets: np.ndarray):
         self.prev_targets = targets.copy()
@@ -919,7 +1004,7 @@ class IsaacSimDistillEnv:
         robot_base_pose = np.zeros(7, dtype=np.float32)
         robot_base_pose[:3] = robot_root_state[:3] - env_origin
         robot_base_pose[3:] = robot_root_state[3:7][[1, 2, 3, 0]]
-        table_pose = self.task_spec.table_pose.astype(np.float32)
+        table_pose = self.current_table_pose[env_id].astype(np.float32)
         return {
             "env_id": int(env_id),
             "robot_joint_names": list(self.robot.joint_names),
@@ -950,7 +1035,7 @@ class IsaacSimDistillEnv:
             self.max_goal_idx[env_id] = max(self.max_goal_idx[env_id], self.goal_idx[env_id])
             self.near_goal_steps[env_id] = 0
             if self.goal_idx[env_id] < len(self.task_spec.goals):
-                self.goal_pose[env_id] = self.task_spec.goals[self.goal_idx[env_id]]
+                self.goal_pose[env_id] = self.current_goals[env_id, self.goal_idx[env_id]]
         return bool(np.all(self.goal_idx >= len(self.task_spec.goals)))
 
     def compute_reset_masks(self, sim_state: SimState) -> dict[str, np.ndarray]:
