@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import json
 from dataclasses import dataclass
 from datetime import datetime
 import os
@@ -97,6 +98,7 @@ def launch_app():
     parser.add_argument("--capture_viewer", action="store_true")
     parser.add_argument("--capture_viewer_len", type=int, default=700)
     parser.add_argument("--capture_viewer_env_id", type=int, default=0)
+    parser.add_argument("--capture_viewer_all_envs", action="store_true")
     parser.add_argument("--capture_viewer_wandb_key", default="interactive_viewer")
     parser.add_argument("--capture_viewer_video", action="store_true")
     parser.add_argument("--capture_viewer_video_wandb_key", default="rollout_video")
@@ -685,6 +687,61 @@ def _log_viewer_artifacts(
         _log(f"Logged interactive viewer artifacts to wandb keys: {list(wandb_payload)}")
 
 
+def _get_capture_viewer_env_ids(env: IsaacSimDistillEnv, default_env_id: int) -> list[int]:
+    if _args.capture_viewer_all_envs:
+        return list(range(env.num_envs))
+    return [default_env_id]
+
+
+def _compute_per_env_final_metrics(
+    env: IsaacSimDistillEnv,
+    sim_state: SimState,
+    total_action_loss_per_env: np.ndarray,
+    total_aux_loss_per_env: np.ndarray,
+    total_steps: int,
+) -> list[dict[str, float | int]]:
+    progress_goal_idx = np.maximum(env.goal_idx, env.max_goal_idx).astype(np.int32)
+    goal_completion = progress_goal_idx.astype(np.float32) / len(env.task_spec.goals)
+    action_loss_per_env = (total_action_loss_per_env / max(total_steps, 1)).astype(np.float32)
+    aux_loss_per_env = (total_aux_loss_per_env / max(total_steps, 1)).astype(np.float32)
+    rows: list[dict[str, float | int]] = []
+    for env_id in range(env.num_envs):
+        row = {
+            "env_id": int(env_id),
+            "goal_idx": int(progress_goal_idx[env_id]),
+            "goal_completion_ratio": float(goal_completion[env_id]),
+            "kp_dist": float(sim_state.kp_dist[env_id]),
+            "near_goal_steps": float(env.near_goal_steps[env_id]),
+            "action_loss": float(action_loss_per_env[env_id]),
+            "action_rmse": float(np.sqrt(max(action_loss_per_env[env_id], 0.0))),
+            "aux_object_pos_loss": float(aux_loss_per_env[env_id]),
+            "aux_object_pos_rmse_m": float(np.sqrt(max(aux_loss_per_env[env_id], 0.0))),
+        }
+        rows.append(row)
+    return rows
+
+
+def _save_per_env_final_metrics(
+    run_dir: Path,
+    mode: str,
+    rows: list[dict[str, float | int]],
+) -> None:
+    if not rows:
+        return
+    out_dir = run_dir / "per_env_metrics"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    json_path = out_dir / f"{mode}_final_metrics.json"
+    csv_path = out_dir / f"{mode}_final_metrics.csv"
+    with open(json_path, "w") as f:
+        json.dump(rows, f, indent=2)
+    fieldnames = list(rows[0].keys())
+    with open(csv_path, "w", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=fieldnames)
+        writer.writeheader()
+        writer.writerows(rows)
+    _log(f"Saved per-env final metrics: {csv_path}")
+
+
 def run_episode(
     mode: str,
     env: IsaacSimDistillEnv,
@@ -714,8 +771,9 @@ def run_episode(
     total_steps = 0
     monitor_mask = get_monitor_env_mask(env.num_envs, settings.monitor_num_envs if mode == "train" else 0)
     train_mask = ~monitor_mask if mode == "train" else np.ones(env.num_envs, dtype=bool)
-    viewer_frames: list[dict] = []
-    viewer_video_frames: list[np.ndarray] = []
+    viewer_env_ids = _get_capture_viewer_env_ids(env, capture_viewer_env_id)
+    viewer_frames_by_env: dict[int, list[dict]] = {env_id: [] for env_id in viewer_env_ids}
+    viewer_video_frames_by_env: dict[int, list[np.ndarray]] = {env_id: [] for env_id in viewer_env_ids}
     if capture_viewer and run_dir is None:
         raise ValueError("capture_viewer requires run_dir")
 
@@ -765,12 +823,15 @@ def run_episode(
         next_sim_state = env.compute_sim_state()
         if capture_frames and run_dir is not None and (step_i % max(capture_frame_stride, 1) == 0):
             save_camera_debug_step(env, run_dir, step_i)
-        if capture_viewer and len(viewer_frames) < capture_viewer_len:
-            viewer_frames.append(env.capture_viewer_frame(capture_viewer_env_id, next_sim_state))
-            if capture_viewer_video:
-                rgb_frame = _capture_rgb_frame(env, capture_viewer_env_id)
-                if rgb_frame is not None:
-                    viewer_video_frames.append(rgb_frame)
+        if capture_viewer:
+            for viewer_env_id in viewer_env_ids:
+                if len(viewer_frames_by_env[viewer_env_id]) >= capture_viewer_len:
+                    continue
+                viewer_frames_by_env[viewer_env_id].append(env.capture_viewer_frame(viewer_env_id, next_sim_state))
+                if capture_viewer_video:
+                    rgb_frame = _capture_rgb_frame(env, viewer_env_id)
+                    if rgb_frame is not None:
+                        viewer_video_frames_by_env[viewer_env_id].append(rgb_frame)
         finished = env.maybe_advance_goal(next_sim_state)
         reset_env_ids = env.reset_done_envs(next_sim_state)
         if reset_env_ids.size > 0:
@@ -820,18 +881,28 @@ def run_episode(
             break
 
     if capture_viewer and run_dir is not None:
-        _log_viewer_artifacts(
-            run_dir=run_dir,
-            mode=mode,
-            frames=viewer_frames,
-            video_frames=viewer_video_frames,
-            wandb_run=wandb_run,
-            viewer_key=capture_viewer_wandb_key,
-            video_key=capture_viewer_video_wandb_key,
-            video_fps=capture_viewer_video_fps,
-            num_goals=len(env.task_spec.goals),
-            task_spec=env.task_spec,
-        )
+        for viewer_env_id in viewer_env_ids:
+            env_run_dir = run_dir
+            env_mode = mode
+            env_viewer_key = capture_viewer_wandb_key
+            env_video_key = capture_viewer_video_wandb_key
+            if len(viewer_env_ids) > 1:
+                env_run_dir = run_dir / f"viewer_env_{viewer_env_id}"
+                env_mode = f"{mode}_env_{viewer_env_id}"
+                env_viewer_key = f"{capture_viewer_wandb_key}_env_{viewer_env_id}"
+                env_video_key = f"{capture_viewer_video_wandb_key}_env_{viewer_env_id}"
+            _log_viewer_artifacts(
+                run_dir=env_run_dir,
+                mode=env_mode,
+                frames=viewer_frames_by_env[viewer_env_id],
+                video_frames=viewer_video_frames_by_env[viewer_env_id],
+                wandb_run=wandb_run,
+                viewer_key=env_viewer_key,
+                video_key=env_video_key,
+                video_fps=capture_viewer_video_fps,
+                num_goals=len(env.task_spec.goals),
+                task_spec=env.task_spec,
+            )
 
     final_state = env.compute_sim_state()
     episode_wall_time_s = max(time.perf_counter() - episode_start_time, 1e-9)
@@ -854,6 +925,18 @@ def run_episode(
     )
     metrics["action_rmse"] = float(np.sqrt(max(metrics["action_loss"], 0.0)))
     metrics["aux_object_pos_rmse_m"] = float(np.sqrt(max(metrics["aux_object_pos_loss"], 0.0)))
+    if run_dir is not None:
+        _save_per_env_final_metrics(
+            run_dir=run_dir,
+            mode=mode,
+            rows=_compute_per_env_final_metrics(
+                env,
+                final_state,
+                total_action_loss_per_env,
+                total_aux_loss_per_env,
+                total_steps,
+            ),
+        )
     monitor_metrics = None
     if mode == "train" and np.any(monitor_mask):
         monitor_metrics = compute_subset_progress_metrics(env, final_state, monitor_mask)
