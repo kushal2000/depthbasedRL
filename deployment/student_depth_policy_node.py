@@ -146,6 +146,7 @@ class StudentDepthPolicyNodeArgs:
     arm_moving_average: float = 0.1
     hand_dof_speed_scale: float = 1.5
     publish_joint_commands: bool = False
+    publish_joint_commands_for_sec: float = 0.0
     publish_object_pos_topic: str = "/robot_frame/current_object_pose"
     object_pos_frame_id: str = "robot_frame"
     debug_print_proprio_every: int = 0
@@ -204,6 +205,8 @@ class StudentDepthPolicyNode:
         self._last_rate_log_time = time.time()
         self._last_rate_log_step = 0
         self._depth_video_writer = None
+        self._command_publish_start_time: Optional[float] = None
+        self._command_publish_stopped = False
 
         if args.debug_save_depth_dir is not None:
             args.debug_save_depth_dir.mkdir(parents=True, exist_ok=True)
@@ -231,7 +234,8 @@ class StudentDepthPolicyNode:
         )
         info(
             f"ROS I/O: joint_states=({args.iiwa_joint_state_topic}, {args.sharpa_joint_state_topic}), "
-            f"joint_cmd=({args.iiwa_joint_cmd_topic}, {args.sharpa_joint_cmd_topic}, enabled={args.publish_joint_commands}), "
+            f"joint_cmd=({args.iiwa_joint_cmd_topic}, {args.sharpa_joint_cmd_topic}, enabled={args.publish_joint_commands}, "
+            f"duration_s={args.publish_joint_commands_for_sec}), "
             f"object_pose_topic={args.publish_object_pos_topic}"
         )
         expected_hz = 1.0 / self.control_dt if self.control_dt > 0 else float("nan")
@@ -404,6 +408,19 @@ class StudentDepthPolicyNode:
 
         if not self.args.publish_joint_commands:
             return
+        if self.args.publish_joint_commands_for_sec > 0.0:
+            now = time.time()
+            if self._command_publish_start_time is None:
+                self._command_publish_start_time = now
+            elapsed = now - self._command_publish_start_time
+            if elapsed > self.args.publish_joint_commands_for_sec:
+                if not self._command_publish_stopped:
+                    warn(
+                        f"Stopped publishing joint commands after "
+                        f"{self.args.publish_joint_commands_for_sec:.3f}s as requested"
+                    )
+                    self._command_publish_stopped = True
+                return
 
         iiwa_msg = JointState()
         iiwa_msg.header.stamp = rospy.Time.now()
