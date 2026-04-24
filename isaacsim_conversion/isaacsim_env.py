@@ -71,6 +71,42 @@ JOINT_DAMPINGS = {
 assert len(JOINT_STIFFNESSES) == 29
 assert len(JOINT_DAMPINGS) == 29
 
+ARM_EFFORT_LIMITS = {
+    "iiwa14_joint_1": 300.0,
+    "iiwa14_joint_2": 300.0,
+    "iiwa14_joint_3": 300.0,
+    "iiwa14_joint_4": 300.0,
+    "iiwa14_joint_5": 300.0,
+    "iiwa14_joint_6": 300.0,
+    "iiwa14_joint_7": 300.0,
+}
+
+HAND_ARMATURES = {
+    "left_1_thumb_CMC_FE": 0.0032, "left_thumb_CMC_AA": 0.0032,
+    "left_thumb_MCP_FE": 0.00265, "left_thumb_MCP_AA": 0.00265, "left_thumb_IP": 0.0006,
+    "left_2_index_MCP_FE": 0.00265, "left_index_MCP_AA": 0.00265,
+    "left_index_PIP": 0.0006, "left_index_DIP": 0.00042,
+    "left_3_middle_MCP_FE": 0.00265, "left_middle_MCP_AA": 0.00265,
+    "left_middle_PIP": 0.0006, "left_middle_DIP": 0.00042,
+    "left_4_ring_MCP_FE": 0.00265, "left_ring_MCP_AA": 0.00265,
+    "left_ring_PIP": 0.0006, "left_ring_DIP": 0.00042,
+    "left_5_pinky_CMC": 0.00012, "left_pinky_MCP_FE": 0.00265,
+    "left_pinky_MCP_AA": 0.00265, "left_pinky_PIP": 0.0006, "left_pinky_DIP": 0.00042,
+}
+
+HAND_FRICTIONS = {
+    "left_1_thumb_CMC_FE": 0.132, "left_thumb_CMC_AA": 0.132,
+    "left_thumb_MCP_FE": 0.07456, "left_thumb_MCP_AA": 0.07456, "left_thumb_IP": 0.01276,
+    "left_2_index_MCP_FE": 0.07456, "left_index_MCP_AA": 0.07456,
+    "left_index_PIP": 0.01276, "left_index_DIP": 0.00378738,
+    "left_3_middle_MCP_FE": 0.07456, "left_middle_MCP_AA": 0.07456,
+    "left_middle_PIP": 0.01276, "left_middle_DIP": 0.00378738,
+    "left_4_ring_MCP_FE": 0.07456, "left_ring_MCP_AA": 0.07456,
+    "left_ring_PIP": 0.01276, "left_ring_DIP": 0.00378738,
+    "left_5_pinky_CMC": 0.012, "left_pinky_MCP_FE": 0.07456,
+    "left_pinky_MCP_AA": 0.07456, "left_pinky_PIP": 0.01276, "left_pinky_DIP": 0.00378738,
+}
+
 # Isaac Lab's UrdfConverter multiplies revolute joint stiffness/damping by pi/180
 # (rad→deg conversion). But our values are already in PhysX units (same as Isaac Gym).
 # So we pre-compensate by multiplying by 180/pi to cancel out the conversion.

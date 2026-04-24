@@ -21,14 +21,17 @@ from isaacgymenvs.utils.torch_jit_utils import quat_rotate, unscale
 from isaacsim_conversion.isaacsim_env import (
     CONTROL_DT,
     DEFAULT_ASSET_FRICTION,
+    ARM_EFFORT_LIMITS,
     DEFAULT_JOINT_POS,
     FINGERTIP_FRICTION,
     FINGERTIP_LINK_NAMES,
+    HAND_ARMATURES,
     JOINT_DAMPINGS,
     JOINT_DAMPINGS_COMPENSATED,
     JOINT_NAMES_ISAACGYM,
     JOINT_STIFFNESSES,
     JOINT_STIFFNESSES_COMPENSATED,
+    HAND_FRICTIONS,
     PHYSICS_DT,
     PHYSICS_SUBSTEPS,
     _log,
@@ -51,6 +54,55 @@ OBS_LIST = [
 ]
 OBJECT_BASE_SIZE = 0.04
 KEYPOINT_SCALE = 1.5
+
+LEFT_SHARPA_KUKA_LINK_TO_ADJACENT_LINKS = {
+    "iiwa14_link_0": ["iiwa14_link_1"],
+    "iiwa14_link_1": ["iiwa14_link_0", "iiwa14_link_2"],
+    "iiwa14_link_2": ["iiwa14_link_1", "iiwa14_link_3"],
+    "iiwa14_link_3": ["iiwa14_link_2", "iiwa14_link_4"],
+    "iiwa14_link_4": ["iiwa14_link_3", "iiwa14_link_5"],
+    "iiwa14_link_5": ["iiwa14_link_4", "iiwa14_link_6"],
+    "iiwa14_link_6": ["iiwa14_link_5", "iiwa14_link_7"],
+    "iiwa14_link_7": [
+        "iiwa14_link_6",
+        "left_thumb_CMC_VL",
+        "left_thumb_MC",
+        "left_index_MCP_VL",
+        "left_index_PP",
+        "left_middle_MCP_VL",
+        "left_middle_PP",
+        "left_ring_MCP_VL",
+        "left_ring_PP",
+        "left_pinky_MC",
+    ],
+    "left_index_MCP_VL": ["iiwa14_link_7", "left_index_PP"],
+    "left_index_PP": ["iiwa14_link_7", "left_index_MCP_VL", "left_index_MP"],
+    "left_index_MP": ["left_index_PP", "left_index_DP"],
+    "left_index_DP": ["left_index_MP"],
+    "left_middle_MCP_VL": ["iiwa14_link_7", "left_middle_PP"],
+    "left_middle_PP": ["iiwa14_link_7", "left_middle_MCP_VL", "left_middle_MP"],
+    "left_middle_MP": ["left_middle_PP", "left_middle_DP"],
+    "left_middle_DP": ["left_middle_MP"],
+    "left_pinky_MC": ["iiwa14_link_7", "left_pinky_MCP_VL", "left_pinky_PP"],
+    "left_pinky_MCP_VL": ["left_pinky_MC", "left_pinky_PP"],
+    "left_pinky_PP": ["left_pinky_MC", "left_pinky_MCP_VL", "left_pinky_MP"],
+    "left_pinky_MP": ["left_pinky_PP", "left_pinky_DP"],
+    "left_pinky_DP": ["left_pinky_MP"],
+    "left_ring_MCP_VL": ["iiwa14_link_7", "left_ring_PP"],
+    "left_ring_PP": ["iiwa14_link_7", "left_ring_MCP_VL", "left_ring_MP"],
+    "left_ring_MP": ["left_ring_PP", "left_ring_DP"],
+    "left_ring_DP": ["left_ring_MP"],
+    "left_thumb_CMC_VL": ["iiwa14_link_7", "left_thumb_MC"],
+    "left_thumb_MC": [
+        "iiwa14_link_7",
+        "left_thumb_CMC_VL",
+        "left_thumb_MCP_VL",
+        "left_thumb_PP",
+    ],
+    "left_thumb_MCP_VL": ["left_thumb_MC", "left_thumb_PP"],
+    "left_thumb_PP": ["left_thumb_MC", "left_thumb_MCP_VL", "left_thumb_DP"],
+    "left_thumb_DP": ["left_thumb_PP"],
+}
 
 
 @dataclass
@@ -234,7 +286,7 @@ class IsaacSimDistillEnv:
                             rest_offset=0.0,
                         ),
                         articulation_props=sim_utils.ArticulationRootPropertiesCfg(
-                            enabled_self_collisions=False,
+                            enabled_self_collisions=True,
                             solver_position_iteration_count=8,
                             solver_velocity_iteration_count=0,
                         ),
@@ -249,11 +301,14 @@ class IsaacSimDistillEnv:
                             joint_names_expr=["iiwa14_joint_.*"],
                             stiffness={k: v for k, v in JOINT_STIFFNESSES.items() if k.startswith("iiwa14")},
                             damping={k: v for k, v in JOINT_DAMPINGS.items() if k.startswith("iiwa14")},
+                            effort_limit_sim=ARM_EFFORT_LIMITS,
                         ),
                         "hand": ImplicitActuatorCfg(
                             joint_names_expr=["left_.*"],
                             stiffness={k: v for k, v in JOINT_STIFFNESSES.items() if k.startswith("left")},
                             damping={k: v for k, v in JOINT_DAMPINGS.items() if k.startswith("left")},
+                            armature=HAND_ARMATURES,
+                            friction=HAND_FRICTIONS,
                         ),
                     },
                 )
@@ -326,7 +381,7 @@ class IsaacSimDistillEnv:
                             rest_offset=0.0,
                         ),
                         articulation_props=sim_utils.ArticulationRootPropertiesCfg(
-                            enabled_self_collisions=False,
+                            enabled_self_collisions=True,
                             solver_position_iteration_count=8,
                             solver_velocity_iteration_count=0,
                         ),
@@ -341,11 +396,14 @@ class IsaacSimDistillEnv:
                             joint_names_expr=["iiwa14_joint_.*"],
                             stiffness={k: v for k, v in JOINT_STIFFNESSES.items() if k.startswith("iiwa14")},
                             damping={k: v for k, v in JOINT_DAMPINGS.items() if k.startswith("iiwa14")},
+                            effort_limit_sim=ARM_EFFORT_LIMITS,
                         ),
                         "hand": ImplicitActuatorCfg(
                             joint_names_expr=["left_.*"],
                             stiffness={k: v for k, v in JOINT_STIFFNESSES.items() if k.startswith("left")},
                             damping={k: v for k, v in JOINT_DAMPINGS.items() if k.startswith("left")},
+                            armature=HAND_ARMATURES,
+                            friction=HAND_FRICTIONS,
                         ),
                     },
                 )
@@ -446,6 +504,7 @@ class IsaacSimDistillEnv:
         self._apply_physics_material_overrides(sim_utils)
         self.sim.reset()
         self.scene.reset()
+        self._apply_robot_adjacent_self_collision_filtering()
         self._apply_object_mass_multiplier()
         self._validate_joint_ordering()
         if self.camera is not None:
@@ -572,6 +631,45 @@ class IsaacSimDistillEnv:
                 "Object mass multiplier requested "
                 f"({self.object_mass_multiplier:.4f}) but no authored MassAPI rigid prims were found under /Object"
             )
+
+    def _apply_robot_adjacent_self_collision_filtering(self):
+        from isaaclab.sim.utils import get_current_stage
+        from pxr import UsdPhysics
+
+        stage = get_current_stage()
+        available_links = set(self.robot.body_names)
+        missing_links = sorted(set(LEFT_SHARPA_KUKA_LINK_TO_ADJACENT_LINKS.keys()) - available_links)
+        missing_adjacent = sorted(
+            {name for names in LEFT_SHARPA_KUKA_LINK_TO_ADJACENT_LINKS.values() for name in names} - available_links
+        )
+        if missing_links or missing_adjacent:
+            _log(
+                "Adjacent self-collision filter map has missing imported links; skipping missing entries "
+                f"(missing_keys={missing_links}, missing_adjacent={missing_adjacent})"
+            )
+
+        applied_pairs = 0
+        for env_id in range(self.num_envs):
+            env_ns = f"/World/envs/env_{env_id}/Robot"
+            for link_name, adjacent_links in LEFT_SHARPA_KUKA_LINK_TO_ADJACENT_LINKS.items():
+                if link_name not in available_links:
+                    continue
+                link_prim = stage.GetPrimAtPath(f"{env_ns}/{link_name}")
+                if not link_prim.IsValid():
+                    continue
+                filtered_api = UsdPhysics.FilteredPairsAPI(link_prim)
+                if not filtered_api:
+                    filtered_api = UsdPhysics.FilteredPairsAPI.Apply(link_prim)
+                rel = filtered_api.CreateFilteredPairsRel()
+                existing = set(rel.GetTargets())
+                for adjacent_name in adjacent_links:
+                    if adjacent_name not in available_links:
+                        continue
+                    adjacent_path = f"{env_ns}/{adjacent_name}"
+                    if adjacent_path not in existing:
+                        rel.AddTarget(adjacent_path)
+                        applied_pairs += 1
+        _log(f"Applied adjacent self-collision filtering entries: {applied_pairs}")
 
     def _apply_physics_material_overrides(self, sim_utils):
         all_collision_paths: list[str] = []
