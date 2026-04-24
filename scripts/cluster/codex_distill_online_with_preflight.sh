@@ -54,6 +54,9 @@ fi
 CAMERA_BACKEND="${CAMERA_BACKEND:-tiled}"
 IMAGE_TILED_MAX_ENVS="${IMAGE_TILED_MAX_ENVS:-4096}"
 IMAGE_PREFLIGHT_BRIGHT_FRAC_MAX="${IMAGE_PREFLIGHT_BRIGHT_FRAC_MAX:-0.4}"
+TEACHER_CHECKPOINT="${TEACHER_CHECKPOINT:-pretrained_policy/model.pth}"
+TEACHER_CONFIG="${TEACHER_CONFIG:-pretrained_policy/config.yaml}"
+WANDB_GROUP="${WANDB_GROUP:-}"
 
 echo "Hostname: $(hostname)"
 nvidia-smi || true
@@ -64,6 +67,9 @@ echo "Camera config: $CAMERA_CONFIG"
 echo "Camera backend: $CAMERA_BACKEND"
 echo "Image tiled max envs: $IMAGE_TILED_MAX_ENVS"
 echo "Image preflight bright frac max: $IMAGE_PREFLIGHT_BRIGHT_FRAC_MAX"
+echo "Teacher checkpoint: $TEACHER_CHECKPOINT"
+echo "Teacher config: $TEACHER_CONFIG"
+echo "Wandb group: ${WANDB_GROUP:-<none>}"
 echo "Extra args: ${EXTRA_ARGS[*]:-<none>}"
 
 SELECTED_ENVS=""
@@ -99,8 +105,8 @@ for N in "${ENV_COUNTS[@]}"; do
     --online_update_interval "$ONLINE_UPDATE_INTERVAL" \
     --distill_config "$DISTILL_CONFIG" \
     --camera_config "$CAMERA_CONFIG" \
-    --teacher_checkpoint pretrained_policy/model.pth \
-    --teacher_config pretrained_policy/config.yaml \
+    --teacher_checkpoint "$TEACHER_CHECKPOINT" \
+    --teacher_config "$TEACHER_CONFIG" \
     --run_dir "$PREFLIGHT_DIR" \
     "${PREFLIGHT_IMAGE_ARGS[@]}"; then
     if [[ "$STUDENT_INPUT" == "camera" ]]; then
@@ -151,10 +157,11 @@ echo "=== ONLINE TRAIN job=$JOB_NAME num_envs=$SELECTED_ENVS iters=$ONLINE_ITERS
   --online_update_interval "$ONLINE_UPDATE_INTERVAL" \
   --distill_config "$DISTILL_CONFIG" \
   --camera_config "$CAMERA_CONFIG" \
-  --teacher_checkpoint pretrained_policy/model.pth \
-  --teacher_config pretrained_policy/config.yaml \
+  --teacher_checkpoint "$TEACHER_CHECKPOINT" \
+  --teacher_config "$TEACHER_CONFIG" \
   --run_dir "$RUN_DIR" \
   --wandb \
   --wandb_project "$WANDB_PROJECT" \
+  ${WANDB_GROUP:+--wandb_group "$WANDB_GROUP"} \
   --wandb_name "$JOB_NAME" \
   "${EXTRA_ARGS[@]}"
