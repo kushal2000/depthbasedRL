@@ -151,6 +151,7 @@ class DistillSettings:
     object_start_mode: str = "fixed"
     object_pos_noise_xyz: tuple[float, float, float] = (0.03, 0.03, 0.01)
     object_yaw_noise_deg: float = 20.0
+    object_rotation_noise_mode: str = "yaw"
     monitor_num_envs: int = 0
     monitor_log_window: int = 10
     camera_backend: str = "tiled"
@@ -1532,6 +1533,7 @@ def main():
         object_start_mode=settings.object_start_mode,
         object_pos_noise_xyz=settings.object_pos_noise_xyz,
         object_yaw_noise_deg=settings.object_yaw_noise_deg,
+        object_rotation_noise_mode=settings.object_rotation_noise_mode,
         camera_backend=args.camera_backend or settings.camera_backend,
         depth_preprocess_mode=settings.depth_preprocess_mode,
         depth_min_m=settings.depth_min_m,

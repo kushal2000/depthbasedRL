@@ -62,6 +62,15 @@ After the first baseline runs are working, add robustness in stages:
 - port the depth augmentation path from `2026-04-23_DextrahImageRobustness`
 - likely include correlated noise, normal-direction noise, dropout, artifact blobs, and stick artifacts
 
+5. Full object-pose prediction
+- switch the student auxiliary prediction from position-only to full pose
+- because this phase is single-object overfit, predict full object `SE(3)` rather than only `xyz`
+- recommended representation:
+  - translation: `x, y, z`
+  - orientation: `rot6d`
+- reconstruct a rotation matrix / quaternion only for logging and evaluation
+- prefer `rot6d` over raw quaternion regression to avoid sign ambiguity and improve optimization stability
+
 ## Important rule
 
 If hole position or orientation is randomized, the supervision must be transformed too:

@@ -132,6 +132,7 @@ class IsaacSimDistillEnv:
         object_start_mode: str = "fixed",
         object_pos_noise_xyz: tuple[float, float, float] = (0.03, 0.03, 0.01),
         object_yaw_noise_deg: float = 20.0,
+        object_rotation_noise_mode: str = "yaw",
         enable_camera: bool = True,
         camera_backend: str = "tiled",
         ground_plane_size: float = 500.0,
@@ -149,6 +150,7 @@ class IsaacSimDistillEnv:
         self.object_start_mode = object_start_mode
         self.object_pos_noise_xyz = np.array(object_pos_noise_xyz, dtype=np.float32)
         self.object_yaw_noise_deg = float(object_yaw_noise_deg)
+        self.object_rotation_noise_mode = object_rotation_noise_mode
         self.app = app
         self.headless = headless
         self.camera_pose = camera_pose_override or task_spec.camera_pose
@@ -173,6 +175,10 @@ class IsaacSimDistillEnv:
             raise ValueError("depth_max_m must be greater than depth_min_m")
         if self.object_mass_multiplier <= 0:
             raise ValueError("object_mass_multiplier must be > 0")
+        if self.object_rotation_noise_mode not in {"yaw", "full_random"}:
+            raise ValueError(
+                f"Unsupported object_rotation_noise_mode={self.object_rotation_noise_mode!r}"
+            )
         self.action_dim = 29
         self.student_proprio_dim = 29 + 29 + 29 + 1
         self.object_scales_batch = np.repeat(self.task_spec.object_scales.astype(np.float32), self.num_envs, axis=0)
@@ -761,16 +767,25 @@ class IsaacSimDistillEnv:
         if self.object_start_mode != "randomized":
             raise ValueError(f"Unsupported object_start_mode: {self.object_start_mode}")
 
-        noise = (np.random.uniform(-1.0, 1.0, size=(self.num_envs, 3)).astype(np.float32) * self.object_pos_noise_xyz[None])
-        start[:, :3] += noise
-        yaw_noise = np.deg2rad(
-            np.random.uniform(-self.object_yaw_noise_deg, self.object_yaw_noise_deg, size=self.num_envs).astype(np.float32)
+        noise = (
+            np.random.uniform(-1.0, 1.0, size=(self.num_envs, 3)).astype(np.float32)
+            * self.object_pos_noise_xyz[None]
         )
-        for i in range(self.num_envs):
-            base = R.from_quat(start[i, 3:7])
-            yaw = R.from_euler("z", float(yaw_noise[i]))
-            start[i, 3:7] = (yaw * base).as_quat().astype(np.float32)
-        start[:, 2] = np.maximum(start[:, 2], self.task_spec.start_pose[2] - self.object_pos_noise_xyz[2])
+        start[:, :3] += noise
+        if self.object_rotation_noise_mode == "full_random":
+            start[:, 3:7] = R.random(self.num_envs).as_quat().astype(np.float32)
+        else:
+            yaw_noise = np.deg2rad(
+                np.random.uniform(
+                    -self.object_yaw_noise_deg,
+                    self.object_yaw_noise_deg,
+                    size=self.num_envs,
+                ).astype(np.float32)
+            )
+            for i in range(self.num_envs):
+                base = R.from_quat(start[i, 3:7])
+                yaw = R.from_euler("z", float(yaw_noise[i]))
+                start[i, 3:7] = (yaw * base).as_quat().astype(np.float32)
         return start
 
     def _local_pose_to_world_pose(self, local_pose_xyzw: np.ndarray) -> torch.Tensor:
