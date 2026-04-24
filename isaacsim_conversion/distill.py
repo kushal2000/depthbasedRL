@@ -76,6 +76,7 @@ def launch_app():
     parser.add_argument("--env_spacing", type=float, default=None)
     parser.add_argument("--ground_plane_size", type=float, default=None)
     parser.add_argument("--object_start_mode", choices=["fixed", "randomized"], default=None)
+    parser.add_argument("--object_mass_multiplier", type=float, default=1.0)
     parser.add_argument(
         "--beta_mode",
         choices=["metric_driven", "fixed_decay", "always_teacher", "always_student"],
@@ -1307,6 +1308,7 @@ def main():
         depth_max_m=settings.depth_max_m,
         episode_length=settings.episode_length,
         reset_when_dropped=settings.reset_when_dropped,
+        object_mass_multiplier=args.object_mass_multiplier,
     )
     teacher_inference_batch_size = 128 if args.mode == "teacher_eval" else 32
     teacher = RlPlayer(

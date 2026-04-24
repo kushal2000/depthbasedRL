@@ -88,6 +88,7 @@ class IsaacSimDistillEnv:
         depth_max_m: float = 5.0,
         episode_length: int = 600,
         reset_when_dropped: bool = False,
+        object_mass_multiplier: float = 1.0,
     ):
         self.task_spec = task_spec
         self.camera_modality = camera_modality
@@ -113,10 +114,13 @@ class IsaacSimDistillEnv:
         self.depth_max_m = float(depth_max_m)
         self.episode_length = int(episode_length)
         self.reset_when_dropped = bool(reset_when_dropped)
+        self.object_mass_multiplier = float(object_mass_multiplier)
         if self.depth_preprocess_mode not in {"clip_divide", "window_normalize", "metric"}:
             raise ValueError(f"Unsupported depth_preprocess_mode={self.depth_preprocess_mode!r}")
         if self.depth_max_m <= self.depth_min_m:
             raise ValueError("depth_max_m must be greater than depth_min_m")
+        if self.object_mass_multiplier <= 0:
+            raise ValueError("object_mass_multiplier must be > 0")
         self.action_dim = 29
         self.student_proprio_dim = 29 + 29 + 29 + 1
         self.object_scales_batch = np.repeat(self.task_spec.object_scales.astype(np.float32), self.num_envs, axis=0)
@@ -442,6 +446,7 @@ class IsaacSimDistillEnv:
         self._apply_physics_material_overrides(sim_utils)
         self.sim.reset()
         self.scene.reset()
+        self._apply_object_mass_multiplier()
         self._validate_joint_ordering()
         if self.camera is not None:
             _log(
@@ -526,6 +531,47 @@ class IsaacSimDistillEnv:
         raw_bind_physics_material = getattr(bind_physics_material, "__wrapped__", bind_physics_material)
         for prim_path in collision_prim_paths:
             raw_bind_physics_material(prim_path, material_path)
+
+    def _apply_object_mass_multiplier(self):
+        if np.isclose(self.object_mass_multiplier, 1.0):
+            return
+
+        from isaaclab.sim.utils import get_current_stage
+        from pxr import UsdPhysics
+
+        stage = get_current_stage()
+        updated_paths: list[str] = []
+        for env_id in range(self.num_envs):
+            object_root = stage.GetPrimAtPath(f"/World/envs/env_{env_id}/Object")
+            if not object_root.IsValid():
+                continue
+            prims_to_visit = [object_root]
+            while prims_to_visit:
+                prim = prims_to_visit.pop()
+                prims_to_visit.extend(list(prim.GetChildren()))
+                rigid_api = UsdPhysics.RigidBodyAPI(prim)
+                if not rigid_api:
+                    continue
+                mass_api = UsdPhysics.MassAPI(prim)
+                if not mass_api:
+                    mass_api = UsdPhysics.MassAPI.Apply(prim)
+                mass_attr = mass_api.GetMassAttr()
+                if not mass_attr or not mass_attr.HasAuthoredValue():
+                    continue
+                base_mass = float(mass_attr.Get())
+                new_mass = base_mass * self.object_mass_multiplier
+                mass_attr.Set(new_mass)
+                updated_paths.append(f"{prim.GetPath()}:{base_mass:.6f}->{new_mass:.6f}")
+        if updated_paths:
+            _log(
+                "Applied object mass multiplier "
+                f"{self.object_mass_multiplier:.4f} to {len(updated_paths)} rigid prim(s): {updated_paths}"
+            )
+        else:
+            _log(
+                "Object mass multiplier requested "
+                f"({self.object_mass_multiplier:.4f}) but no authored MassAPI rigid prims were found under /Object"
+            )
 
     def _apply_physics_material_overrides(self, sim_utils):
         all_collision_paths: list[str] = []
