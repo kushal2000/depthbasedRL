@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import os
 from pathlib import Path
 from typing import Any
 
@@ -203,11 +204,21 @@ class IsaacSimDistillEnv:
             from isaaclab.sensors import CameraCfg, TiledCameraCfg
 
             camera_types = list(self.camera_data_types)
-            camera_cfg_cls = TiledCameraCfg if self.camera_backend == "tiled" and self._camera_mount_mode() == "world" else CameraCfg
-            spawn_camera_at_static_pose = self.camera_backend == "tiled" and self._camera_mount_mode() == "world"
+            camera_mount = self._camera_mount_mode()
+            use_tiled_camera = self.camera_backend == "tiled" and (
+                camera_mount == "world"
+                or (camera_mount == "wrist" and os.getenv("ISAACSIM_FORCE_TILED_WRIST", "0") == "1")
+            )
+            camera_cfg_cls = TiledCameraCfg if use_tiled_camera else CameraCfg
+            spawn_camera_at_static_pose = use_tiled_camera
             camera_offset_pos = self.camera_pose.pos if spawn_camera_at_static_pose else (0.0, 0.0, 0.0)
             camera_offset_rot = self.camera_pose.quat_wxyz if spawn_camera_at_static_pose else (1.0, 0.0, 0.0, 0.0)
             camera_offset_convention = self.camera_pose.convention if spawn_camera_at_static_pose else "ros"
+            if use_tiled_camera and camera_mount == "wrist":
+                camera_link_name = self.camera_pose.link_name or "iiwa14_link_7"
+                camera_prim_path = f"{{ENV_REGEX_NS}}/Robot/{camera_link_name}/DistillCamera"
+            else:
+                camera_prim_path = "{ENV_REGEX_NS}/DistillCamera"
 
             @configclass
             class DistillSceneCfg(InteractiveSceneCfg):
@@ -272,7 +283,7 @@ class IsaacSimDistillEnv:
                 )
 
                 camera = camera_cfg_cls(
-                    prim_path="{ENV_REGEX_NS}/DistillCamera",
+                    prim_path=camera_prim_path,
                     update_period=0,
                     update_latest_camera_pose=True,
                     height=self.camera_intrinsics.height,
@@ -379,6 +390,19 @@ class IsaacSimDistillEnv:
         # which corrupts camera policy inputs while physics still runs.
         ground_plane_cfg = sim_utils.GroundPlaneCfg(size=(self.ground_plane_size, self.ground_plane_size))
         ground_plane_cfg.func("/World/GroundPlane", ground_plane_cfg)
+        render_mode = os.getenv("ISAACSIM_RENDER_MODE")
+        render_aa = os.getenv("ISAACSIM_RENDER_AA")
+        render_denoiser = os.getenv("ISAACSIM_RENDER_DENOISER")
+        render_spp = os.getenv("ISAACSIM_RENDER_SPP")
+        # Always provide a RenderCfg. In this Isaac Lab build, leaving
+        # SimulationCfg.render=None can trip render-settings application.
+        render_cfg = sim_utils.RenderCfg(
+            rendering_mode=render_mode or "balanced",
+            antialiasing_mode=render_aa or None,
+            enable_dl_denoiser=None if render_denoiser is None else render_denoiser == "1",
+            samples_per_pixel=None if render_spp is None else int(render_spp),
+        )
+
         sim_cfg = SimulationCfg(
             dt=PHYSICS_DT,
             render_interval=PHYSICS_SUBSTEPS,
@@ -394,11 +418,17 @@ class IsaacSimDistillEnv:
                 friction_offset_threshold=0.04,
                 friction_correlation_distance=0.025,
             ),
+            render=render_cfg,
         )
         self.sim = SimulationContext(sim_cfg)
         _log(
             "SimulationContext created "
             f"(control_dt={CONTROL_DT:.6f}, physics_dt={PHYSICS_DT:.6f}, substeps={PHYSICS_SUBSTEPS})"
+        )
+        _log(
+            "RenderCfg: "
+            f"mode={render_cfg.rendering_mode}, aa={render_cfg.antialiasing_mode}, "
+            f"denoiser={render_cfg.enable_dl_denoiser}, spp={render_cfg.samples_per_pixel}"
         )
 
         robot_usd = self._convert_robot_urdf(sim_utils, UrdfConverterCfg, UrdfConverter, self.task_spec.robot_urdf)
@@ -571,7 +601,7 @@ class IsaacSimDistillEnv:
             env_origins = self.env_origins[env_ids].detach().cpu().numpy()
             positions = env_origins + np.asarray(self.camera_pose.pos, dtype=np.float32)[None, :]
             orientations = np.repeat(np.asarray(self.camera_pose.quat_wxyz, dtype=np.float32)[None, :], len(env_ids_np), axis=0)
-        if self.camera_backend == "tiled" and self._camera_mount_mode() == "world":
+        if self.camera_backend == "tiled":
             self.camera_world_pos[env_ids_np] = positions
             self.camera_world_quat_wxyz[env_ids_np] = orientations
             return
