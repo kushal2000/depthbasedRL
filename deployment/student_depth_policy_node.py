@@ -178,6 +178,7 @@ class StudentDepthPolicyNodeArgs:
     hand_moving_average: float = 0.1
     arm_moving_average: float = 0.1
     hand_dof_speed_scale: float = 1.5
+    publish_joint_commands: bool = False
     publish_object_pos_topic: str = "/robot_frame/current_object_pose"
     object_pos_frame_id: str = "robot_frame"
     debug_print_proprio_every: int = 0
@@ -263,7 +264,7 @@ class StudentDepthPolicyNode:
         )
         info(
             f"ROS I/O: joint_states=({args.iiwa_joint_state_topic}, {args.sharpa_joint_state_topic}), "
-            f"joint_cmd=({args.iiwa_joint_cmd_topic}, {args.sharpa_joint_cmd_topic}), "
+            f"joint_cmd=({args.iiwa_joint_cmd_topic}, {args.sharpa_joint_cmd_topic}, enabled={args.publish_joint_commands}), "
             f"object_pose_topic={args.publish_object_pos_topic}"
         )
         expected_hz = 1.0 / self.control_dt if self.control_dt > 0 else float("nan")
@@ -412,6 +413,9 @@ class StudentDepthPolicyNode:
 
     def publish_targets(self, joint_pos_targets: np.ndarray):
         joint_pos_targets = joint_pos_targets[0]
+
+        if not self.args.publish_joint_commands:
+            return
 
         iiwa_msg = JointState()
         iiwa_msg.header.stamp = rospy.Time.now()
