@@ -286,6 +286,19 @@ def write_pose_viewer_html(path: Path, payload: dict, *, title: str) -> str:
             color_override=(0.20, 0.72, 0.31),
         )
     )
+    predicted_object_robot = (
+        make_embedded_robot(
+            name="predicted_object",
+            urdf_text=_read_urdf_text(payload["viewer_object_urdf_path"]),
+            color_override=(0.18, 0.42, 0.95),
+        )
+        if payload.get("viewer_object_urdf_path") is not None
+        else make_url_robot(
+            name="predicted_object",
+            urdf_url=object_urdf_url,
+            color_override=(0.18, 0.42, 0.95),
+        )
+    )
 
     robots = [
         make_url_robot(name="robot", urdf_url=robot_urdf_url, animated=True),
@@ -293,16 +306,22 @@ def write_pose_viewer_html(path: Path, payload: dict, *, title: str) -> str:
         object_robot,
         goal_robot,
     ]
+    if payload.get("predicted_object_poses") is not None:
+        robots.append(predicted_object_robot)
+
+    object_poses = {
+        "table": np.asarray(payload["table_poses"], dtype=float),
+        "object": np.asarray(payload["object_poses"], dtype=float),
+        "goal": np.asarray(payload["goal_poses"], dtype=float),
+    }
+    if payload.get("predicted_object_poses") is not None:
+        object_poses["predicted_object"] = np.asarray(payload["predicted_object_poses"], dtype=float)
 
     html_text = create_html(
         joint_names=payload["robot_joint_names"],
         robot_joint_positions=payload["robot_joint_positions"],
         robots=robots,
-        object_poses={
-            "table": np.asarray(payload["table_poses"], dtype=float),
-            "object": np.asarray(payload["object_poses"], dtype=float),
-            "goal": np.asarray(payload["goal_poses"], dtype=float),
-        },
+        object_poses=object_poses,
         robot_base_poses=np.asarray(payload["robot_base_poses"], dtype=float),
         timestamps=np.asarray(payload["timestamps"], dtype=float),
     )
