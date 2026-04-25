@@ -510,6 +510,40 @@ def _bind_material(material_path: str, collider_paths: list[str]) -> None:
         fn(collider, material_path)
 
 
+def _apply_physx_collision_offsets(
+    root_prim_path: str,
+    contact_offset: float,
+    rest_offset: float,
+) -> None:
+    """Author ``physxCollision:contactOffset`` and ``physxCollision:restOffset``
+    on every leaf collider prim under ``root_prim_path``.
+
+    The spawn-cfg ``CollisionPropertiesCfg(contact_offset=..., rest_offset=...)``
+    runs through Lab's ``apply_nested`` walker which bails on instanced prims.
+    For ``MultiUsdFileCfg``-spawned assets (Object/GoalViz) and the
+    ``UrdfFileCfg``-spawned Robot/Table, the actual collider leaves live
+    under instanceable prototypes at spawn time, so the configured offsets
+    silently default to PhysX values (contact_offset≈0.02 m, ~10× looser
+    than the cfg-set 2 mm). Walk the un-instanced subtree (via
+    ``_iter_collision_prim_paths``) and set the attributes leaf-by-leaf.
+
+    Verified by ``debug_differences/verify_collision_props.py``: before
+    this pass, 0 prims under Robot/Table/Object/GoalViz have an authored
+    contactOffset/restOffset value; after, every leaf collider does.
+    """
+    from pxr import PhysxSchema
+    stage = get_current_stage()
+    for path in _iter_collision_prim_paths(root_prim_path):
+        prim = stage.GetPrimAtPath(path)
+        if not PhysxSchema.PhysxCollisionAPI(prim):
+            PhysxSchema.PhysxCollisionAPI.Apply(prim)
+        api = PhysxSchema.PhysxCollisionAPI(prim)
+        attr = api.GetContactOffsetAttr() or api.CreateContactOffsetAttr()
+        attr.Set(float(contact_offset))
+        attr = api.GetRestOffsetAttr() or api.CreateRestOffsetAttr()
+        attr.Set(float(rest_offset))
+
+
 def _disable_collisions_in_subtree(root_prim_path: str) -> None:
     """Set ``physics:collisionEnabled=False`` on every collider prim under
     ``root_prim_path``.
@@ -775,6 +809,21 @@ def setup_scene(env) -> None:
     #     legacy gym's per-actor collision-group filter.
     for env_id in range(num_envs):
         _disable_collisions_in_subtree(f"/World/envs/env_{env_id}/GoalViz")
+
+    # 12. Apply contact_offset / rest_offset on every collider leaf for
+    #     Robot/Table/Object/GoalViz. The spawn-cfg `CollisionPropertiesCfg`
+    #     fails silently on instanced prims (Lab's apply_nested skips them),
+    #     so PhysX defaults to ~2 cm contact_offset instead of the configured
+    #     2 mm. Re-author leaf-by-leaf after un-instancing — same trick we
+    #     use for collisionEnabled in step 11. The values mirror the spawn
+    #     cfg in build_*_rigid_object_cfg / build_robot_articulation_cfg.
+    for env_id in range(num_envs):
+        for role in ("Robot", "Table", "Object", "GoalViz"):
+            _apply_physx_collision_offsets(
+                root_prim_path=f"/World/envs/env_{env_id}/{role}",
+                contact_offset=0.002,
+                rest_offset=0.0,
+            )
 
 
 __all__ = [
