@@ -136,6 +136,8 @@ class IsaacSimDistillEnv:
         camera_pos_noise_xyz: tuple[float, float, float] = (0.0, 0.0, 0.0),
         camera_rot_noise_deg: tuple[float, float, float] = (0.0, 0.0, 0.0),
         hole_pos_noise_xyz: tuple[float, float, float] = (0.0, 0.0, 0.0),
+        hole_xy_sample_min: tuple[float, float] | None = None,
+        hole_xy_sample_max: tuple[float, float] | None = None,
         hole_yaw_noise_deg: float = 0.0,
         enable_camera: bool = True,
         camera_backend: str = "tiled",
@@ -158,6 +160,8 @@ class IsaacSimDistillEnv:
         self.camera_pos_noise_xyz = np.array(camera_pos_noise_xyz, dtype=np.float32)
         self.camera_rot_noise_deg = np.array(camera_rot_noise_deg, dtype=np.float32)
         self.hole_pos_noise_xyz = np.array(hole_pos_noise_xyz, dtype=np.float32)
+        self.hole_xy_sample_min = None if hole_xy_sample_min is None else np.array(hole_xy_sample_min, dtype=np.float32)
+        self.hole_xy_sample_max = None if hole_xy_sample_max is None else np.array(hole_xy_sample_max, dtype=np.float32)
         self.hole_yaw_noise_deg = float(hole_yaw_noise_deg)
         self.app = app
         self.headless = headless
@@ -183,6 +187,13 @@ class IsaacSimDistillEnv:
             raise ValueError("depth_max_m must be greater than depth_min_m")
         if self.object_mass_multiplier <= 0:
             raise ValueError("object_mass_multiplier must be > 0")
+        if (self.hole_xy_sample_min is None) != (self.hole_xy_sample_max is None):
+            raise ValueError("hole_xy_sample_min and hole_xy_sample_max must be set together")
+        if self.hole_xy_sample_min is not None and self.hole_xy_sample_max is not None:
+            if self.hole_xy_sample_min.shape != (2,) or self.hole_xy_sample_max.shape != (2,):
+                raise ValueError("hole_xy_sample_min and hole_xy_sample_max must each have length 2")
+            if np.any(self.hole_xy_sample_max < self.hole_xy_sample_min):
+                raise ValueError("hole_xy_sample_max must be >= hole_xy_sample_min")
         if self.object_rotation_noise_mode not in {"yaw", "full_random"}:
             raise ValueError(
                 f"Unsupported object_rotation_noise_mode={self.object_rotation_noise_mode!r}"
@@ -558,7 +569,11 @@ class IsaacSimDistillEnv:
         ).unsqueeze(0)
         self._apply_physics_material_overrides(sim_utils)
         self._initialize_static_scene_randomizations()
-        if self.task_spec.hole_urdf is not None and (np.any(self.hole_pos_noise_xyz > 0.0) or self.hole_yaw_noise_deg > 0.0):
+        if self.task_spec.hole_urdf is not None and (
+            np.any(self.hole_pos_noise_xyz > 0.0)
+            or self.hole_xy_sample_min is not None
+            or self.hole_yaw_noise_deg > 0.0
+        ):
             from isaaclab.sim.views import XformPrimView
 
             self.hole_xform_view = XformPrimView(
@@ -857,7 +872,13 @@ class IsaacSimDistillEnv:
     def _sample_hole_poses(self, env_ids_np: np.ndarray) -> np.ndarray:
         base_hole_pose = self.task_spec.hole_pose if self.task_spec.hole_pose is not None else self.task_spec.table_pose
         hole_pose = np.repeat(base_hole_pose[None], len(env_ids_np), axis=0).astype(np.float32)
-        if np.any(self.hole_pos_noise_xyz > 0.0):
+        if self.hole_xy_sample_min is not None and self.hole_xy_sample_max is not None:
+            hole_pose[:, :2] = np.random.uniform(
+                self.hole_xy_sample_min[None],
+                self.hole_xy_sample_max[None],
+                size=(len(env_ids_np), 2),
+            ).astype(np.float32)
+        elif np.any(self.hole_pos_noise_xyz > 0.0):
             noise = (
                 np.random.uniform(-1.0, 1.0, size=(len(env_ids_np), 3)).astype(np.float32)
                 * self.hole_pos_noise_xyz[None]

@@ -158,6 +158,8 @@ class DistillSettings:
     camera_pos_noise_xyz: tuple[float, float, float] = (0.0, 0.0, 0.0)
     camera_rot_noise_deg: tuple[float, float, float] = (0.0, 0.0, 0.0)
     hole_pos_noise_xyz: tuple[float, float, float] = (0.0, 0.0, 0.0)
+    hole_xy_sample_min: tuple[float, float] | None = None
+    hole_xy_sample_max: tuple[float, float] | None = None
     hole_yaw_noise_deg: float = 0.0
     image_robustness: dict | None = None
     monitor_num_envs: int = 0
@@ -257,6 +259,15 @@ def validate_distill_settings(settings: DistillSettings):
         raise ValueError(f"Unsupported depth_preprocess_mode={settings.depth_preprocess_mode!r}")
     if settings.depth_max_m <= settings.depth_min_m:
         raise ValueError("depth_max_m must be greater than depth_min_m")
+    if (settings.hole_xy_sample_min is None) != (settings.hole_xy_sample_max is None):
+        raise ValueError("hole_xy_sample_min and hole_xy_sample_max must be set together")
+    if settings.hole_xy_sample_min is not None and settings.hole_xy_sample_max is not None:
+        hole_xy_min = np.asarray(settings.hole_xy_sample_min, dtype=np.float32)
+        hole_xy_max = np.asarray(settings.hole_xy_sample_max, dtype=np.float32)
+        if hole_xy_min.shape != (2,) or hole_xy_max.shape != (2,):
+            raise ValueError("hole_xy_sample_min and hole_xy_sample_max must each have length 2")
+        if np.any(hole_xy_max < hole_xy_min):
+            raise ValueError("hole_xy_sample_max must be >= hole_xy_sample_min")
     if settings.episode_length <= 0:
         raise ValueError("episode_length must be > 0")
     if settings.online_num_iters <= 0:
@@ -1670,6 +1681,8 @@ def main():
         camera_pos_noise_xyz=settings.camera_pos_noise_xyz,
         camera_rot_noise_deg=settings.camera_rot_noise_deg,
         hole_pos_noise_xyz=settings.hole_pos_noise_xyz,
+        hole_xy_sample_min=settings.hole_xy_sample_min,
+        hole_xy_sample_max=settings.hole_xy_sample_max,
         hole_yaw_noise_deg=settings.hole_yaw_noise_deg,
         camera_backend=args.camera_backend or settings.camera_backend,
         depth_preprocess_mode=settings.depth_preprocess_mode,

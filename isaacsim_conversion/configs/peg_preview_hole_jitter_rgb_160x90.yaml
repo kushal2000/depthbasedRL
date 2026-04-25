@@ -29,9 +29,11 @@ object_yaw_noise_deg: 0.0
 object_rotation_noise_mode: yaw
 camera_pos_noise_xyz: [0.0, 0.0, 0.0]
 camera_rot_noise_deg: [0.0, 0.0, 0.0]
-# Match the teacher's resetPositionNoiseX/Y magnitude for the grasped peg,
-# but apply it to the static hole/table for this visual sanity check.
-hole_pos_noise_xyz: [0.1, 0.1, 0.0]
+# Match peg_in_hole/scene_generation/generate_scenes.py:
+# hole centers are sampled uniformly in x=[-0.15, 0.15], y=[-0.11, 0.11].
+hole_pos_noise_xyz: [0.0, 0.0, 0.0]
+hole_xy_sample_min: [-0.15, -0.11]
+hole_xy_sample_max: [0.15, 0.11]
 hole_yaw_noise_deg: 0.0
 camera_backend: tiled
 depth_preprocess_mode: metric
