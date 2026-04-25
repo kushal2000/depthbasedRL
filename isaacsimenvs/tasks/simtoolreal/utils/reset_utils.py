@@ -282,10 +282,21 @@ def _reset_goal_pose(env, env_ids: torch.Tensor, mode: str) -> None:
 
     ``mode="absolute"`` samples fresh in the scaled workspace box;
     ``mode="delta"`` perturbs the current goal (chain continuation).
+
+    Debug shortcut: if ``cfg.fixed_goal_pose`` is set, every env_id gets
+    that exact env-local pose, no sampling.
     """
     cfg = env.cfg.reset
     n = env_ids.numel()
     env_origins = env.scene.env_origins[env_ids]
+
+    if cfg.fixed_goal_pose is not None:
+        fixed = torch.as_tensor(cfg.fixed_goal_pose, device=env.device, dtype=torch.float32)
+        new_pos_local = fixed[:3].unsqueeze(0).expand(n, -1)
+        new_quat = fixed[3:].unsqueeze(0).expand(n, -1)
+        pose = torch.cat([new_pos_local + env_origins, new_quat], dim=-1)
+        env.goal_viz.write_root_pose_to_sim(pose, env_ids=env_ids)
+        return
 
     if mode == "delta":
         prev_pos_local = env.goal_viz.data.root_pos_w[env_ids] - env_origins

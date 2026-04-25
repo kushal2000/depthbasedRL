@@ -196,6 +196,11 @@ class ResetCfg:
     target_volume_maxs: tuple[float, float, float] = (0.35, 0.2, 0.95)
     target_volume_region_scale: float = 1.0
 
+    # Debug only — when set, every reset writes this exact env-local pose
+    # to GoalViz instead of sampling. Format: (x, y, z, qw, qx, qy, qz).
+    # Used by debug_differences/* to keep both envs visually aligned.
+    fixed_goal_pose: tuple[float, float, float, float, float, float, float] | None = None
+
 
 # ----------------------------------------------------------------------------
 # termination (includes tolerance curriculum — governs success criterion)

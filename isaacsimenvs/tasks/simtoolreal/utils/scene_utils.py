@@ -161,6 +161,59 @@ assert len(ARM_JOINT_STIFFNESS) == 7 and len(ARM_JOINT_DAMPING) == 7
 assert len(HAND_JOINT_STIFFNESS) == 22 and len(HAND_JOINT_DAMPING) == 22
 
 
+# Note: if you ever stop using ImplicitActuatorCfg and need the USD-level
+# JointDriveCfg gains to be the source of truth, multiply them by 180/π
+# before passing into PDGainsCfg. UrdfConverter applies a π/180 conversion
+# for revolute joints (urdf_converter.py:292-320), since UsdPhysics.DriveAPI
+# convention is per-degree while PhysX is per-radian. Skipped only for
+# JOINT_PRISMATIC. Production path doesn't need this — JointDriveCfg gains
+# below are 0.0 (placeholder), overwritten by ImplicitActuatorCfg at sim init.
+
+
+# Per-joint armature (reflected motor inertia) and static friction.
+# Legacy values from `isaacgymenvs/tasks/simtoolreal/utils.py:158-205`. Without
+# armature, hand DIP/IP joints have only their link mass as inertia, which
+# inflates the effective damping ratio (D / (2 sqrt(K·M))) and makes the
+# response look overdamped. Without friction, joints move under any tiny
+# load. Both must be set to match legacy hand dynamics.
+HAND_JOINT_ARMATURE: dict[str, float] = {
+    # Thumb
+    "left_1_thumb_CMC_FE": 0.0032, "left_thumb_CMC_AA": 0.0032,
+    "left_thumb_MCP_FE": 0.00265, "left_thumb_MCP_AA": 0.00265,
+    "left_thumb_IP": 0.0006,
+    # Index
+    "left_2_index_MCP_FE": 0.00265, "left_index_MCP_AA": 0.00265,
+    "left_index_PIP": 0.0006, "left_index_DIP": 0.00042,
+    # Middle
+    "left_3_middle_MCP_FE": 0.00265, "left_middle_MCP_AA": 0.00265,
+    "left_middle_PIP": 0.0006, "left_middle_DIP": 0.00042,
+    # Ring
+    "left_4_ring_MCP_FE": 0.00265, "left_ring_MCP_AA": 0.00265,
+    "left_ring_PIP": 0.0006, "left_ring_DIP": 0.00042,
+    # Pinky
+    "left_5_pinky_CMC": 0.00012, "left_pinky_MCP_FE": 0.00265,
+    "left_pinky_MCP_AA": 0.00265, "left_pinky_PIP": 0.0006,
+    "left_pinky_DIP": 0.00042,
+}
+
+HAND_JOINT_FRICTION: dict[str, float] = {
+    "left_1_thumb_CMC_FE": 0.132, "left_thumb_CMC_AA": 0.132,
+    "left_thumb_MCP_FE": 0.07456, "left_thumb_MCP_AA": 0.07456,
+    "left_thumb_IP": 0.01276,
+    "left_2_index_MCP_FE": 0.07456, "left_index_MCP_AA": 0.07456,
+    "left_index_PIP": 0.01276, "left_index_DIP": 0.00378738,
+    "left_3_middle_MCP_FE": 0.07456, "left_middle_MCP_AA": 0.07456,
+    "left_middle_PIP": 0.01276, "left_middle_DIP": 0.00378738,
+    "left_4_ring_MCP_FE": 0.07456, "left_ring_MCP_AA": 0.07456,
+    "left_ring_PIP": 0.01276, "left_ring_DIP": 0.00378738,
+    "left_5_pinky_CMC": 0.012, "left_pinky_MCP_FE": 0.07456,
+    "left_pinky_MCP_AA": 0.07456, "left_pinky_PIP": 0.01276,
+    "left_pinky_DIP": 0.00378738,
+}
+
+assert len(HAND_JOINT_ARMATURE) == 22 and len(HAND_JOINT_FRICTION) == 22
+
+
 # Proven-working default arm pose (isaacsim_conversion/isaacsim_env.py:101-109).
 ARM_DEFAULT_JOINT_POS: dict[str, float] = {
     "iiwa14_joint_1": -1.571,
@@ -182,12 +235,26 @@ def build_robot_articulation_cfg(assets_cfg, usd_dir: str | None = None) -> Arti
     """Assemble the IIWA14 + SHARPA hand `ArticulationCfg`.
 
     Robot is fixed-base, gravity disabled, self-collisions off. Joint drives use
-    explicit `ImplicitActuatorCfg` groups so the USD-level drive (whatever
-    UrdfConverter produces) is not relied on.
+    explicit `ImplicitActuatorCfg` groups together with a USD-level
+    JointDriveCfg (see two-layer comment below).
 
     `usd_dir` overrides Isaac Lab's default `/tmp/IsaacLab/usd_<ts>_<id>`
     cache — required on shared filesystems where the default parent dir is
     owned by whichever user ran first and others hit EACCES.
+
+    Open-loop sine-wave parity vs the legacy isaacgym SimToolReal env (per
+    ``debug_differences/sine_hand_*.py`` ablation, branch
+    ``2026_04_24_debug_isaac_gym_sim_differences``):
+
+      - 180/π pre-compensation on USD joint drive: required (without it
+        the hand overshoots ~1 rad on a 0.07-rad command).
+      - ``HAND_JOINT_ARMATURE`` on the hand actuator: 18× residual
+        reduction (0.32 mrad max vs 5.79 mrad without).
+      - ``HAND_JOINT_FRICTION``: NOT applied — Lab's ``friction`` is a
+        unitless coefficient on transmitted force, the legacy gymapi
+        values are Coulomb torques in Nm. Dropping legacy numbers in
+        directly locks the hand. The dict is left in scope for a future
+        proper port (e.g. via `dynamic_friction` after unit conversion).
     """
     return ArticulationCfg(
         prim_path="/World/envs/env_.*/Robot",
@@ -201,10 +268,39 @@ def build_robot_articulation_cfg(assets_cfg, usd_dir: str | None = None) -> Arti
             # friction override) can reach individual collider prims under
             # /World/envs/env_*/Robot/<link>/collisions.
             make_instanceable=False,
-            # ImplicitActuatorCfg below runs the PD controller; the USD-level
-            # joint drive is therefore irrelevant. Set to None so UrdfConverter
-            # doesn't demand stiffness values.
-            joint_drive=None,
+            # Two-layer drive setup, mirroring the proven-working
+            # `isaacsim_conversion/isaacsim_env.py:228-235`:
+            #   - USD-level JointDriveCfg sets drive_type=force / target=position
+            #     plus the (180/π)-compensated gains so the USD joint drive is
+            #     consistent with PhysX units.
+            #   - The ImplicitActuatorCfg below applies the *uncompensated*
+            #     gains at runtime; ImplicitActuator pushes them straight into
+            #     PhysX without the rad→deg conversion.
+            # Setting joint_drive=None left the USD drive in a stub state and
+            # produced an over-damped/sluggish hand response.
+            # The JointDriveCfg authors a USD `UsdPhysics.DriveAPI` prim on
+            # each joint with the configured drive_type / target_type. PhysX
+            # only registers a drive on a joint when this prim is present —
+            # without it, ImplicitActuator's runtime gain writes have no slot
+            # to land in (verified empirically: joint_drive=None gives 0.94 rad
+            # max parity error while production gives 1.6 mrad).
+            #
+            # The numeric stiffness/damping values inside PDGainsCfg are
+            # OVERWRITTEN at simulation start by the ImplicitActuatorCfg below
+            # (Lab actuator_base.py:175-200 documents this precedence: cfg-set
+            # values win over USD-parsed values). They are also subject to a
+            # rad→deg multiplication inside UrdfConverter for revolute joints
+            # (urdf_converter.py:304-305). We pass 0.0 here to make it explicit
+            # that the runtime layer is the source of truth — no need to dual-
+            # maintain compensated copies.
+            joint_drive=UrdfConverterCfg.JointDriveCfg(
+                drive_type="force",
+                target_type="position",
+                gains=UrdfConverterCfg.JointDriveCfg.PDGainsCfg(
+                    stiffness=0.0,
+                    damping=0.0,
+                ),
+            ),
             rigid_props=RigidBodyPropertiesCfg(
                 disable_gravity=True,
                 max_depenetration_velocity=1000.0,
@@ -238,6 +334,7 @@ def build_robot_articulation_cfg(assets_cfg, usd_dir: str | None = None) -> Arti
                 joint_names_expr=[HAND_JOINT_REGEX],
                 stiffness=HAND_JOINT_STIFFNESS,
                 damping=HAND_JOINT_DAMPING,
+                armature=HAND_JOINT_ARMATURE,
             ),
         },
     )
@@ -326,7 +423,15 @@ def build_object_rigid_object_cfg(usd_paths: list[str]) -> RigidObjectCfg:
 
 
 def build_goal_viz_rigid_object_cfg(usd_paths: list[str]) -> RigidObjectCfg:
-    """Kinematic visual twin of Object — same cycling, gravity disabled."""
+    """Kinematic visual twin of Object — same cycling, gravity + collisions
+    disabled.
+
+    The legacy isaacgym side puts goal_object in its own collision group
+    (env.py:1369 — `collision_filter_idx = env_idx + num_envs`) so it never
+    collides with the real object/robot/table. Isaac Lab has no equivalent
+    per-actor group field, so we disable collisions outright on the visual
+    twin (it's kinematic + gravity-off anyway, no need for contacts).
+    """
     return RigidObjectCfg(
         prim_path="/World/envs/env_.*/GoalViz",
         spawn=MultiUsdFileCfg(
@@ -337,6 +442,7 @@ def build_goal_viz_rigid_object_cfg(usd_paths: list[str]) -> RigidObjectCfg:
                 disable_gravity=True,
             ),
             collision_props=CollisionPropertiesCfg(
+                collision_enabled=False,
                 contact_offset=0.002,
                 rest_offset=0.0,
             ),
@@ -371,6 +477,31 @@ def _bind_material(material_path: str, collider_paths: list[str]) -> None:
     fn = getattr(bind_physics_material, "__wrapped__", bind_physics_material)
     for collider in collider_paths:
         fn(collider, material_path)
+
+
+def _disable_collisions_in_subtree(root_prim_path: str) -> None:
+    """Set ``physics:collisionEnabled=False`` on every collider prim under
+    ``root_prim_path``.
+
+    Lab's ``CollisionPropertiesCfg(collision_enabled=False)`` on a spawn cfg
+    is silently a no-op for nested colliders: ``schemas.modify_collision_properties``
+    (schemas.py:401-402) checks ``UsdPhysics.CollisionAPI(prim)`` on the
+    spawn target prim (the GoalViz root, which is an Xform/Articulation root
+    without CollisionAPI applied), and returns immediately. The actual
+    colliders are nested at e.g. ``/World/envs/env_K/GoalViz/object_root/collisions``.
+    We have to walk into the subtree and disable each collider explicitly.
+    """
+    from pxr import UsdPhysics
+    for path in _iter_collision_prim_paths(root_prim_path):
+        stage = get_current_stage()
+        prim = stage.GetPrimAtPath(path)
+        if not prim.IsValid():
+            continue
+        api = UsdPhysics.CollisionAPI(prim)
+        if not api:
+            api = UsdPhysics.CollisionAPI.Apply(prim)
+        attr = api.GetCollisionEnabledAttr() or api.CreateCollisionEnabledAttr()
+        attr.Set(False)
 
 
 _DEFAULT_MATERIAL_PATH = "/World/PhysicsMaterials/simtoolreal_default"
@@ -594,6 +725,13 @@ def setup_scene(env) -> None:
             assets_cfg=assets_cfg,
         )
 
+    # 11. Disable colliders on every GoalViz nested collider prim. The
+    #     spawn-cfg `collision_enabled=False` is a no-op (see helper docstring)
+    #     so we walk into the subtree and flip the attr ourselves. Mirrors
+    #     legacy gym's per-actor collision-group filter.
+    for env_id in range(num_envs):
+        _disable_collisions_in_subtree(f"/World/envs/env_{env_id}/GoalViz")
+
 
 __all__ = [
     "ARM_JOINT_REGEX",
@@ -606,6 +744,8 @@ __all__ = [
     "ARM_JOINT_DAMPING",
     "HAND_JOINT_STIFFNESS",
     "HAND_JOINT_DAMPING",
+    "HAND_JOINT_ARMATURE",
+    "HAND_JOINT_FRICTION",
     "ARM_DEFAULT_JOINT_POS",
     "build_robot_articulation_cfg",
     "build_table_rigid_object_cfg",
