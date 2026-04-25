@@ -211,6 +211,8 @@ class IsaacSimDistillEnv:
         self.goal_pose = np.repeat(self.task_spec.goals[0][None], self.num_envs, axis=0).astype(np.float32)
         self.current_start_pose = np.repeat(self.task_spec.start_pose[None], self.num_envs, axis=0).astype(np.float32)
         self.current_table_pose = np.repeat(self.task_spec.table_pose[None], self.num_envs, axis=0).astype(np.float32)
+        base_hole_pose = self.task_spec.hole_pose if self.task_spec.hole_pose is not None else self.task_spec.table_pose
+        self.current_hole_pose = np.repeat(base_hole_pose[None], self.num_envs, axis=0).astype(np.float32)
         self.current_goals = np.repeat(np.stack(self.task_spec.goals, axis=0)[None], self.num_envs, axis=0).astype(np.float32)
         self.camera_pos_jitter = np.zeros((self.num_envs, 3), dtype=np.float32)
         self.camera_rot_jitter_wxyz = np.repeat(
@@ -222,7 +224,7 @@ class IsaacSimDistillEnv:
         self.prev_targets: np.ndarray | None = None
         self.camera_world_pos = np.zeros((self.num_envs, 3), dtype=np.float32)
         self.camera_world_quat_wxyz = np.zeros((self.num_envs, 4), dtype=np.float32)
-        self.table_xform_view = None
+        self.hole_xform_view = None
         self.permutation: np.ndarray | None = None
         self.inverse_permutation: np.ndarray | None = None
         self.permutation_torch: torch.Tensor | None = None
@@ -284,7 +286,7 @@ class IsaacSimDistillEnv:
         )
         return UrdfConverter(cfg).usd_path
 
-    def _make_scene_cfg(self, sim_utils, robot_usd: str, table_usd: str, object_usd: str):
+    def _make_scene_cfg(self, sim_utils, robot_usd: str, table_usd: str, object_usd: str, hole_usd: str | None):
         from isaaclab.actuators import ImplicitActuatorCfg
         from isaaclab.assets import AssetBaseCfg, ArticulationCfg, RigidObjectCfg
         from isaaclab.scene import InteractiveSceneCfg
@@ -303,6 +305,20 @@ class IsaacSimDistillEnv:
             ),
             init_state=AssetBaseCfg.InitialStateCfg(pos=(0.0, 0.0, 0.38)),
         )
+        hole_cfg = None
+        if hole_usd is not None:
+            hole_pose = self.task_spec.hole_pose if self.task_spec.hole_pose is not None else self.task_spec.table_pose
+            hole_cfg = AssetBaseCfg(
+                prim_path="{ENV_REGEX_NS}/Hole",
+                spawn=sim_utils.UsdFileCfg(
+                    usd_path=hole_usd,
+                    collision_props=sim_utils.CollisionPropertiesCfg(
+                        contact_offset=0.002,
+                        rest_offset=0.0,
+                    ),
+                ),
+                init_state=AssetBaseCfg.InitialStateCfg(pos=tuple(float(x) for x in hole_pose[:3])),
+            )
         if self.enable_camera and not self._uses_manual_tiled_world_camera():
             from isaaclab.sensors import CameraCfg, TiledCameraCfg
 
@@ -362,6 +378,8 @@ class IsaacSimDistillEnv:
                 )
 
                 table = table_cfg
+                if hole_cfg is not None:
+                    hole = hole_cfg
 
                 object = RigidObjectCfg(
                     prim_path="{ENV_REGEX_NS}/Object",
@@ -447,6 +465,8 @@ class IsaacSimDistillEnv:
                 )
 
                 table = table_cfg
+                if hole_cfg is not None:
+                    hole = hole_cfg
 
                 object = RigidObjectCfg(
                     prim_path="{ENV_REGEX_NS}/Object",
@@ -503,11 +523,16 @@ class IsaacSimDistillEnv:
         table_usd = self._convert_static_urdf(
             UrdfConverterCfg, UrdfConverter, self.task_spec.table_urdf, "/tmp/isaaclab_usd_cache_distill/table", True
         )
+        hole_usd = None
+        if self.task_spec.hole_urdf is not None:
+            hole_usd = self._convert_static_urdf(
+                UrdfConverterCfg, UrdfConverter, self.task_spec.hole_urdf, "/tmp/isaaclab_usd_cache_distill/hole", True
+            )
         object_usd = self._convert_static_urdf(
             UrdfConverterCfg, UrdfConverter, self.task_spec.object_urdf, "/tmp/isaaclab_usd_cache_distill/object", False
         )
 
-        scene_cfg_type = self._make_scene_cfg(sim_utils, robot_usd, table_usd, object_usd)
+        scene_cfg_type = self._make_scene_cfg(sim_utils, robot_usd, table_usd, object_usd, hole_usd)
         self.scene = InteractiveScene(
             scene_cfg_type(
                 num_envs=self.num_envs,
@@ -533,23 +558,23 @@ class IsaacSimDistillEnv:
         ).unsqueeze(0)
         self._apply_physics_material_overrides(sim_utils)
         self._initialize_static_scene_randomizations()
-        if np.any(self.hole_pos_noise_xyz > 0.0) or self.hole_yaw_noise_deg > 0.0:
+        if self.task_spec.hole_urdf is not None and (np.any(self.hole_pos_noise_xyz > 0.0) or self.hole_yaw_noise_deg > 0.0):
             from isaaclab.sim.views import XformPrimView
 
-            self.table_xform_view = XformPrimView(
-                "/World/envs/env_.*/Table",
+            self.hole_xform_view = XformPrimView(
+                "/World/envs/env_.*/Hole",
                 device=self.device,
                 validate_xform_ops=False,
                 sync_usd_on_fabric_write=True,
                 stage=self.sim.stage,
             )
-            self._apply_table_asset_poses()
+            self._apply_hole_asset_poses()
         if manual_tiled_world_camera:
             self.camera = self._create_manual_tiled_world_camera(sim_utils)
             self.scene.sensors["camera"] = self.camera
         self.sim.reset()
         self.scene.reset()
-        self._apply_table_asset_poses()
+        self._apply_hole_asset_poses()
         self._apply_robot_adjacent_self_collision_filtering()
         self._apply_object_mass_multiplier()
         self._validate_joint_ordering()
@@ -829,32 +854,34 @@ class IsaacSimDistillEnv:
         rot_xyzw = R.from_euler("xyz", rot_noise_deg, degrees=True).as_quat().astype(np.float32)
         self.camera_rot_jitter_wxyz[env_ids_np] = rot_xyzw[:, [3, 0, 1, 2]]
 
-    def _sample_table_poses(self, env_ids_np: np.ndarray) -> np.ndarray:
-        table_pose = np.repeat(self.task_spec.table_pose[None], len(env_ids_np), axis=0).astype(np.float32)
+    def _sample_hole_poses(self, env_ids_np: np.ndarray) -> np.ndarray:
+        base_hole_pose = self.task_spec.hole_pose if self.task_spec.hole_pose is not None else self.task_spec.table_pose
+        hole_pose = np.repeat(base_hole_pose[None], len(env_ids_np), axis=0).astype(np.float32)
         if np.any(self.hole_pos_noise_xyz > 0.0):
             noise = (
                 np.random.uniform(-1.0, 1.0, size=(len(env_ids_np), 3)).astype(np.float32)
                 * self.hole_pos_noise_xyz[None]
             )
-            table_pose[:, :3] += noise
+            hole_pose[:, :3] += noise
         if self.hole_yaw_noise_deg > 0.0:
             yaw_noise = np.deg2rad(
                 np.random.uniform(-self.hole_yaw_noise_deg, self.hole_yaw_noise_deg, size=len(env_ids_np)).astype(np.float32)
             )
             for i in range(len(env_ids_np)):
-                base = R.from_quat(table_pose[i, 3:7])
+                base = R.from_quat(hole_pose[i, 3:7])
                 yaw = R.from_euler("z", float(yaw_noise[i]))
-                table_pose[i, 3:7] = (yaw * base).as_quat().astype(np.float32)
-        return table_pose
+                hole_pose[i, 3:7] = (yaw * base).as_quat().astype(np.float32)
+        return hole_pose
 
-    def _transform_poses_with_table_delta(self, poses_xyzw: np.ndarray, table_pose_xyzw: np.ndarray) -> np.ndarray:
-        base_table = self.task_spec.table_pose.astype(np.float32)
-        base_rot = R.from_quat(base_table[3:7])
-        new_rot = R.from_quat(table_pose_xyzw[3:7])
+    def _transform_poses_with_hole_delta(self, poses_xyzw: np.ndarray, hole_pose_xyzw: np.ndarray) -> np.ndarray:
+        base_hole = self.task_spec.hole_pose if self.task_spec.hole_pose is not None else self.task_spec.table_pose
+        base_hole = base_hole.astype(np.float32)
+        base_rot = R.from_quat(base_hole[3:7])
+        new_rot = R.from_quat(hole_pose_xyzw[3:7])
         delta_rot = new_rot * base_rot.inv()
         out = poses_xyzw.copy().astype(np.float32)
-        rel_pos = poses_xyzw[:, :3] - base_table[None, :3]
-        out[:, :3] = delta_rot.apply(rel_pos) + table_pose_xyzw[None, :3]
+        rel_pos = poses_xyzw[:, :3] - base_hole[None, :3]
+        out[:, :3] = delta_rot.apply(rel_pos) + hole_pose_xyzw[None, :3]
         pose_rot = R.from_quat(poses_xyzw[:, 3:7])
         out[:, 3:7] = (delta_rot * pose_rot).as_quat().astype(np.float32)
         return out
@@ -862,13 +889,14 @@ class IsaacSimDistillEnv:
     def _initialize_static_scene_randomizations(self) -> None:
         """Sample per-env fixture/camera variation once, not at every episode reset."""
         env_ids_np = np.arange(self.num_envs, dtype=np.int64)
-        self.current_table_pose[:] = self._sample_table_poses(env_ids_np)
+        self.current_table_pose[:] = self.task_spec.table_pose[None]
+        self.current_hole_pose[:] = self._sample_hole_poses(env_ids_np)
         self._sample_camera_randomization(env_ids_np)
         base_goals = np.stack(self.task_spec.goals, axis=0).astype(np.float32)
         for env_id in env_ids_np:
-            self.current_goals[env_id] = self._transform_poses_with_table_delta(
+            self.current_goals[env_id] = self._transform_poses_with_hole_delta(
                 base_goals,
-                self.current_table_pose[env_id],
+                self.current_hole_pose[env_id],
             )
         self.goal_pose[:] = self.current_goals[:, 0]
         self._static_scene_randomization_initialized = True
@@ -964,19 +992,19 @@ class IsaacSimDistillEnv:
             world_pose[i, 3:] = xyzw_to_wxyz(local_pose_xyzw[i, 3:])
         return torch.tensor(world_pose, dtype=torch.float32, device=self.device)
 
-    def _apply_table_asset_poses(self, env_ids: torch.Tensor | None = None) -> None:
-        if self.table_xform_view is None:
+    def _apply_hole_asset_poses(self, env_ids: torch.Tensor | None = None) -> None:
+        if self.hole_xform_view is None:
             return
         if env_ids is None:
             env_ids = torch.arange(self.num_envs, device=self.device, dtype=torch.long)
         env_ids_np = env_ids.detach().cpu().numpy()
-        translations = torch.tensor(self.current_table_pose[env_ids_np, :3], dtype=torch.float32, device=self.device)
+        translations = torch.tensor(self.current_hole_pose[env_ids_np, :3], dtype=torch.float32, device=self.device)
         orientations = torch.tensor(
-            np.stack([xyzw_to_wxyz(pose[3:7]) for pose in self.current_table_pose[env_ids_np]], axis=0),
+            np.stack([xyzw_to_wxyz(pose[3:7]) for pose in self.current_hole_pose[env_ids_np]], axis=0),
             dtype=torch.float32,
             device=self.device,
         )
-        self.table_xform_view.set_local_poses(translations=translations, orientations=orientations, indices=env_ids)
+        self.hole_xform_view.set_local_poses(translations=translations, orientations=orientations, indices=env_ids)
 
     def reset(self):
         for key in self.reset_reason_counts:
@@ -1014,7 +1042,7 @@ class IsaacSimDistillEnv:
             self.table_rigid.write_root_pose_to_sim(table_pose_w[env_ids], env_ids=env_ids)
             table_vel = torch.zeros((len(env_ids_np), 6), dtype=torch.float32, device=self.device)
             self.table_rigid.write_root_velocity_to_sim(table_vel, env_ids=env_ids)
-        self._apply_table_asset_poses(env_ids)
+        self._apply_hole_asset_poses(env_ids)
 
         start_poses = self._sample_start_poses()[env_ids_np]
         self.current_start_pose[env_ids_np] = start_poses
@@ -1107,6 +1135,7 @@ class IsaacSimDistillEnv:
         robot_base_pose[:3] = robot_root_state[:3] - env_origin
         robot_base_pose[3:] = robot_root_state[3:7][[1, 2, 3, 0]]
         table_pose = self.current_table_pose[env_id].astype(np.float32)
+        hole_pose = self.current_hole_pose[env_id].astype(np.float32)
         return {
             "env_id": int(env_id),
             "robot_joint_names": list(self.robot.joint_names),
@@ -1117,6 +1146,7 @@ class IsaacSimDistillEnv:
             "object_pose": sim_state.object_pose[env_id].astype(np.float32),
             "goal_pose": sim_state.goal_pose[env_id].astype(np.float32),
             "table_pose": table_pose,
+            "hole_pose": hole_pose,
             "goal_idx": int(sim_state.goal_idx[env_id]),
             "kp_dist": float(sim_state.kp_dist[env_id]),
         }

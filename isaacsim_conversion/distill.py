@@ -746,12 +746,16 @@ def _log_viewer_artifacts(
         "goal_idx": [int(f["goal_idx"]) for f in frames],
         "kp_dist": [float(f["kp_dist"]) for f in frames],
     }
+    if "hole_pose" in frames[0]:
+        payload["hole_poses"] = np.stack([f["hole_pose"] for f in frames]).tolist()
     pred_object_poses = [f["predicted_object_pose"] for f in frames if "predicted_object_pose" in f]
     if pred_object_poses:
         payload["predicted_object_poses"] = np.stack(pred_object_poses).tolist()
     if task_spec is not None:
         if getattr(task_spec, "viewer_table_urdf_path", None) is not None:
             payload["viewer_table_urdf_path"] = task_spec.viewer_table_urdf_path
+        if getattr(task_spec, "viewer_hole_urdf_path", None) is not None:
+            payload["viewer_hole_urdf_path"] = task_spec.viewer_hole_urdf_path
         if getattr(task_spec, "viewer_object_urdf_path", None) is not None:
             payload["viewer_object_urdf_path"] = task_spec.viewer_object_urdf_path
         if getattr(task_spec, "viewer_object_github_relpath", None) is not None:
@@ -1533,6 +1537,7 @@ def save_camera_debug(
                 "object_start_mode": env.object_start_mode,
                 "current_start_pose": env.current_start_pose.tolist(),
                 "current_table_pose": env.current_table_pose.tolist(),
+                "current_hole_pose": env.current_hole_pose.tolist(),
                 "current_goals": env.current_goals.tolist(),
                 "goal_pose": env.goal_pose.tolist(),
             },

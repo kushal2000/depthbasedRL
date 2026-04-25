@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass
 from pathlib import Path
+import xml.etree.ElementTree as ET
 
 import numpy as np
 import yaml
@@ -46,11 +47,77 @@ class TaskSpec:
     keypoint_tolerance: float
     camera_pose: CameraPose
     table_pose: np.ndarray
+    hole_urdf: str | None = None
+    hole_pose: np.ndarray | None = None
     viewer_table_urdf_path: str | None = None
+    viewer_hole_urdf_path: str | None = None
     viewer_object_urdf_path: str | None = None
     viewer_object_github_relpath: str | None = None
     metadata: dict | None = None
-    hole_pose: np.ndarray | None = None
+
+
+def _format_xyz(values: np.ndarray) -> str:
+    return " ".join(f"{float(x):.6f}" for x in values)
+
+
+def _generate_standalone_hole_urdf(scene_urdf: Path, output_dir: Path) -> tuple[Path, np.ndarray]:
+    """Extract the hole fixture from a peg-in-hole scene URDF.
+
+    Scene URDFs contain one table box plus the hole fixture in the same link.
+    This creates a separate hole asset whose origin is the hole center on the
+    tabletop, so moving the asset moves only the hole while the table stays put.
+    """
+    tree = ET.parse(scene_urdf)
+    root = tree.getroot()
+    link = root.find("link")
+    if link is None:
+        raise ValueError(f"No link found in {scene_urdf}")
+
+    visuals = link.findall("visual")
+    collisions = link.findall("collision")
+    if len(visuals) < 2 or len(collisions) < 2:
+        raise ValueError(f"Expected table plus hole geometry in {scene_urdf}")
+
+    base_plate_origin = visuals[1].find("origin")
+    if base_plate_origin is None or base_plate_origin.get("xyz") is None:
+        raise ValueError(f"Could not find hole base origin in {scene_urdf}")
+    base_plate_xyz = np.fromstring(base_plate_origin.get("xyz"), sep=" ", dtype=np.float32)
+    table_visual_origin = visuals[0].find("origin")
+    table_z = 0.0
+    if table_visual_origin is not None and table_visual_origin.get("xyz"):
+        table_z = float(np.fromstring(table_visual_origin.get("xyz"), sep=" ", dtype=np.float32)[2])
+    table_size_el = visuals[0].find("geometry/box")
+    if table_size_el is None or table_size_el.get("size") is None:
+        raise ValueError(f"Could not find table box size in {scene_urdf}")
+    table_size = np.fromstring(table_size_el.get("size"), sep=" ", dtype=np.float32)
+    hole_frame_in_table = np.array([base_plate_xyz[0], base_plate_xyz[1], table_z + table_size[2] / 2.0], dtype=np.float32)
+
+    new_root = ET.Element("robot", {"name": f"{scene_urdf.stem}_hole"})
+    for material in root.findall("material"):
+        new_root.append(material)
+    new_link = ET.SubElement(new_root, "link", {"name": "hole"})
+
+    for tag in ("visual", "collision"):
+        elems = link.findall(tag)
+        # Skip element 0, which is the table box. All remaining geometry is the hole fixture.
+        for elem in elems[1:]:
+            copied = ET.fromstring(ET.tostring(elem, encoding="unicode"))
+            origin = copied.find("origin")
+            if origin is not None and origin.get("xyz") is not None:
+                xyz = np.fromstring(origin.get("xyz"), sep=" ", dtype=np.float32)
+                origin.set("xyz", _format_xyz(xyz - hole_frame_in_table))
+            new_link.append(copied)
+
+    inertial = ET.SubElement(new_link, "inertial")
+    ET.SubElement(inertial, "mass", {"value": "10.0"})
+    ET.SubElement(inertial, "origin", {"xyz": "0 0 0.055", "rpy": "0 0 0"})
+    ET.SubElement(inertial, "inertia", {"ixx": "0.1", "ixy": "0", "ixz": "0", "iyy": "0.1", "iyz": "0", "izz": "0.1"})
+
+    output_dir.mkdir(parents=True, exist_ok=True)
+    output_path = output_dir / f"{scene_urdf.parent.name}_{scene_urdf.stem}_hole.urdf"
+    ET.indent(new_root, space="  ")
+    ET.ElementTree(new_root).write(output_path, encoding="unicode", xml_declaration=True)
+    return output_path, hole_frame_in_table
 
 
 REAL_CAMERA_T_W_R = np.eye(4)
@@ -151,8 +218,11 @@ def load_task_spec(
 
         tol_pool_idx = int(scene_tolerance_indices[peg_scene_idx, peg_tol_slot_idx])
         tol_m = float(tolerance_pool_m[tol_pool_idx])
-        table_urdf = str(
-            repo_root / f"assets/urdf/peg_in_hole/scenes/scene_{peg_scene_idx:04d}/scene_tol{peg_tol_slot_idx:02d}.urdf"
+        scene_urdf = repo_root / f"assets/urdf/peg_in_hole/scenes/scene_{peg_scene_idx:04d}/scene_tol{peg_tol_slot_idx:02d}.urdf"
+        table_urdf = str(repo_root / "assets/urdf/table_narrow.urdf")
+        hole_urdf_path, hole_frame_in_table = _generate_standalone_hole_urdf(
+            scene_urdf,
+            repo_root / ".cache" / "isaacsim_conversion" / "peg_holes",
         )
 
         from peg_in_hole.objects import PEG_NAME_TO_OBJECT
@@ -183,8 +253,21 @@ def load_task_spec(
             keypoint_tolerance=float(target_tol) * 1.5,
             camera_pose=default_real_camera_pose(),
             table_pose=np.array([0.0, 0.0, 0.38, 0.0, 0.0, 0.0, 1.0], dtype=np.float32),
-            hole_pose=np.array([0.0, 0.0, 0.38, 0.0, 0.0, 0.0, 1.0], dtype=np.float32),
+            hole_urdf=str(hole_urdf_path),
+            hole_pose=np.array(
+                [
+                    float(hole_frame_in_table[0]),
+                    float(hole_frame_in_table[1]),
+                    0.38 + float(hole_frame_in_table[2]),
+                    0.0,
+                    0.0,
+                    0.0,
+                    1.0,
+                ],
+                dtype=np.float32,
+            ),
             viewer_table_urdf_path=table_urdf,
+            viewer_hole_urdf_path=str(hole_urdf_path),
             viewer_object_urdf_path=str(obj_info.urdf_path),
             metadata={
                 "task_source": "peg_in_hole",

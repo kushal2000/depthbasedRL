@@ -268,6 +268,11 @@ def write_pose_viewer_html(path: Path, payload: dict, *, title: str) -> str:
         if payload.get("viewer_table_urdf_path") is not None
         else make_embedded_robot(name="table", urdf_text=_read_table_urdf())
     )
+    hole_robot = (
+        make_embedded_robot(name="hole", urdf_text=_read_urdf_text(payload["viewer_hole_urdf_path"]))
+        if payload.get("viewer_hole_urdf_path") is not None
+        else None
+    )
     object_robot = (
         make_embedded_robot(name="object", urdf_text=_read_urdf_text(payload["viewer_object_urdf_path"]))
         if payload.get("viewer_object_urdf_path") is not None
@@ -306,6 +311,8 @@ def write_pose_viewer_html(path: Path, payload: dict, *, title: str) -> str:
         object_robot,
         goal_robot,
     ]
+    if hole_robot is not None:
+        robots.insert(2, hole_robot)
     if payload.get("predicted_object_poses") is not None:
         robots.append(predicted_object_robot)
 
@@ -314,6 +321,8 @@ def write_pose_viewer_html(path: Path, payload: dict, *, title: str) -> str:
         "object": np.asarray(payload["object_poses"], dtype=float),
         "goal": np.asarray(payload["goal_poses"], dtype=float),
     }
+    if payload.get("hole_poses") is not None:
+        object_poses["hole"] = np.asarray(payload["hole_poses"], dtype=float)
     if payload.get("predicted_object_poses") is not None:
         object_poses["predicted_object"] = np.asarray(payload["predicted_object_poses"], dtype=float)
 
