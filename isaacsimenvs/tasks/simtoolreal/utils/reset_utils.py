@@ -120,7 +120,16 @@ def allocate_state_buffers(env) -> None:
     )
     env._keypoint_offsets = corners.unsqueeze(0) * per_env_half.unsqueeze(1)  # (N, 4, 3)
     # Fixed-size offsets (reward when fixed_size_keypoint_reward=True).
-    fixed_half = 0.5 * torch.tensor(rew.fixed_size, device=env.device)
+    # Legacy gym (env.py:2191-2193) multiplies the corner positions by
+    # ``fixed_size * keypoint_scale / 2``. Dropping the ``keypoint_scale``
+    # factor here would shrink sim's fixed keypoints by 1/keypoint_scale
+    # (=2/3 with the default 1.5), making `keypoints_max_dist_fixed_size`
+    # smaller than gym's at the same physical state — sim would fire
+    # success at poses where gym wouldn't, breaking the success-criterion
+    # parity we depend on for cross-backend evaluation.
+    fixed_half = 0.5 * rew.keypoint_scale * torch.tensor(
+        rew.fixed_size, device=env.device
+    )
     offsets_fixed = corners * fixed_half.unsqueeze(0)
     env._keypoint_offsets_fixed = offsets_fixed.unsqueeze(0).expand(
         env.num_envs, -1, -1
@@ -136,11 +145,15 @@ def allocate_state_buffers(env) -> None:
     env._lifted_object = torch.zeros(
         env.num_envs, dtype=torch.bool, device=env.device
     )
+    # -1 sentinel + lazy-init in compute_intermediate_values (mirrors
+    # legacy env.py:3152-3160). A positive "very far" reset value would
+    # cause ``keypoint_reward`` to fire a phantom one-shot bonus on the
+    # step after a goal-hit reset.
     env._closest_keypoint_max_dist = torch.full(
-        (env.num_envs,), 10.0, device=env.device
+        (env.num_envs,), -1.0, device=env.device
     )
     env._closest_fingertip_dist = torch.full(
-        (env.num_envs, NUM_FINGERTIPS), 10.0, device=env.device
+        (env.num_envs, NUM_FINGERTIPS), -1.0, device=env.device
     )
     env._successes = torch.zeros(
         env.num_envs, dtype=torch.long, device=env.device
@@ -336,8 +349,8 @@ def reset_goal_trackers(env, env_ids: torch.Tensor) -> None:
     ``cfg.reset.goal_sampling_type`` so delta-mode chains from the previous
     goal while absolute-mode samples fresh.
     """
-    env._closest_keypoint_max_dist[env_ids] = 10.0
-    env._closest_fingertip_dist[env_ids] = 10.0
+    env._closest_keypoint_max_dist[env_ids] = -1.0
+    env._closest_fingertip_dist[env_ids] = -1.0
     env._near_goal_steps[env_ids] = 0
     _reset_goal_pose(env, env_ids, mode=env.cfg.reset.goal_sampling_type)
 
@@ -364,8 +377,8 @@ def reset_env_state(env, env_ids: torch.Tensor) -> None:
 
     # Per-env trackers.
     env._lifted_object[env_ids] = False
-    env._closest_keypoint_max_dist[env_ids] = 10.0
-    env._closest_fingertip_dist[env_ids] = 10.0
+    env._closest_keypoint_max_dist[env_ids] = -1.0
+    env._closest_fingertip_dist[env_ids] = -1.0
     env._successes[env_ids] = 0
     env._near_goal_steps[env_ids] = 0
 

@@ -171,6 +171,22 @@ def compute_intermediate_values(env) -> None:
 
     env._keypoints_max_dist = torch.norm(obj_kp - goal_kp, dim=-1).max(dim=-1).values
 
+    # Lazy-init the "closest-so-far" trackers from the current value when the
+    # sentinel (<0) is set — mirrors legacy env.py:3152-3160. Without this,
+    # initializing the tracker to a fake "very far" value (e.g. 10.0) and
+    # then doing ``delta = closest - current`` on the next step produces a
+    # spurious one-shot reward of `(10.0 - small) * keypoint_rew_scale`,
+    # which on a goal-hit reset reads as a +2000 reward spike that legacy
+    # gym never gave (gym uses -1 sentinel and inits to current here).
+    sentinel = env._closest_keypoint_max_dist < 0.0
+    env._closest_keypoint_max_dist = torch.where(
+        sentinel, env._keypoints_max_dist, env._closest_keypoint_max_dist
+    )
+    sentinel_ft = env._closest_fingertip_dist < 0.0
+    env._closest_fingertip_dist = torch.where(
+        sentinel_ft, env._curr_fingertip_distances, env._closest_fingertip_dist
+    )
+
     tol = env._current_success_tolerance * rew_cfg.keypoint_scale
     env._near_goal = env._keypoints_max_dist <= tol
     env._near_goal_steps = update_near_goal_steps(
