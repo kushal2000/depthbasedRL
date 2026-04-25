@@ -428,8 +428,15 @@ def build_object_rigid_object_cfg(usd_paths: list[str]) -> RigidObjectCfg:
 
 
 def build_goal_viz_rigid_object_cfg(usd_paths: list[str]) -> RigidObjectCfg:
-    """Kinematic visual twin of Object — same cycling, gravity + collisions
-    disabled.
+    """Kinematic visual twin of Object — gravity + collisions disabled.
+
+    Caller can pass either ``usd_paths[:1]`` (single shared shape, fast
+    spawn — preferred for training, where downstream code only reads
+    ``goal_viz.data.root_pos_w / root_quat_w``) or the full pool (per-env
+    distinct meshes matching Object — useful for debug viz). Spawn cost
+    is dominated by the proto-load loop in spawn_multi_asset
+    (wrappers.py:73-98), which is O(unique USDs); a single shared shape
+    drops GoalViz spawn from ~35 s → ~1 s at 256 envs.
 
     The legacy isaacgym side puts goal_object in its own collision group
     (env.py:1369 — `collision_filter_idx = env_idx + num_envs`) so it never
@@ -746,13 +753,21 @@ def setup_scene(env) -> None:
         )
     )
 
-    # 5. Object + GoalViz — per-env distinct USDs via MultiUsdFileCfg.
-    #    Deterministic cycling: env at source-prim-path index i receives
+    # 5. Object — per-env distinct USDs via MultiUsdFileCfg. Deterministic
+    #    cycling: env at source-prim-path index i receives
     #    usd_paths[i % len(usd_paths)]. Per-env size variability still gets
     #    further multiplied at runtime by the `_object_scale_multiplier` DR
     #    knob (applied to keypoint offsets and object_scales obs).
+    #
+    #    GoalViz — single shared shape (usd_paths[:1]) for all envs.
+    #    Downstream code (obs_utils, reset_utils, eval_simtoolreal) only
+    #    reads goal_viz.data.root_pos_w / root_quat_w, never the geometry.
+    #    Loading 150 unique protos in spawn_multi_asset's serial reference
+    #    loop costs ~35 s at 256 envs (and is independent of num_envs);
+    #    using one proto drops that to ~1 s. Pass the full pool here only
+    #    if you want per-env debug visuals matching the Object shape.
     env.object = RigidObject(build_object_rigid_object_cfg(usd_paths))
-    env.goal_viz = RigidObject(build_goal_viz_rigid_object_cfg(usd_paths))
+    env.goal_viz = RigidObject(build_goal_viz_rigid_object_cfg(usd_paths[:1]))
 
     # 6. Ground plane + dome light (global, outside env_*).
     spawn_ground_plane(prim_path="/World/ground", cfg=GroundPlaneCfg())
