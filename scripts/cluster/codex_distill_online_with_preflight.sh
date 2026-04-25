@@ -119,7 +119,8 @@ for N in "${ENV_COUNTS[@]}"; do
     --teacher_checkpoint "$TEACHER_CHECKPOINT" \
     --teacher_config "$TEACHER_CONFIG" \
     --run_dir "$PREFLIGHT_DIR" \
-    "${PREFLIGHT_IMAGE_ARGS[@]}"; then
+    "${PREFLIGHT_IMAGE_ARGS[@]}" \
+    "${EXTRA_ARGS[@]}"; then
     if [[ "$STUDENT_INPUT" == "camera" && "${STUDENT_MODALITY:-}" != "depth" && "${STUDENT_MODALITY:-}" != "rgbd" ]]; then
       if ! python - "$PREFLIGHT_DIR/policy_image_stats.csv" "$IMAGE_PREFLIGHT_BRIGHT_FRAC_MAX" <<'PY'
 import csv
