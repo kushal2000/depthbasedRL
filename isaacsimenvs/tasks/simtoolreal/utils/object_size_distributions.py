@@ -85,35 +85,28 @@ HIGH_DENSITY_MIN, HIGH_DENSITY_MAX = 800.0, 2000.0
 
 OBJECT_SIZE_DISTRIBUTIONS: list[ObjectSizeDistribution] = [
     # Hammer — cuboid handle.
-    # NOTE: min == max so np.random.uniform is deterministic — keeps the
-    # legacy isaacgymenvs procedural pool and this port's pool emitting
-    # byte-equivalent first-asset URDFs for side-by-side obs diffing
-    # (dextoolbench/diff_simtoolreal_obs.py). Restore range when retraining.
     ObjectSizeDistribution(
         type="hammer",
-        # Handle 3D-equal to the cylinder variant's expanded form
-        # (h, d, d) = (0.225, 0.0225, 0.0225) so shuffle order between the
-        # two hammer entries doesn't change the normalized scale.
-        handle_min_lengths=(0.225, 0.0225, 0.0225),
-        handle_max_lengths=(0.225, 0.0225, 0.0225),
-        head_min_lengths=(0.04, 0.085, 0.04),
-        head_max_lengths=(0.04, 0.085, 0.04),
-        handle_min_density=450.0,
-        handle_max_density=450.0,
-        head_min_density=1400.0,
-        head_max_density=1400.0,
+        handle_min_lengths=(0.15, 0.02, 0.015),
+        handle_max_lengths=(0.30, 0.04, 0.03),
+        head_min_lengths=(0.02, 0.05, 0.02),
+        head_max_lengths=(0.06, 0.12, 0.06),
+        handle_min_density=LOW_DENSITY_MIN,
+        handle_max_density=LOW_DENSITY_MAX,
+        head_min_density=HIGH_DENSITY_MIN,
+        head_max_density=HIGH_DENSITY_MAX,
     ),
-    # Hammer — cylinder handle (collapsed for diff — see note above).
+    # Hammer — cylinder handle.
     ObjectSizeDistribution(
         type="hammer",
-        handle_min_lengths=(0.225, 0.0225),
-        handle_max_lengths=(0.225, 0.0225),
-        head_min_lengths=(0.04, 0.085, 0.04),
-        head_max_lengths=(0.04, 0.085, 0.04),
-        handle_min_density=450.0,
-        handle_max_density=450.0,
-        head_min_density=1400.0,
-        head_max_density=1400.0,
+        handle_min_lengths=(0.15, 0.015),
+        handle_max_lengths=(0.30, 0.03),
+        head_min_lengths=(0.02, 0.05, 0.02),
+        head_max_lengths=(0.06, 0.12, 0.06),
+        handle_min_density=LOW_DENSITY_MIN,
+        handle_max_density=LOW_DENSITY_MAX,
+        head_min_density=HIGH_DENSITY_MIN,
+        head_max_density=HIGH_DENSITY_MAX,
     ),
     # Screwdriver — cuboid
     ObjectSizeDistribution(

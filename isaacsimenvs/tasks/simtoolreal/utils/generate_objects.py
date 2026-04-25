@@ -46,6 +46,13 @@ _OBJECT_ROOT_LINK = "object_root"
 
 def _cuboid_urdf_constant_density(path: Path, scale: Scale3, density: float) -> Path:
     lx, ly, lz = scale
+    # Standard URDF requires <mass> + <inertia>. Legacy isaacgym's URDF
+    # importer accepts <density> as a Gazebo extension and back-computes mass
+    # from density × volume; Isaac Sim's importer follows strict URDF spec
+    # and falls back to 1 kg when <mass> is missing — that breaks erasers and
+    # any other handle-only types. Emit explicit <mass> + <inertia> so both
+    # backends see byte-identical physics.
+    m, ixx, iyy, izz = _compute_mass_and_inertia(scale, density)
     urdf = f"""<?xml version="1.0"?>
 <robot name="cuboid">
   <link name="{_OBJECT_ROOT_LINK}">
@@ -58,7 +65,11 @@ def _cuboid_urdf_constant_density(path: Path, scale: Scale3, density: float) -> 
       <origin xyz="0 0 0" rpy="0 0 0"/>
       <geometry><box size="{lx} {ly} {lz}"/></geometry>
     </collision>
-    <inertial><density value="{density}"/></inertial>
+    <inertial>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <mass value="{m}"/>
+      <inertia ixx="{ixx}" iyy="{iyy}" izz="{izz}" ixy="0" ixz="0" iyz="0"/>
+    </inertial>
   </link>
 </robot>
 """
@@ -70,6 +81,13 @@ def _cylinder_urdf_constant_density(
     path: Path, height: float, diameter: float, density: float
 ) -> Path:
     radius = diameter / 2
+    # Same fix as the cuboid branch — emit explicit <mass> + <inertia> so
+    # Isaac Sim's URDF importer doesn't fall back to a default 1 kg mass.
+    # The geometry is rotated by rpy="0 -π/2 0" so the cylinder's length axis
+    # aligns with link x. _compute_mass_and_inertia returns inertia in the
+    # geometry-local frame (axis = z); we apply the same rpy on the inertial
+    # origin so the values stay correct after rotation.
+    m, ixx, iyy, izz = _compute_mass_and_inertia((height, diameter), density)
     urdf = f"""<?xml version="1.0"?>
 <robot name="cylinder">
   <link name="{_OBJECT_ROOT_LINK}">
@@ -82,7 +100,11 @@ def _cylinder_urdf_constant_density(
       <origin xyz="0 0 0" rpy="0 -1.5707963267948966 0"/>
       <geometry><cylinder length="{height}" radius="{radius}"/></geometry>
     </collision>
-    <inertial><density value="{density}"/></inertial>
+    <inertial>
+      <origin xyz="0 0 0" rpy="0 -1.5707963267948966 0"/>
+      <mass value="{m}"/>
+      <inertia ixx="{ixx}" iyy="{iyy}" izz="{izz}" ixy="0" ixz="0" iyz="0"/>
+    </inertial>
   </link>
 </robot>
 """
@@ -326,10 +348,14 @@ def generate_handle_head_urdfs(
     paths: list[str] = []
     scales_raw: list[tuple[float, ...]] = []
     for dist in matching:
-        handle_scales = dist.sample_handle_scales(num_per_type)
-        head_scales = dist.sample_head_scales(num_per_type)
+        # Sample order MUST match legacy env.py:1758-1772 (densities first,
+        # scales second) — the two pools share seed=42 so first-asset URDFs
+        # come out byte-identical across backends only when the np.random
+        # draws line up step for step.
         handle_densities = dist.sample_handle_densities(num_per_type)
         head_densities = dist.sample_head_densities(num_per_type)
+        handle_scales = dist.sample_handle_scales(num_per_type)
+        head_scales = dist.sample_head_scales(num_per_type)
 
         for idx in range(num_per_type):
             h_scale = tuple(float(x) for x in handle_scales[idx])

@@ -31,14 +31,18 @@ def update_tolerance_curriculum(env) -> None:
     """
     env._frame_counter += 1
     term = env.cfg.termination
-    if env._frame_counter - env._last_curriculum_update < term.tolerance_curriculum_interval:
-        return
-    if env._prev_episode_successes.float().mean().item() < 3.0:
-        return
-    new_tol = env._current_success_tolerance * term.tolerance_curriculum_increment
-    new_tol = max(min(new_tol, term.success_tolerance), term.target_success_tolerance)
-    env._current_success_tolerance = new_tol
-    env._last_curriculum_update = env._frame_counter
+    if env._frame_counter - env._last_curriculum_update >= term.tolerance_curriculum_interval:
+        if env._prev_episode_successes.float().mean().item() >= 3.0:
+            new_tol = env._current_success_tolerance * term.tolerance_curriculum_increment
+            new_tol = max(min(new_tol, term.success_tolerance), term.target_success_tolerance)
+            env._current_success_tolerance = new_tol
+            env._last_curriculum_update = env._frame_counter
+
+    # Eval override (mirrors legacy env.py:1573-1575): when set, pin tolerance
+    # to a fixed value and skip the curriculum entirely. Used by the eval
+    # drivers so success criterion is reproducible across runs.
+    if term.eval_success_tolerance is not None:
+        env._current_success_tolerance = float(term.eval_success_tolerance)
 
 
 def compute_terminations(env) -> tuple[torch.Tensor, torch.Tensor]:
