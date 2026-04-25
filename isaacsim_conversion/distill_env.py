@@ -222,6 +222,7 @@ class IsaacSimDistillEnv:
         self.prev_targets: np.ndarray | None = None
         self.camera_world_pos = np.zeros((self.num_envs, 3), dtype=np.float32)
         self.camera_world_quat_wxyz = np.zeros((self.num_envs, 4), dtype=np.float32)
+        self.table_xform_view = None
         self.permutation: np.ndarray | None = None
         self.inverse_permutation: np.ndarray | None = None
         self.permutation_torch: torch.Tensor | None = None
@@ -291,34 +292,17 @@ class IsaacSimDistillEnv:
 
         robot_joint_vel = {name: 0.0 for name in JOINT_NAMES_ISAACGYM}
         default_joint_pos = dict(DEFAULT_JOINT_POS)
-        randomize_hole = bool(np.any(self.hole_pos_noise_xyz > 0.0) or self.hole_yaw_noise_deg > 0.0)
-        if randomize_hole:
-            table_cfg = RigidObjectCfg(
-                prim_path="{ENV_REGEX_NS}/Table",
-                spawn=sim_utils.UsdFileCfg(
-                    usd_path=table_usd,
-                    articulation_props=sim_utils.ArticulationRootPropertiesCfg(
-                        articulation_enabled=False,
-                    ),
-                    collision_props=sim_utils.CollisionPropertiesCfg(
-                        contact_offset=0.002,
-                        rest_offset=0.0,
-                    ),
+        table_cfg = AssetBaseCfg(
+            prim_path="{ENV_REGEX_NS}/Table",
+            spawn=sim_utils.UsdFileCfg(
+                usd_path=table_usd,
+                collision_props=sim_utils.CollisionPropertiesCfg(
+                    contact_offset=0.002,
+                    rest_offset=0.0,
                 ),
-                init_state=RigidObjectCfg.InitialStateCfg(pos=(0.0, 0.0, 0.38)),
-            )
-        else:
-            table_cfg = AssetBaseCfg(
-                prim_path="{ENV_REGEX_NS}/Table",
-                spawn=sim_utils.UsdFileCfg(
-                    usd_path=table_usd,
-                    collision_props=sim_utils.CollisionPropertiesCfg(
-                        contact_offset=0.002,
-                        rest_offset=0.0,
-                    ),
-                ),
-                init_state=AssetBaseCfg.InitialStateCfg(pos=(0.0, 0.0, 0.38)),
-            )
+            ),
+            init_state=AssetBaseCfg.InitialStateCfg(pos=(0.0, 0.0, 0.38)),
+        )
         if self.enable_camera and not self._uses_manual_tiled_world_camera():
             from isaaclab.sensors import CameraCfg, TiledCameraCfg
 
@@ -549,11 +533,23 @@ class IsaacSimDistillEnv:
         ).unsqueeze(0)
         self._apply_physics_material_overrides(sim_utils)
         self._initialize_static_scene_randomizations()
+        if np.any(self.hole_pos_noise_xyz > 0.0) or self.hole_yaw_noise_deg > 0.0:
+            from isaaclab.sim.views import XformPrimView
+
+            self.table_xform_view = XformPrimView(
+                "/World/envs/env_.*/Table",
+                device=self.device,
+                validate_xform_ops=False,
+                sync_usd_on_fabric_write=True,
+                stage=self.sim.stage,
+            )
+            self._apply_table_asset_poses()
         if manual_tiled_world_camera:
             self.camera = self._create_manual_tiled_world_camera(sim_utils)
             self.scene.sensors["camera"] = self.camera
         self.sim.reset()
         self.scene.reset()
+        self._apply_table_asset_poses()
         self._apply_robot_adjacent_self_collision_filtering()
         self._apply_object_mass_multiplier()
         self._validate_joint_ordering()
@@ -968,6 +964,20 @@ class IsaacSimDistillEnv:
             world_pose[i, 3:] = xyzw_to_wxyz(local_pose_xyzw[i, 3:])
         return torch.tensor(world_pose, dtype=torch.float32, device=self.device)
 
+    def _apply_table_asset_poses(self, env_ids: torch.Tensor | None = None) -> None:
+        if self.table_xform_view is None:
+            return
+        if env_ids is None:
+            env_ids = torch.arange(self.num_envs, device=self.device, dtype=torch.long)
+        env_ids_np = env_ids.detach().cpu().numpy()
+        translations = torch.tensor(self.current_table_pose[env_ids_np, :3], dtype=torch.float32, device=self.device)
+        orientations = torch.tensor(
+            np.stack([xyzw_to_wxyz(pose[3:7]) for pose in self.current_table_pose[env_ids_np]], axis=0),
+            dtype=torch.float32,
+            device=self.device,
+        )
+        self.table_xform_view.set_local_poses(translations=translations, orientations=orientations, indices=env_ids)
+
     def reset(self):
         for key in self.reset_reason_counts:
             self.reset_reason_counts[key] = 0
@@ -1004,6 +1014,7 @@ class IsaacSimDistillEnv:
             self.table_rigid.write_root_pose_to_sim(table_pose_w[env_ids], env_ids=env_ids)
             table_vel = torch.zeros((len(env_ids_np), 6), dtype=torch.float32, device=self.device)
             self.table_rigid.write_root_velocity_to_sim(table_vel, env_ids=env_ids)
+        self._apply_table_asset_poses(env_ids)
 
         start_poses = self._sample_start_poses()[env_ids_np]
         self.current_start_pose[env_ids_np] = start_poses
