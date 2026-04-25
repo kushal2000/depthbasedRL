@@ -746,11 +746,7 @@ def setup_scene(env) -> None:
         start_time=setup_t0,
     )
 
-    # 1. Generate procedural URDFs (100 per handle-head type by default). The
-    #    URDFs themselves go into a per-launch tmpdir — generation is fast
-    #    (~1 s for 600), deterministic (np.random.seed(seed)), and
-    #    overwrite-safe; we don't need to persist them. The converted USDs go
-    #    into a *persistent*, user-owned cache (step 2) so reruns hit it.
+    # 1. Generate procedural URDFs in a per-launch temp dir.
     env._tmp_asset_dir = tempfile.mkdtemp(prefix="simtoolreal_assets_")
     urdf_paths, object_scales_normalized = generate_handle_head_urdfs(
         handle_head_types=tuple(assets_cfg.handle_head_types),
@@ -768,8 +764,7 @@ def setup_scene(env) -> None:
             "Check cfg.assets.handle_head_types and num_assets_per_type."
         )
 
-    # 2. URDF -> USD conversion, persistent cache. Each asset gets its own
-    #    converter dir because Isaac Lab stores one .asset_hash per usd_dir.
+    # 2. Convert/cache USDs, then bake static schema props once per asset.
     usd_cache_root = _resolve_usd_cache_root()
     usd_cache_root.mkdir(parents=True, exist_ok=True)
     env._usd_cache_root = str(usd_cache_root)
@@ -786,7 +781,6 @@ def setup_scene(env) -> None:
             raw_usd_path=usd,
             bake_root=baked_cache_root,
             role="object",
-            assets_cfg=assets_cfg,
             force=force_rebuild,
         )
         for usd in usd_paths
@@ -797,28 +791,19 @@ def setup_scene(env) -> None:
             raw_usd_path=usd_paths[0],
             bake_root=baked_cache_root,
             role="goalviz",
-            assets_cfg=assets_cfg,
             force=force_rebuild,
         )
     ]
     _scene_debug(f"resolved {len(goalviz_usd_paths)} baked goalviz USDs", start_time=setup_t0)
 
-    # 3. Pre-create empty env_1..env_{N-1} Xform prims so subsequent regex
-    #    spawns (Robot/Table via @clone, Object/GoalViz via MultiUsdFileCfg)
-    #    resolve to all envs. InteractiveScene only creates env_0 by
-    #    default, and its clone_environments() with replicate_physics=False
-    #    is a no-op against an empty source — so we materialize the prims
-    #    here ourselves and let each spawner fill them in.
+    # 3. Pre-create env roots so regex spawns resolve to every env.
     _materialize_env_prims(env)
     _scene_debug(
         f"materialized {len(env.scene.env_prim_paths)} env prims",
         start_time=setup_t0,
     )
 
-    # 4. Robot + table — pre-convert URDFs into persistent cache, bake static
-    #    schema props into role-specific USDs, then spawn those USDs across
-    #    all envs. Robot + table use per-asset subdirs of the cache root
-    #    (same .asset_hash one-per-dir constraint as the procedural loop).
+    # 4. Robot/table use the same convert -> bake -> spawn path.
     robot_raw_usd = _convert_urdf_to_usd(
         assets_cfg.robot_urdf,
         usd_cache_root,
@@ -839,14 +824,12 @@ def setup_scene(env) -> None:
         raw_usd_path=robot_raw_usd,
         bake_root=baked_cache_root,
         role="robot",
-        assets_cfg=assets_cfg,
         force=force_rebuild,
     )
     table_usd_path = bake_physics_props_into_usd(
         raw_usd_path=table_raw_usd,
         bake_root=baked_cache_root,
         role="table",
-        assets_cfg=assets_cfg,
         force=force_rebuild,
     )
     _scene_debug("resolved robot/table baked USDs", start_time=setup_t0)
@@ -858,19 +841,7 @@ def setup_scene(env) -> None:
     )
     _scene_debug("spawned robot and table", start_time=setup_t0)
 
-    # 5. Object — per-env distinct baked USDs via MultiUsdFileCfg. Deterministic
-    #    cycling: env at source-prim-path index i receives
-    #    object_usd_paths[i % len(object_usd_paths)]. Per-env size variability still gets
-    #    further multiplied at runtime by the `_object_scale_multiplier` DR
-    #    knob (applied to keypoint offsets and object_scales obs).
-    #
-    #    GoalViz — single shared baked shape for all envs.
-    #    Downstream code (obs_utils, reset_utils, eval_simtoolreal) only
-    #    reads goal_viz.data.root_pos_w / root_quat_w, never the geometry.
-    #    Loading 150 unique protos in spawn_multi_asset's serial reference
-    #    loop costs ~35 s at 256 envs (and is independent of num_envs);
-    #    using one proto drops that to ~1 s. Pass the full pool here only
-    #    if you want per-env debug visuals matching the Object shape.
+    # 5. Objects cycle through all baked USDs; GoalViz uses one shared shape.
     env.object = RigidObject(build_object_rigid_object_cfg(object_usd_paths))
     env.goal_viz = RigidObject(build_goal_viz_rigid_object_cfg(goalviz_usd_paths))
     _scene_debug("spawned object and goalviz", start_time=setup_t0)
@@ -881,31 +852,19 @@ def setup_scene(env) -> None:
     light_cfg.func("/World/Light", light_cfg)
     _scene_debug("spawned ground and light", start_time=setup_t0)
 
-    # 7. Cross-env collision filtering against /World/ground: only required
-    #    on the CPU PhysX pipeline. The GPU pipeline filters automatically
-    #    via collision groups, and SimToolReal is GPU-only (MultiUsdFileCfg
-    #    + large num_envs aren't supported on CPU). Removed the CPU branch.
-
-    # 8. Build per-env scale tensor by parsing env_K from each spawned
-    #    Object prim path. spawn_multi_asset iterates the regex-matched
-    #    source_prim_paths with `index % len(usd_paths)` cycling, so the
-    #    source_idx → usd_idx mapping is direct; we then store the scale
-    #    indexed by env_id (parsed from ".../env_K/Object").
+    # 7. Store the procedural scale attached to each spawned Object.
     _build_object_scale_tensor(env, object_scales_normalized, len(usd_paths))
     _scene_debug("built per-env object scale tensor", start_time=setup_t0)
 
-    # 9. Register with scene so DirectRLEnv refreshes their tensors each step.
+    # 8. Register with scene so DirectRLEnv refreshes their tensors each step.
     env.scene.articulations["robot"] = env.robot
     env.scene.rigid_objects["table"] = env.table
     env.scene.rigid_objects["object"] = env.object
     env.scene.rigid_objects["goal_viz"] = env.goal_viz
     _scene_debug("registered assets with scene", start_time=setup_t0)
 
-    # 10. Static leaf physics props (offsets, collision_enabled, rigid/articulation
-    #     flags) are baked into role-specific USDs at conversion time
-    #     (bake_physics_props_into_usd). Per-shape friction is set after
-    #     super().__init__() returns via apply_physx_material_properties on the
-    #     PhysX tensor view (simtoolreal_env.py:61). Nothing per-env to do here.
+    # Static leaf props are baked above; friction is set through PhysX views
+    # after DirectRLEnv starts the simulator.
 
 
 __all__ = [
