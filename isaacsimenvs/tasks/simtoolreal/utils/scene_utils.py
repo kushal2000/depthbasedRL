@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import shutil
 import tempfile
 from pathlib import Path
@@ -996,12 +997,24 @@ def setup_scene(env) -> None:
     #    (which already encodes scale + density via the generator's naming)
     #    is a stable, collision-free per-asset key.
     #
-    #    Cache root lives under $HOME (not /tmp/IsaacLab — shared-host
-    #    EACCES, see earlier comment). The ``v1/`` segment is a manual
-    #    cache-bust knob; ``cfg.assets.rebuild_assets=True`` toggles the
-    #    converter's force flag for runtime-controlled invalidation.
+    #    Cache root resolution (in priority order):
+    #      1. ``$SIMTOOLREAL_CACHE_ROOT`` env var — explicit override.
+    #      2. ``/scratch/simtoolreal_assets/v1`` — local NVMe on slurm
+    #         compute nodes (much faster than NFS-mounted $HOME for the
+    #         small-USD metadata reads that dominate proto-load).
+    #      3. ``~/.cache/simtoolreal_assets/v1`` — fallback for hosts
+    #         without /scratch (laptops, head nodes without local scratch).
+    #    The ``v1/`` segment is a manual cache-bust knob;
+    #    ``cfg.assets.rebuild_assets=True`` toggles the converter's force
+    #    flag for runtime-controlled invalidation.
     #    joint_drive=None because procedural objects have no joints.
-    usd_cache_root = Path.home() / ".cache" / "simtoolreal_assets" / "v1"
+    cache_root_env = os.environ.get("SIMTOOLREAL_CACHE_ROOT")
+    if cache_root_env:
+        usd_cache_root = Path(cache_root_env)
+    elif Path("/scratch").is_dir() and os.access("/scratch", os.W_OK):
+        usd_cache_root = Path("/scratch") / "simtoolreal_assets" / "v1"
+    else:
+        usd_cache_root = Path.home() / ".cache" / "simtoolreal_assets" / "v1"
     usd_cache_root.mkdir(parents=True, exist_ok=True)
     env._usd_cache_root = str(usd_cache_root)
     usd_paths: list[str] = []
