@@ -30,13 +30,13 @@ class DepthAugCfg:
     correlated_noise_std_px: float = 0.5
     correlated_noise_std_depth: float = 1.0 / 6.0
     normal_noise_std_m: float = 0.01
-    pixel_dropout_prob: float = 0.0125 / 4.0
-    random_blob_prob: float = 0.0125 / 4.0
-    stick_prob: float = 0.001 / 4.0
+    pixel_dropout_prob: float = 0.003
+    random_blob_prob: float = 0.003
+    stick_prob: float = 0.0025
     max_stick_len_px: int = 18
     max_stick_width_px: int = 3
-    random_artifact_min_m: float = 0.5
-    random_artifact_max_m: float = 1.3
+    random_artifact_min_m: float = -1.3
+    random_artifact_max_m: float = -0.5
 
 
 @dataclass
@@ -124,13 +124,13 @@ def image_robustness_cfg_from_dict(data: dict | None) -> ImageRobustnessCfg:
         correlated_noise_std_px=float(depth_aug_raw.get("correlated_noise_std_px", 0.5)),
         correlated_noise_std_depth=float(depth_aug_raw.get("correlated_noise_std_depth", 1.0 / 6.0)),
         normal_noise_std_m=float(depth_aug_raw.get("normal_noise_std_m", 0.01)),
-        pixel_dropout_prob=float(depth_aug_raw.get("pixel_dropout_prob", 0.0125 / 4.0)),
-        random_blob_prob=float(depth_aug_raw.get("random_blob_prob", 0.0125 / 4.0)),
-        stick_prob=float(depth_aug_raw.get("stick_prob", 0.001 / 4.0)),
+        pixel_dropout_prob=float(depth_aug_raw.get("pixel_dropout_prob", 0.003)),
+        random_blob_prob=float(depth_aug_raw.get("random_blob_prob", 0.003)),
+        stick_prob=float(depth_aug_raw.get("stick_prob", 0.0025)),
         max_stick_len_px=int(depth_aug_raw.get("max_stick_len_px", 18)),
         max_stick_width_px=int(depth_aug_raw.get("max_stick_width_px", 3)),
-        random_artifact_min_m=float(depth_aug_raw.get("random_artifact_min_m", 0.5)),
-        random_artifact_max_m=float(depth_aug_raw.get("random_artifact_max_m", 1.3)),
+        random_artifact_min_m=float(depth_aug_raw.get("random_artifact_min_m", -1.3)),
+        random_artifact_max_m=float(depth_aug_raw.get("random_artifact_max_m", -0.5)),
     )
     image_delay = ImageDelayCfg(
         enabled=bool(image_delay_raw.get("enabled", False)),
@@ -358,8 +358,7 @@ class TrainImageRobustifier:
             seeds = torch.rand_like(out) < cfg.random_blob_prob
             if torch.any(seeds):
                 artifacts = torch.empty_like(out).uniform_(cfg.random_artifact_min_m, cfg.random_artifact_max_m)
-                pooled = F.max_pool2d(seeds.float(), kernel_size=3, stride=1, padding=1) > 0
-                out = torch.where(pooled, artifacts, out)
+                out = torch.where(seeds, artifacts, out)
         if cfg.stick_prob > 0.0:
             for env_id in range(out.shape[0]):
                 if random.random() >= cfg.stick_prob:

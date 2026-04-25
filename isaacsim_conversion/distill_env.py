@@ -218,6 +218,7 @@ class IsaacSimDistillEnv:
             self.num_envs,
             axis=0,
         )
+        self._static_scene_randomization_initialized = False
         self.prev_targets: np.ndarray | None = None
         self.camera_world_pos = np.zeros((self.num_envs, 3), dtype=np.float32)
         self.camera_world_quat_wxyz = np.zeros((self.num_envs, 4), dtype=np.float32)
@@ -551,6 +552,7 @@ class IsaacSimDistillEnv:
             )
         else:
             _log("Distill camera disabled for this run")
+        self._initialize_static_scene_randomizations()
         self.reset()
 
     def _validate_joint_ordering(self):
@@ -792,6 +794,20 @@ class IsaacSimDistillEnv:
         out[:, 3:7] = (delta_rot * pose_rot).as_quat().astype(np.float32)
         return out
 
+    def _initialize_static_scene_randomizations(self) -> None:
+        """Sample per-env fixture/camera variation once, not at every episode reset."""
+        env_ids_np = np.arange(self.num_envs, dtype=np.int64)
+        self.current_table_pose[:] = self._sample_table_poses(env_ids_np)
+        self._sample_camera_randomization(env_ids_np)
+        base_goals = np.stack(self.task_spec.goals, axis=0).astype(np.float32)
+        for env_id in env_ids_np:
+            self.current_goals[env_id] = self._transform_poses_with_table_delta(
+                base_goals,
+                self.current_table_pose[env_id],
+            )
+        self.goal_pose[:] = self.current_goals[:, 0]
+        self._static_scene_randomization_initialized = True
+
     def _apply_camera_world_poses(self, env_ids: torch.Tensor | None = None):
         if self.camera is None:
             return
@@ -896,6 +912,8 @@ class IsaacSimDistillEnv:
             for key, mask in reset_reasons.items():
                 if key in self.reset_reason_counts:
                     self.reset_reason_counts[key] += int(np.count_nonzero(mask))
+        if not self._static_scene_randomization_initialized:
+            self._initialize_static_scene_randomizations()
         root_state = self.robot.data.default_root_state.clone()
         root_state[env_ids, :3] += self.env_origins[env_ids]
         self.robot.write_root_pose_to_sim(root_state[env_ids, :7], env_ids=env_ids)
@@ -905,14 +923,11 @@ class IsaacSimDistillEnv:
         self.robot.write_joint_state_to_sim(joint_pos[env_ids], joint_vel[env_ids], env_ids=env_ids)
         self.robot.set_joint_position_target(joint_pos[env_ids], env_ids=env_ids)
 
-        table_poses = self._sample_table_poses(env_ids_np)
-        self.current_table_pose[env_ids_np] = table_poses
         if self.table_rigid is not None:
             table_pose_w = self._local_pose_to_world_pose(self.current_table_pose)
             self.table_rigid.write_root_pose_to_sim(table_pose_w[env_ids], env_ids=env_ids)
             table_vel = torch.zeros((len(env_ids_np), 6), dtype=torch.float32, device=self.device)
             self.table_rigid.write_root_velocity_to_sim(table_vel, env_ids=env_ids)
-        self._sample_camera_randomization(env_ids_np)
 
         start_poses = self._sample_start_poses()[env_ids_np]
         self.current_start_pose[env_ids_np] = start_poses
@@ -938,9 +953,6 @@ class IsaacSimDistillEnv:
         self.near_goal_steps[env_ids_np] = 0
         self.progress_buf[env_ids_np] = 0
         self.lifted_object[env_ids_np] = False
-        base_goals = np.stack(self.task_spec.goals, axis=0).astype(np.float32)
-        for local_i, env_id in enumerate(env_ids_np):
-            self.current_goals[env_id] = self._transform_poses_with_table_delta(base_goals, table_poses[local_i])
         self.goal_pose[env_ids_np] = self.current_goals[env_ids_np, 0]
 
     def apply_action(self, targets: np.ndarray):

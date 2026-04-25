@@ -27,8 +27,8 @@ object_start_mode: fixed
 object_pos_noise_xyz: [0.0, 0.0, 0.0]
 object_yaw_noise_deg: 0.0
 object_rotation_noise_mode: yaw
-camera_pos_noise_xyz: [0.03, 0.03, 0.02]
-camera_rot_noise_deg: [8.0, 8.0, 12.0]
+camera_pos_noise_xyz: [0.06, 0.06, 0.04]
+camera_rot_noise_deg: [14.0, 14.0, 20.0]
 hole_pos_noise_xyz: [0.0, 0.0, 0.0]
 hole_yaw_noise_deg: 0.0
 camera_backend: tiled
@@ -40,4 +40,3 @@ reset_when_dropped: false
 online_num_iters: 1000
 online_log_interval: 100
 online_update_interval: 1
-
