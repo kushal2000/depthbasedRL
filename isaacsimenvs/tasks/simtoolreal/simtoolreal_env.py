@@ -21,9 +21,11 @@ Mid-episode goal-hit triggers :func:`utils.reset_utils.reset_goal_trackers`
 directly from :func:`utils.termination_utils.compute_terminations` — no
 method on this class wraps it.
 
-**Startup cost warning:** ``setup_scene`` uses ``force_usd_conversion=True``
-on every procedural URDF, which regenerates 100 × N_handle_head_types USDs
-from scratch each launch (default 600). Expect several minutes first time.
+**Startup cost:** ``setup_scene`` converts every procedural URDF to USD on
+the first launch (default 600 = 100 per handle-head type × 6 types) into
+``~/.cache/simtoolreal_assets/v1/``. Subsequent launches hit the cache
+unless ``cfg.assets.rebuild_assets=True`` is set or the URDF generator
+output changes (Lab keys the cache on ``MD5(cfg) + sha(URDF bytes)``).
 """
 
 from __future__ import annotations

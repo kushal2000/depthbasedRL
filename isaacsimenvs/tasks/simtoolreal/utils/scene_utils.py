@@ -20,6 +20,7 @@ configs).
 from __future__ import annotations
 
 import tempfile
+from pathlib import Path
 
 import torch
 
@@ -229,7 +230,9 @@ ARM_DEFAULT_JOINT_POS: dict[str, float] = {
 # ----------------------------------------------------------------------------
 
 
-def build_robot_articulation_cfg(assets_cfg, usd_dir: str | None = None) -> ArticulationCfg:
+def build_robot_articulation_cfg(
+    assets_cfg, usd_dir: str | None = None, force_usd_conversion: bool = False
+) -> ArticulationCfg:
     """Assemble the IIWA14 + SHARPA hand `ArticulationCfg`.
 
     Robot is fixed-base, gravity disabled, self-collisions off. Joint drives use
@@ -259,6 +262,7 @@ def build_robot_articulation_cfg(assets_cfg, usd_dir: str | None = None) -> Arti
         spawn=UrdfFileCfg(
             asset_path=assets_cfg.robot_urdf,
             usd_dir=usd_dir,
+            force_usd_conversion=force_usd_conversion,
             fix_base=True,
             merge_fixed_joints=True,
             self_collision=False,
@@ -339,7 +343,7 @@ def build_robot_articulation_cfg(assets_cfg, usd_dir: str | None = None) -> Arti
 
 
 def build_table_rigid_object_cfg(
-    assets_cfg, z: float, usd_dir: str | None = None
+    assets_cfg, z: float, usd_dir: str | None = None, force_usd_conversion: bool = False
 ) -> RigidObjectCfg:
     """Table as a static (kinematic) rigid body at world height `z`.
 
@@ -356,6 +360,7 @@ def build_table_rigid_object_cfg(
         spawn=UrdfFileCfg(
             asset_path=assets_cfg.table_urdf,
             usd_dir=usd_dir,
+            force_usd_conversion=force_usd_conversion,
             fix_base=False,
             merge_fixed_joints=True,
             make_instanceable=False,
@@ -660,8 +665,13 @@ def setup_scene(env) -> None:
     prim_path against all env_* and fills them in.
     """
     assets_cfg = env.cfg.assets
+    force_rebuild = bool(getattr(assets_cfg, "rebuild_assets", False))
 
-    # 1. Generate procedural URDFs (100 per handle-head type by default).
+    # 1. Generate procedural URDFs (100 per handle-head type by default). The
+    #    URDFs themselves go into a per-launch tmpdir — generation is fast
+    #    (~1 s for 600), deterministic (np.random.seed(seed)), and
+    #    overwrite-safe; we don't need to persist them. The converted USDs go
+    #    into a *persistent*, user-owned cache (step 2) so reruns hit it.
     env._tmp_asset_dir = tempfile.mkdtemp(prefix="simtoolreal_assets_")
     urdf_paths, object_scales_normalized = generate_handle_head_urdfs(
         handle_head_types=tuple(assets_cfg.handle_head_types),
@@ -670,21 +680,32 @@ def setup_scene(env) -> None:
         shuffle=assets_cfg.shuffle_assets,
     )
 
-    # 2. Force-convert URDFs → USDs. force_usd_conversion=True regenerates
-    #    every launch for determinism. joint_drive=None since procedural
-    #    objects have no joints. usd_dir routes the per-converter cache to
-    #    the per-process tmpdir instead of Isaac Lab's default /tmp/IsaacLab,
-    #    which collides on shared hosts (the default parent dir is
-    #    created by whichever user runs first and other users hit EACCES).
+    # 2. URDF→USD conversion, persistent cache. Lab's converter writes one
+    #    .asset_hash sidecar per usd_dir (asset_converter_base.py:89), so
+    #    EACH asset must get its own usd_dir — sharing one dir across the
+    #    600 procedural URDFs would race-write the hash file and every
+    #    converter would always cache-miss. Stem of the URDF filename
+    #    (which already encodes scale + density via the generator's naming)
+    #    is a stable, collision-free per-asset key.
+    #
+    #    Cache root lives under $HOME (not /tmp/IsaacLab — shared-host
+    #    EACCES, see earlier comment). The ``v1/`` segment is a manual
+    #    cache-bust knob; ``cfg.assets.rebuild_assets=True`` toggles the
+    #    converter's force flag for runtime-controlled invalidation.
+    #    joint_drive=None because procedural objects have no joints.
+    usd_cache_root = Path.home() / ".cache" / "simtoolreal_assets" / "v1"
+    usd_cache_root.mkdir(parents=True, exist_ok=True)
+    env._usd_cache_root = str(usd_cache_root)
     usd_paths: list[str] = []
     for urdf in urdf_paths:
+        asset_dir = usd_cache_root / Path(urdf).stem
         converter = UrdfConverter(
             UrdfConverterCfg(
                 asset_path=urdf,
-                usd_dir=env._tmp_asset_dir,
+                usd_dir=str(asset_dir),
                 fix_base=False,
                 merge_fixed_joints=True,
-                force_usd_conversion=True,
+                force_usd_conversion=force_rebuild,
                 make_instanceable=False,
                 joint_drive=None,
             )
@@ -707,12 +728,19 @@ def setup_scene(env) -> None:
     #    writes a copy of the converted USD into each. usd_dir routes the
     #    converter's USD cache to the per-process tmpdir (avoids the
     #    /tmp/IsaacLab shared-host EACCES).
+    # Robot + Table: per-asset subdirs of the cache root (same .asset_hash
+    # one-per-dir constraint as the procedural loop above).
+    robot_cache = usd_cache_root / Path(assets_cfg.robot_urdf).stem
+    table_cache = usd_cache_root / Path(assets_cfg.table_urdf).stem
     env.robot = Articulation(
-        build_robot_articulation_cfg(assets_cfg, usd_dir=env._tmp_asset_dir)
+        build_robot_articulation_cfg(
+            assets_cfg, usd_dir=str(robot_cache), force_usd_conversion=force_rebuild
+        )
     )
     env.table = RigidObject(
         build_table_rigid_object_cfg(
-            assets_cfg, z=env.cfg.reset.table_reset_z, usd_dir=env._tmp_asset_dir,
+            assets_cfg, z=env.cfg.reset.table_reset_z,
+            usd_dir=str(table_cache), force_usd_conversion=force_rebuild,
         )
     )
 

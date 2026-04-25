@@ -83,6 +83,13 @@ class AssetsCfg:
     object_friction: float = 0.5
     table_friction: float = 0.5
 
+    # Force a rebuild of the converted USDs (Robot, Table, every procedural
+    # handle-head) instead of reusing the persistent cache at
+    # ~/.cache/simtoolreal_assets/v1/. Set when the procedural URDF generator
+    # changes, the source robot/table URDF changes in a way the converter
+    # won't notice (e.g. mesh referenced by URDF), or when bumping Lab.
+    rebuild_assets: bool = False
+
 # ----------------------------------------------------------------------------
 # obs
 # ----------------------------------------------------------------------------
