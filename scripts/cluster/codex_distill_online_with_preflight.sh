@@ -51,6 +51,17 @@ EXTRA_ARGS=()
 if [[ -n "${DISTILL_EXTRA_ARGS:-}" ]]; then
   read -r -a EXTRA_ARGS <<< "$DISTILL_EXTRA_ARGS"
 fi
+if [[ "$STUDENT_INPUT" == "teacher_obs" && "${#EXTRA_ARGS[@]}" -gt 0 ]]; then
+  FILTERED_EXTRA_ARGS=()
+  for arg in "${EXTRA_ARGS[@]}"; do
+    if [[ "$arg" == "--capture_viewer_video" ]]; then
+      echo "Dropping --capture_viewer_video for teacher_obs job to avoid spawning per-env cameras."
+      continue
+    fi
+    FILTERED_EXTRA_ARGS+=("$arg")
+  done
+  EXTRA_ARGS=("${FILTERED_EXTRA_ARGS[@]}")
+fi
 CAMERA_BACKEND="${CAMERA_BACKEND:-tiled}"
 IMAGE_TILED_MAX_ENVS="${IMAGE_TILED_MAX_ENVS:-4096}"
 IMAGE_PREFLIGHT_BRIGHT_FRAC_MAX="${IMAGE_PREFLIGHT_BRIGHT_FRAC_MAX:-0.4}"
