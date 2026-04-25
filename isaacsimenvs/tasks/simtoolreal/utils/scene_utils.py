@@ -751,12 +751,10 @@ def setup_scene(env) -> None:
     light_cfg = sim_utils.DomeLightCfg(intensity=2000.0, color=(0.75, 0.75, 0.75))
     light_cfg.func("/World/Light", light_cfg)
 
-    # 7. Filter cross-env collisions against the global ground prim. With
-    #    replicate_physics=False the scene doesn't auto-filter, so we call
-    #    explicitly. (filter_collisions is required on CPU; on GPU it's
-    #    still safer to scope ground-vs-env collisions.)
-    if env.device == "cpu":
-        env.scene.filter_collisions(global_prim_paths=["/World/ground"])
+    # 7. Cross-env collision filtering against /World/ground: only required
+    #    on the CPU PhysX pipeline. The GPU pipeline filters automatically
+    #    via collision groups, and SimToolReal is GPU-only (MultiUsdFileCfg
+    #    + large num_envs aren't supported on CPU). Removed the CPU branch.
 
     # 8. Build per-env scale tensor by parsing env_K from each spawned
     #    Object prim path. spawn_multi_asset iterates the regex-matched
