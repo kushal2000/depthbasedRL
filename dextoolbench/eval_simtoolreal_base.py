@@ -27,9 +27,10 @@ from isaacgym import gymapi, gymtorch, gymutil  # noqa: F401
 import torch
 # isort: on
 
+import math
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Tuple
 
 import numpy as np
 import tyro
@@ -91,6 +92,23 @@ class Args:
     OBJECT_SIZE_DISTRIBUTIONS hammer-cuboid entry on both sides this gives
     byte-equivalent first-asset URDFs across envs)."""
 
+    fixed_goal_pose: Optional[Tuple[float, float, float, float, float, float, float]] = None
+    """Pin the goal to a single env-local pose (x, y, z, qx, qy, qz, qw) — xyzw
+    quaternion convention (matches isaacgym's root_state_tensor). Pairs with
+    isaacsimenvs/.../eval_simtoolreal.py's `--fixed_goal_pose` (same xyzw CLI;
+    that side converts to wxyz internally)."""
+
+    video_path: Optional[Path] = None
+    """If set, attach a camera sensor matching the sim eval rig (pose
+    (0,-1,1.03)→(0,0,0.53), 640×480, ~47.10° FoV) and write an mp4 here.
+    Skipped entirely when None — the camera setup is the slow path."""
+
+    video_fps: int = 30
+    """Mp4 fps (only meaningful when video_path is set)."""
+
+    frame_every: int = 2
+    """Capture one frame every N policy steps (matches sim eval default)."""
+
 
 def _build_env(args: Args):
     """Create the legacy SimToolReal env with all DR + curricula off so the
@@ -137,6 +155,12 @@ def _build_env(args: Args):
         }
     if args.hammer_only:
         overrides["task.env.handleHeadTypes"] = ["hammer"]
+    if args.fixed_goal_pose is not None:
+        # Single-state trajectory: legacy env cycles successes % len, so 1
+        # entry pins every reset to the same pose. Quat is xyzw.
+        overrides["task.env.useFixedGoalStates"] = True
+        overrides["task.env.fixedGoalStates"] = [list(args.fixed_goal_pose)]
+        overrides["task.env.fixedGoalStatesJsonPath"] = None
     return create_env(
         config_path=str(args.config_path),
         headless=True,
@@ -156,6 +180,28 @@ def main():
 
     env = _build_env(args)
     device = "cuda" if torch.cuda.is_available() else "cpu"
+
+    # Optional camera sensor — same pose + intrinsics as the sim Camera
+    # in isaacsimenvs/.../eval_simtoolreal.py so the two mp4s are
+    # byte-comparable. Skipped entirely when video_path is None.
+    camera_handle = None
+    cam_props = None
+    frames: list = []
+    if args.video_path is not None:
+        cam_props = gymapi.CameraProperties()
+        cam_props.width = 640
+        cam_props.height = 480
+        # PinholeCameraCfg(focal=24mm, aperture=20.955mm) ⇒ ~47.10° FoV.
+        cam_props.horizontal_fov = math.degrees(
+            2.0 * math.atan(20.955 / (2.0 * 24.0))
+        )
+        env_ptr = env.envs[0]
+        camera_handle = env.gym.create_camera_sensor(env_ptr, cam_props)
+        env.gym.set_camera_location(
+            camera_handle, env_ptr,
+            gymapi.Vec3(0.0, -1.0, 1.03),
+            gymapi.Vec3(0.0, 0.0, 0.53),
+        )
 
     n_obs = 140
     n_act = 29
@@ -225,6 +271,15 @@ def main():
         # pushed to PhysX during this step's decimation ticks.
         joint_targets_log[step] = env.prev_targets[0, :n_act].detach().cpu().numpy()
 
+        if camera_handle is not None and step % args.frame_every == 0:
+            env.gym.step_graphics(env.sim)
+            env.gym.render_all_camera_sensors(env.sim)
+            rgba = env.gym.get_camera_image(
+                env.sim, env.envs[0], camera_handle, gymapi.IMAGE_COLOR
+            )
+            rgba = rgba.reshape(cam_props.height, cam_props.width, 4)
+            frames.append(rgba[:, :, :3])
+
         if step % 60 == 0:
             print(f"[eval-base] step {step:4d}  reward={reward_log[step]:+.4f}")
 
@@ -241,6 +296,12 @@ def main():
         joint_names=np.array(joint_names),
     )
     print(f"[eval-base] saved {args.output_npz}")
+
+    if frames:
+        import imageio
+        args.video_path.parent.mkdir(parents=True, exist_ok=True)
+        imageio.mimwrite(str(args.video_path), frames, fps=args.video_fps)
+        print(f"[eval-base] saved {args.video_path} — {len(frames)} frames @ {args.video_fps} fps")
 
 
 if __name__ == "__main__":

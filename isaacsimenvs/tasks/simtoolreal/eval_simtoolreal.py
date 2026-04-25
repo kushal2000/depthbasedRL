@@ -69,6 +69,13 @@ def _build_parser() -> argparse.ArgumentParser:
                              "bypass our action pipeline: send the recorded "
                              "target directly each step. Isolates PhysX 5 vs "
                              "PhysX 4 physics response to identical commands.")
+    parser.add_argument("--fixed_goal_pose", type=float, nargs=7, default=None,
+                        metavar=("X", "Y", "Z", "QX", "QY", "QZ", "QW"),
+                        help="Pin the goal to a single env-local pose. "
+                             "CLI is xyzw quat (matches the gym CLI in "
+                             "dextoolbench/eval_simtoolreal_base.py); we "
+                             "convert to wxyz internally before assigning "
+                             "cfg.reset.fixed_goal_pose.")
     return parser
 
 
@@ -134,6 +141,13 @@ def main() -> None:
     rs.reset_dof_pos_random_interval_fingers = 0.0
     rs.reset_dof_vel_random_interval = 0.0
     rs.table_reset_z_range = 0.0
+
+    if args.fixed_goal_pose is not None:
+        x, y, z, qx, qy, qz, qw = args.fixed_goal_pose
+        # CLI is xyzw; cfg.reset.fixed_goal_pose is wxyz (matches
+        # write_root_pose_to_sim convention in reset_utils.py).
+        rs.fixed_goal_pose = (x, y, z, qw, qx, qy, qz)
+        print(f"[eval] fixed_goal_pose (wxyz) = {rs.fixed_goal_pose}")
 
     env = gym.make("Isaacsimenvs-SimToolReal-Direct-v0", cfg=cfg)
     inner = env.unwrapped
