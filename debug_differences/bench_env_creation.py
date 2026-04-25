@@ -27,8 +27,8 @@ The breakdown distinguishes:
     G. GoalViz spawn (MultiUsdFileCfg)
     H. ground + light
     I. per-env scale tensor build
-    J. apply_physics_props_for_env (fused: material bind + contact/rest
-       offsets + GoalViz collisionEnabled, one walk per role per env)
+    J. apply_physx_material_properties (per-shape friction via PhysX
+       tensor view, called from SimToolRealEnv.__init__ after sim init)
     M. DirectRLEnv post-setup (sim.reset, view init, allocate_state_buffers)
 """
 
@@ -48,6 +48,13 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--num_envs", type=int, default=256)
     parser.add_argument("--num_per_type", type=int, default=25)
     parser.add_argument("--probe_envs", type=int, default=4)
+    parser.add_argument(
+        "--gpu_max_rigid_contact_count", type=int, default=None,
+        help="Override env.sim.physx.gpu_max_rigid_contact_count. Lab default "
+        "= 2^23 = 8M; SAPG slurm uses 2^24 = 16777216. Pass when benching at "
+        "the slurm scale (24576 envs) so PhysX scene init doesn't OOM on "
+        "contact buffer.",
+    )
     return parser
 
 
@@ -159,11 +166,11 @@ def _instrument_scene_utils() -> None:
     _Articulation.__init__ = _timed_art_init
     _RigidObject.__init__ = _timed_rb_init
 
-    # J. fused per-env physics-prop authoring (replaces former
-    #    bind_physics_materials_for_env + _disable_collisions_in_subtree +
-    #    _apply_physx_collision_offsets).
-    su.apply_physics_props_for_env = _timed("J_apply_props_per_env")(
-        su.apply_physics_props_for_env
+    # J. PhysX tensor-view friction assignment (replaces the prior per-env
+    #    USD MaterialBindingAPI loop). Called from SimToolRealEnv.__init__
+    #    after super().__init__() returns; accumulated in M_residual.
+    su.apply_physx_material_properties = _timed("J_set_material_props")(
+        su.apply_physx_material_properties
     )
 
     # H. ground + light: spawn_ground_plane + DomeLight.func.
@@ -181,12 +188,14 @@ def _instrument_scene_utils() -> None:
     su.spawn_ground_plane = _timed_ground
 
 
-def _build_cfg(num_envs: int, num_per_type: int):
+def _build_cfg(num_envs: int, num_per_type: int, gpu_max_rigid_contact_count: int | None = None):
     from isaacsimenvs.tasks.simtoolreal.simtoolreal_env_cfg import SimToolRealEnvCfg
 
     cfg = SimToolRealEnvCfg()
     cfg.scene.num_envs = num_envs
     cfg.assets.num_assets_per_type = num_per_type
+    if gpu_max_rigid_contact_count is not None:
+        cfg.sim.physx.gpu_max_rigid_contact_count = gpu_max_rigid_contact_count
     return cfg
 
 
@@ -229,14 +238,6 @@ def _correctness_probe(env, probe_envs: int) -> dict:
             if prim.HasAPI(UsdPhysics.CollisionAPI):
                 yield prim
 
-    def _bound_material_path(prim) -> str | None:
-        api = UsdShade.MaterialBindingAPI(prim)
-        rel = api.GetDirectBindingRel("physics")
-        if not rel:
-            return None
-        targets = rel.GetTargets()
-        return str(targets[0]) if targets else None
-
     for env_id in range(min(probe_envs, env.num_envs)):
         for role in ("Robot", "Table", "Object", "GoalViz"):
             root = f"/World/envs/env_{env_id}/{role}"
@@ -260,9 +261,24 @@ def _correctness_probe(env, probe_envs: int) -> dict:
                     link = parts[0] if parts else ""
                     if link in fingertip_links:
                         res["Robot"]["fingertip_leaves_total"] += 1
-                        mat_path = _bound_material_path(prim)
-                        if mat_path and "fingertip" in mat_path:
-                            res["Robot"]["fingertip_with_finger_material"] += 1
+    try:
+        view = env.robot.root_physx_view
+        materials = view.get_material_properties()
+        shape_start = 0
+        fingertip_shape_ids = []
+        for link_name, link_path in zip(view.shared_metatype.link_names, view.link_paths[0]):
+            link_view = env.robot._physics_sim_view.create_rigid_body_view(link_path)
+            shape_end = shape_start + link_view.max_shapes
+            if link_name in fingertip_links:
+                fingertip_shape_ids.extend(range(shape_start, shape_end))
+            shape_start = shape_end
+        n_envs = min(probe_envs, env.num_envs)
+        fingertip_static = materials[:n_envs, fingertip_shape_ids, 0]
+        res["Robot"]["fingertip_with_finger_material"] = int(
+            ((fingertip_static - 1.5).abs() < 1e-6).sum().item()
+        )
+    except Exception as exc:
+        res["Robot"]["fingertip_material_probe_error"] = repr(exc)
     return res
 
 
@@ -291,7 +307,9 @@ def main() -> None:
     import isaacsimenvs  # noqa: F401
     from isaacsimenvs.tasks.simtoolreal.simtoolreal_env import SimToolRealEnv
 
-    cfg = _build_cfg(args.num_envs, args.num_per_type)
+    cfg = _build_cfg(
+        args.num_envs, args.num_per_type, args.gpu_max_rigid_contact_count
+    )
 
     t_total0 = time.perf_counter()
     t_env0 = time.perf_counter()

@@ -39,7 +39,7 @@ from .utils.action_utils import apply_action_pipeline, apply_wrench_dr
 from .utils.obs_utils import build_observations, compute_intermediate_values, compute_obs_dim
 from .utils.reset_utils import allocate_state_buffers, reset_env_state
 from .utils.reward_utils import compute_rewards
-from .utils.scene_utils import setup_scene
+from .utils.scene_utils import apply_physx_material_properties, setup_scene
 from .utils.termination_utils import compute_terminations, update_tolerance_curriculum
 
 
@@ -58,6 +58,7 @@ class SimToolRealEnv(DirectRLEnv):
         cfg.state_space = compute_obs_dim(cfg.obs.state_list)
 
         super().__init__(cfg, render_mode, **kwargs)  # runs _setup_scene
+        apply_physx_material_properties(self)
         allocate_state_buffers(self)
 
     def _setup_scene(self) -> None:

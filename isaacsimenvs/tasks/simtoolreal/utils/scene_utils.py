@@ -24,6 +24,7 @@ import json
 import os
 import shutil
 import tempfile
+import time
 from pathlib import Path
 
 import torch
@@ -40,7 +41,6 @@ from isaaclab.sim.schemas import (
     CollisionPropertiesCfg,
     RigidBodyPropertiesCfg,
 )
-from isaaclab.sim.spawners.materials import RigidBodyMaterialCfg
 from isaaclab.sim.utils import (
     find_matching_prim_paths,
     get_current_stage,
@@ -554,11 +554,22 @@ def _iter_collision_prim_paths(root_prim_path: str) -> list[str]:
     return paths
 
 
-_DEFAULT_MATERIAL_PATH = "/World/PhysicsMaterials/simtoolreal_default"
-_FINGERTIP_MATERIAL_PATH = "/World/PhysicsMaterials/simtoolreal_fingertip"
-_USD_BAKE_VERSION = "simtoolreal_usd_bake_v2"
+_USD_BAKE_VERSION = "simtoolreal_usd_bake_v5_no_asset_materials"
 _CONTACT_OFFSET = 0.002
 _REST_OFFSET = 0.0
+
+
+def _scene_debug_enabled() -> bool:
+    return os.environ.get("SIMTOOLREAL_SCENE_DEBUG", "").lower() in {"1", "true", "yes", "on"}
+
+
+def _scene_debug(message: str, *, start_time: float | None = None) -> None:
+    if not _scene_debug_enabled():
+        return
+    prefix = "[scene_utils]"
+    if start_time is not None:
+        prefix += f"[+{time.perf_counter() - start_time:.2f}s]"
+    print(f"{prefix} {message}", flush=True)
 
 
 def _raw_usd_fingerprint(usd_path: str) -> dict[str, int | str]:
@@ -580,10 +591,7 @@ def _bake_spec(raw_usd_path: str, role: str, assets_cfg) -> dict:
         "contact_offset": _CONTACT_OFFSET,
         "rest_offset": _REST_OFFSET,
         "modify_asset_frictions": bool(assets_cfg.modify_asset_frictions),
-        # Preserve current scene semantics: the "default" material is authored
-        # from robot_friction and bound to all non-fingertip colliders.
-        "default_friction": float(assets_cfg.robot_friction),
-        "fingertip_friction": float(assets_cfg.finger_tip_friction),
+        "materials_bound_in_composed_stage": True,
     }
 
 
@@ -627,24 +635,6 @@ def _asset_root_prim(stage):
     return None
 
 
-def _define_baked_physics_material(stage, path: str, friction: float):
-    from pxr import PhysxSchema, UsdPhysics, UsdShade
-
-    material = UsdShade.Material.Define(stage, path)
-    prim = material.GetPrim()
-    usd_api = UsdPhysics.MaterialAPI(prim)
-    if not usd_api:
-        usd_api = UsdPhysics.MaterialAPI.Apply(prim)
-    physx_api = PhysxSchema.PhysxMaterialAPI(prim)
-    if not physx_api:
-        physx_api = PhysxSchema.PhysxMaterialAPI.Apply(prim)
-
-    (usd_api.GetStaticFrictionAttr() or usd_api.CreateStaticFrictionAttr()).Set(friction)
-    (usd_api.GetDynamicFrictionAttr() or usd_api.CreateDynamicFrictionAttr()).Set(friction)
-    (usd_api.GetRestitutionAttr() or usd_api.CreateRestitutionAttr()).Set(0.0)
-    return material
-
-
 def _collision_leaf_prims(stage, root_prim) -> list:
     from pxr import Usd, UsdPhysics
 
@@ -663,18 +653,13 @@ def _uninstance_stage_subtree(root_prim) -> None:
             prim.SetInstanceable(False)
 
 
-def _link_name_under_root(prim, root_prim) -> str:
-    root_path = str(root_prim.GetPath()).rstrip("/") + "/"
-    path = str(prim.GetPath())
-    if not path.startswith(root_path):
-        return ""
-    return path[len(root_path):].split("/", 1)[0]
-
-
 def _set_usd_attr(prim, name: str, value, value_type) -> None:
     attr = prim.GetAttribute(name)
+    if attr and (not attr.GetTypeName() or not str(attr.GetTypeName())):
+        prim.RemoveProperty(name)
+        attr = None
     if not attr:
-        attr = prim.CreateAttribute(name, value_type)
+        attr = prim.CreateAttribute(name, value_type, False)
     attr.Set(value)
 
 
@@ -745,7 +730,7 @@ def bake_physics_props_into_usd(
     baked USD is invalidated by a small sidecar hash that includes the raw
     converter output fingerprint, role, contact offsets, and material values.
     """
-    from pxr import PhysxSchema, Sdf, Usd, UsdPhysics, UsdShade
+    from pxr import PhysxSchema, Sdf, Usd, UsdPhysics
 
     baked_usd_path = _baked_usd_path(raw_usd_path, bake_root, role)
     spec = _bake_spec(raw_usd_path, role, assets_cfg)
@@ -770,178 +755,77 @@ def bake_physics_props_into_usd(
     _uninstance_stage_subtree(root)
     leaves = _collision_leaf_prims(stage, root)
     _bake_role_schema_props(stage, root, role)
-    bind_materials = bool(assets_cfg.modify_asset_frictions)
-    default_material = fingertip_material = None
-    if bind_materials:
-        material_root = f"{root.GetPath()}/SimToolRealPhysicsMaterials"
-        default_material = _define_baked_physics_material(
-            stage, f"{material_root}/default", float(assets_cfg.robot_friction)
-        )
-        if role == "robot":
-            fingertip_material = _define_baked_physics_material(
-                stage, f"{material_root}/fingertip", float(assets_cfg.finger_tip_friction)
-            )
-        bind_strength = UsdShade.Tokens.strongerThanDescendants
-        material_bindings = []
-        for prim in leaves:
-            material = default_material
-            if role == "robot" and _link_name_under_root(prim, root) in FINGERTIP_LINK_NAMES:
-                material = fingertip_material
-            material_bindings.append((UsdShade.MaterialBindingAPI.Apply(prim), material))
 
-    with Sdf.ChangeBlock():
-        for prim in leaves:
-            px = PhysxSchema.PhysxCollisionAPI(prim)
-            if not px:
-                px = PhysxSchema.PhysxCollisionAPI.Apply(prim)
-            (px.GetContactOffsetAttr() or px.CreateContactOffsetAttr()).Set(_CONTACT_OFFSET)
-            (px.GetRestOffsetAttr() or px.CreateRestOffsetAttr()).Set(_REST_OFFSET)
-            if role == "goalviz":
-                ce = UsdPhysics.CollisionAPI(prim)
-                (ce.GetCollisionEnabledAttr() or ce.CreateCollisionEnabledAttr()).Set(False)
-        if bind_materials:
-            for api, material in material_bindings:
-                api.Bind(material, bindingStrength=bind_strength, materialPurpose="physics")
+    for prim in leaves:
+        px = PhysxSchema.PhysxCollisionAPI(prim)
+        if not px:
+            px = PhysxSchema.PhysxCollisionAPI.Apply(prim)
+        px.CreateContactOffsetAttr().Set(_CONTACT_OFFSET)
+        px.CreateRestOffsetAttr().Set(_REST_OFFSET)
+        if role == "goalviz":
+            ce = UsdPhysics.CollisionAPI(prim)
+            (ce.GetCollisionEnabledAttr() or ce.CreateCollisionEnabledAttr()).Set(False)
 
     stage.GetRootLayer().Save()
     sidecar.write_text(digest + "\n")
     return str(baked_usd_path)
 
 
-def author_physics_materials(assets_cfg) -> None:
-    """Author the two shared material prims once (idempotent)."""
+def apply_physx_material_properties(env) -> None:
+    """Set contact material properties through PhysX tensor views.
+
+    This follows Isaac Lab's large-scale material-randomization path: avoid USD
+    relationship authoring after spawn, and avoid creating one material prim per
+    cloned asset. It must run after ``DirectRLEnv`` starts the simulator, when
+    asset ``root_physx_view`` handles are initialized.
+    """
+    assets_cfg = env.cfg.assets
     if not assets_cfg.modify_asset_frictions:
         return
-    default_cfg = RigidBodyMaterialCfg(
-        static_friction=assets_cfg.robot_friction,
-        dynamic_friction=assets_cfg.robot_friction,
-        restitution=0.0,
-    )
-    default_cfg.func(_DEFAULT_MATERIAL_PATH, default_cfg)
-    fingertip_cfg = RigidBodyMaterialCfg(
-        static_friction=assets_cfg.finger_tip_friction,
-        dynamic_friction=assets_cfg.finger_tip_friction,
-        restitution=0.0,
-    )
-    fingertip_cfg.func(_FINGERTIP_MATERIAL_PATH, fingertip_cfg)
 
+    import torch
 
-def _split_fingertip_colliders(
-    robot_colliders: list[str], robot_prim_root: str
-) -> tuple[list[str], list[str]]:
-    """Partition robot collider paths into (fingertip, non-fingertip)."""
-    prefix = robot_prim_root.rstrip("/") + "/"
-    fingertip, non_fingertip = [], []
-    for path in robot_colliders:
-        if not path.startswith(prefix):
-            non_fingertip.append(path)
-            continue
-        # path = {robot_prim_root}/<link>/<sub...>/collisions
-        rel = path[len(prefix):]
-        link_name = rel.split("/", 1)[0]
+    t0 = time.perf_counter()
+    default = torch.tensor(
+        [float(assets_cfg.robot_friction), float(assets_cfg.robot_friction), 0.0],
+        dtype=torch.float32,
+        device="cpu",
+    )
+    fingertip = torch.tensor(
+        [float(assets_cfg.finger_tip_friction), float(assets_cfg.finger_tip_friction), 0.0],
+        dtype=torch.float32,
+        device="cpu",
+    )
+    env_ids = torch.arange(env.num_envs, dtype=torch.int64, device="cpu")
+
+    robot_view = env.robot.root_physx_view
+    robot_materials = robot_view.get_material_properties()
+    robot_materials[:] = default
+
+    shape_start = 0
+    for link_name, link_path in zip(robot_view.shared_metatype.link_names, robot_view.link_paths[0]):
+        link_view = env.robot._physics_sim_view.create_rigid_body_view(link_path)
+        shape_end = shape_start + link_view.max_shapes
         if link_name in FINGERTIP_LINK_NAMES:
-            fingertip.append(path)
-        else:
-            non_fingertip.append(path)
-    return fingertip, non_fingertip
-
-
-def apply_physics_props_for_env(
-    env_id: int,
-    assets_cfg,
-    roles: tuple[str, ...] = ("Robot", "Table", "Object", "GoalViz"),
-) -> None:
-    """Author all per-env physics properties for one env in a single pass.
-
-    Walks each role's collider subtree exactly once (Robot, Table, Object,
-    GoalViz) and authors:
-
-      - ``MaterialBindingAPI`` to the default friction material on every
-        non-fingertip leaf, and to the fingertip-friction material on every
-        fingertip leaf (gated on ``assets_cfg.modify_asset_frictions``).
-      - ``physxCollision:contactOffset = 2 mm`` and ``restOffset = 0`` on
-        every leaf — undoing the spawn-cfg's silent default-to-2-cm caused
-        by ``apply_nested``'s instance-proxy bail (see commit a926a86).
-      - ``physics:collisionEnabled = False`` on every GoalViz leaf — the
-        spawn-cfg ``collision_enabled=False`` is a no-op on nested colliders
-        (see commit e51aeda); without this the kinematic visual twin still
-        collides with the real object and the trained hammer wedges at
-        ~4 cm from the goal.
-
-    Replaces the previous three sequential per-env loops (steps 10/11/12 in
-    setup_scene), which together walked each subtree 9× per env. Author
-    materials via ``author_physics_materials`` must have already run.
-
-    Layering w.r.t. ``Sdf.ChangeBlock``:
-      - Walks (``_iter_collision_prim_paths``) run *outside* the block —
-        they include ``SetInstanceable(False)`` writes whose effects must
-        be visible to the subsequent ``GetChildren()`` walk.
-      - ``MaterialBindingAPI.Apply`` runs *outside* — empirically, applying
-        it inside a ChangeBlock causes the subsequent ``Bind`` to write a
-        relationship that ``GetDirectBindingRel`` can't see (apiSchemas
-        metadata write is queued; relationship name doesn't resolve).
-      - ``PhysxCollisionAPI.Apply`` and all ``Set``/``Bind`` calls go
-        *inside* the block — those are pure attribute / relationship writes
-        and benefit from the notification batching.
-    """
-    from pxr import PhysxSchema, Sdf, UsdPhysics, UsdShade
-
-    stage = get_current_stage()
-
-    role_roots = {
-        "Robot":   f"/World/envs/env_{env_id}/Robot",
-        "Table":   f"/World/envs/env_{env_id}/Table",
-        "Object":  f"/World/envs/env_{env_id}/Object",
-        "GoalViz": f"/World/envs/env_{env_id}/GoalViz",
-    }
-    role_roots = {role: root for role, root in role_roots.items() if role in roles}
-    leaves_by_role = {
-        role: _iter_collision_prim_paths(root) for role, root in role_roots.items()
-    }
-    fingertip_leaves, robot_non_fingertip = _split_fingertip_colliders(
-        leaves_by_role.get("Robot", []),
-        role_roots.get("Robot", f"/World/envs/env_{env_id}/Robot"),
-    )
-
-    bind_materials = assets_cfg.modify_asset_frictions
-    if bind_materials:
-        default_material = UsdShade.Material(stage.GetPrimAtPath(_DEFAULT_MATERIAL_PATH))
-        fingertip_material = UsdShade.Material(stage.GetPrimAtPath(_FINGERTIP_MATERIAL_PATH))
-        default_paths = (
-            robot_non_fingertip
-            + leaves_by_role.get("Table", [])
-            + leaves_by_role.get("Object", [])
-            + leaves_by_role.get("GoalViz", [])
+            robot_materials[:, shape_start:shape_end] = fingertip
+        shape_start = shape_end
+    if shape_start != robot_view.max_shapes:
+        raise RuntimeError(
+            f"Robot shape count mismatch while assigning materials: "
+            f"computed {shape_start}, view reports {robot_view.max_shapes}."
         )
-        default_apis = [
-            UsdShade.MaterialBindingAPI.Apply(stage.GetPrimAtPath(p))
-            for p in default_paths
-        ]
-        fingertip_apis = [
-            UsdShade.MaterialBindingAPI.Apply(stage.GetPrimAtPath(p))
-            for p in fingertip_leaves
-        ]
-        bind_strength = UsdShade.Tokens.strongerThanDescendants
+    robot_view.set_material_properties(robot_materials, env_ids)
 
-    with Sdf.ChangeBlock():
-        if bind_materials:
-            for api in default_apis:
-                api.Bind(default_material, bindingStrength=bind_strength, materialPurpose="physics")
-            for api in fingertip_apis:
-                api.Bind(fingertip_material, bindingStrength=bind_strength, materialPurpose="physics")
-        # Contact / rest offsets on every leaf.
-        for leaves in leaves_by_role.values():
-            for path in leaves:
-                prim = stage.GetPrimAtPath(path)
-                px = PhysxSchema.PhysxCollisionAPI.Apply(prim)
-                (px.GetContactOffsetAttr() or px.CreateContactOffsetAttr()).Set(0.002)
-                (px.GetRestOffsetAttr() or px.CreateRestOffsetAttr()).Set(0.0)
-        # Disable collisions on every GoalViz leaf (kinematic visual twin
-        # must not collide with the real object).
-        for path in leaves_by_role.get("GoalViz", []):
-            prim = stage.GetPrimAtPath(path)
-            ce = UsdPhysics.CollisionAPI(prim)
-            (ce.GetCollisionEnabledAttr() or ce.CreateCollisionEnabledAttr()).Set(False)
+    for name in ("table", "object", "goal_viz"):
+        asset = getattr(env, name)
+        view = asset.root_physx_view
+        materials = view.get_material_properties()
+        materials[:] = default
+        view.set_material_properties(materials, env_ids)
+
+    _scene_debug(
+        f"applied PhysX material properties in {time.perf_counter() - t0:.2f}s",
+    )
 
 
 # ----------------------------------------------------------------------------
@@ -970,6 +854,12 @@ def setup_scene(env) -> None:
     """
     assets_cfg = env.cfg.assets
     force_rebuild = bool(getattr(assets_cfg, "rebuild_assets", False))
+    setup_t0 = time.perf_counter()
+    _scene_debug(
+        f"setup start num_envs={env.num_envs} num_assets_per_type={assets_cfg.num_assets_per_type} "
+        f"force_rebuild={force_rebuild}",
+        start_time=setup_t0,
+    )
 
     # 1. Generate procedural URDFs (100 per handle-head type by default). The
     #    URDFs themselves go into a per-launch tmpdir — generation is fast
@@ -982,6 +872,10 @@ def setup_scene(env) -> None:
         num_per_type=assets_cfg.num_assets_per_type,
         out_dir=env._tmp_asset_dir,
         shuffle=assets_cfg.shuffle_assets,
+    )
+    _scene_debug(
+        f"generated {len(urdf_paths)} object URDFs in {env._tmp_asset_dir}",
+        start_time=setup_t0,
     )
     if not urdf_paths:
         raise ValueError(
@@ -1017,6 +911,7 @@ def setup_scene(env) -> None:
         usd_cache_root = Path.home() / ".cache" / "simtoolreal_assets" / "v1"
     usd_cache_root.mkdir(parents=True, exist_ok=True)
     env._usd_cache_root = str(usd_cache_root)
+    _scene_debug(f"using USD cache root {usd_cache_root}", start_time=setup_t0)
     usd_paths: list[str] = []
     for urdf in urdf_paths:
         asset_dir = usd_cache_root / Path(urdf).stem
@@ -1032,6 +927,7 @@ def setup_scene(env) -> None:
             )
         )
         usd_paths.append(converter.usd_path)
+    _scene_debug(f"resolved {len(usd_paths)} object USDs", start_time=setup_t0)
     baked_cache_root = usd_cache_root / "_baked"
     object_usd_paths = [
         bake_physics_props_into_usd(
@@ -1043,6 +939,7 @@ def setup_scene(env) -> None:
         )
         for usd in usd_paths
     ]
+    _scene_debug(f"resolved {len(object_usd_paths)} baked object USDs", start_time=setup_t0)
     goalviz_usd_paths = [
         bake_physics_props_into_usd(
             raw_usd_path=usd_paths[0],
@@ -1052,6 +949,7 @@ def setup_scene(env) -> None:
             force=force_rebuild,
         )
     ]
+    _scene_debug(f"resolved {len(goalviz_usd_paths)} baked goalviz USDs", start_time=setup_t0)
 
     # 3. Pre-create empty env_1..env_{N-1} Xform prims so subsequent regex
     #    spawns (Robot/Table via @clone, Object/GoalViz via MultiUsdFileCfg)
@@ -1063,6 +961,10 @@ def setup_scene(env) -> None:
     for env_path in env.scene.env_prim_paths:
         if not stage.GetPrimAtPath(env_path).IsValid():
             stage.DefinePrim(env_path, "Xform")
+    _scene_debug(
+        f"materialized {len(env.scene.env_prim_paths)} env prims",
+        start_time=setup_t0,
+    )
 
     # 4. Robot + table — homogeneous regex spawn. The @clone-decorated
     #    UrdfFileCfg spawner now resolves the regex to all env_* prims and
@@ -1103,6 +1005,7 @@ def setup_scene(env) -> None:
             joint_drive=None,
         )
     )
+    _scene_debug("resolved robot/table raw USDs", start_time=setup_t0)
     robot_usd_path = bake_physics_props_into_usd(
         raw_usd_path=robot_converter.usd_path,
         bake_root=baked_cache_root,
@@ -1117,12 +1020,14 @@ def setup_scene(env) -> None:
         assets_cfg=assets_cfg,
         force=force_rebuild,
     )
+    _scene_debug("resolved robot/table baked USDs", start_time=setup_t0)
     env.robot = Articulation(
         build_robot_articulation_usd_cfg(robot_usd_path)
     )
     env.table = RigidObject(
         build_table_rigid_object_usd_cfg(table_usd_path, z=env.cfg.reset.table_reset_z)
     )
+    _scene_debug("spawned robot and table", start_time=setup_t0)
 
     # 5. Object — per-env distinct baked USDs via MultiUsdFileCfg. Deterministic
     #    cycling: env at source-prim-path index i receives
@@ -1139,11 +1044,13 @@ def setup_scene(env) -> None:
     #    if you want per-env debug visuals matching the Object shape.
     env.object = RigidObject(build_object_rigid_object_cfg(object_usd_paths))
     env.goal_viz = RigidObject(build_goal_viz_rigid_object_cfg(goalviz_usd_paths))
+    _scene_debug("spawned object and goalviz", start_time=setup_t0)
 
     # 6. Ground plane + dome light (global, outside env_*).
     spawn_ground_plane(prim_path="/World/ground", cfg=GroundPlaneCfg())
     light_cfg = sim_utils.DomeLightCfg(intensity=2000.0, color=(0.75, 0.75, 0.75))
     light_cfg.func("/World/Light", light_cfg)
+    _scene_debug("spawned ground and light", start_time=setup_t0)
 
     # 7. Cross-env collision filtering against /World/ground: only required
     #    on the CPU PhysX pipeline. The GPU pipeline filters automatically
@@ -1177,16 +1084,20 @@ def setup_scene(env) -> None:
             device=env.device,
             dtype=torch.float32,
         )
+    _scene_debug("built per-env object scale tensor", start_time=setup_t0)
 
     # 9. Register with scene so DirectRLEnv refreshes their tensors each step.
     env.scene.articulations["robot"] = env.robot
     env.scene.rigid_objects["table"] = env.table
     env.scene.rigid_objects["object"] = env.object
     env.scene.rigid_objects["goal_viz"] = env.goal_viz
+    _scene_debug("registered assets with scene", start_time=setup_t0)
 
-    # 10. Static leaf physics props are baked into role-specific USDs above.
-    #     Keep apply_physics_props_for_env available for diagnostics/backstops,
-    #     but the production setup path no longer walks every env subtree.
+    # 10. Static leaf physics props (offsets, collision_enabled, rigid/articulation
+    #     flags) are baked into role-specific USDs at conversion time
+    #     (bake_physics_props_into_usd). Per-shape friction is set after
+    #     super().__init__() returns via apply_physx_material_properties on the
+    #     PhysX tensor view (simtoolreal_env.py:61). Nothing per-env to do here.
 
 
 __all__ = [
@@ -1207,7 +1118,6 @@ __all__ = [
     "build_table_rigid_object_cfg",
     "build_object_rigid_object_cfg",
     "build_goal_viz_rigid_object_cfg",
-    "author_physics_materials",
-    "apply_physics_props_for_env",
+    "apply_physx_material_properties",
     "setup_scene",
 ]
