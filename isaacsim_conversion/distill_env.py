@@ -282,6 +282,34 @@ class IsaacSimDistillEnv:
 
         robot_joint_vel = {name: 0.0 for name in JOINT_NAMES_ISAACGYM}
         default_joint_pos = dict(DEFAULT_JOINT_POS)
+        randomize_hole = bool(np.any(self.hole_pos_noise_xyz > 0.0) or self.hole_yaw_noise_deg > 0.0)
+        if randomize_hole:
+            table_cfg = RigidObjectCfg(
+                prim_path="{ENV_REGEX_NS}/Table",
+                spawn=sim_utils.UsdFileCfg(
+                    usd_path=table_usd,
+                    articulation_props=sim_utils.ArticulationRootPropertiesCfg(
+                        articulation_enabled=False,
+                    ),
+                    collision_props=sim_utils.CollisionPropertiesCfg(
+                        contact_offset=0.002,
+                        rest_offset=0.0,
+                    ),
+                ),
+                init_state=RigidObjectCfg.InitialStateCfg(pos=(0.0, 0.0, 0.38)),
+            )
+        else:
+            table_cfg = AssetBaseCfg(
+                prim_path="{ENV_REGEX_NS}/Table",
+                spawn=sim_utils.UsdFileCfg(
+                    usd_path=table_usd,
+                    collision_props=sim_utils.CollisionPropertiesCfg(
+                        contact_offset=0.002,
+                        rest_offset=0.0,
+                    ),
+                ),
+                init_state=AssetBaseCfg.InitialStateCfg(pos=(0.0, 0.0, 0.38)),
+            )
         if self.enable_camera:
             from isaaclab.sensors import CameraCfg, TiledCameraCfg
 
@@ -340,20 +368,7 @@ class IsaacSimDistillEnv:
                     },
                 )
 
-                table = RigidObjectCfg(
-                    prim_path="{ENV_REGEX_NS}/Table",
-                    spawn=sim_utils.UsdFileCfg(
-                        usd_path=table_usd,
-                        articulation_props=sim_utils.ArticulationRootPropertiesCfg(
-                            articulation_enabled=False,
-                        ),
-                        collision_props=sim_utils.CollisionPropertiesCfg(
-                            contact_offset=0.002,
-                            rest_offset=0.0,
-                        ),
-                    ),
-                    init_state=RigidObjectCfg.InitialStateCfg(pos=(0.0, 0.0, 0.38)),
-                )
+                table = table_cfg
 
                 object = RigidObjectCfg(
                     prim_path="{ENV_REGEX_NS}/Object",
@@ -438,20 +453,7 @@ class IsaacSimDistillEnv:
                     },
                 )
 
-                table = RigidObjectCfg(
-                    prim_path="{ENV_REGEX_NS}/Table",
-                    spawn=sim_utils.UsdFileCfg(
-                        usd_path=table_usd,
-                        articulation_props=sim_utils.ArticulationRootPropertiesCfg(
-                            articulation_enabled=False,
-                        ),
-                        collision_props=sim_utils.CollisionPropertiesCfg(
-                            contact_offset=0.002,
-                            rest_offset=0.0,
-                        ),
-                    ),
-                    init_state=RigidObjectCfg.InitialStateCfg(pos=(0.0, 0.0, 0.38)),
-                )
+                table = table_cfg
 
                 object = RigidObjectCfg(
                     prim_path="{ENV_REGEX_NS}/Object",
@@ -522,7 +524,7 @@ class IsaacSimDistillEnv:
             )
         )
         self.robot = self.scene.articulations["robot"]
-        self.table_rigid = self.scene.rigid_objects["table"]
+        self.table_rigid = self.scene.rigid_objects.get("table")
         self.object_rigid = self.scene.rigid_objects["object"]
         self.camera = self.scene.sensors["camera"] if self.enable_camera else None
         self.env_origins = self.scene.env_origins
@@ -905,10 +907,11 @@ class IsaacSimDistillEnv:
 
         table_poses = self._sample_table_poses(env_ids_np)
         self.current_table_pose[env_ids_np] = table_poses
-        table_pose_w = self._local_pose_to_world_pose(self.current_table_pose)
-        self.table_rigid.write_root_pose_to_sim(table_pose_w[env_ids], env_ids=env_ids)
-        table_vel = torch.zeros((len(env_ids_np), 6), dtype=torch.float32, device=self.device)
-        self.table_rigid.write_root_velocity_to_sim(table_vel, env_ids=env_ids)
+        if self.table_rigid is not None:
+            table_pose_w = self._local_pose_to_world_pose(self.current_table_pose)
+            self.table_rigid.write_root_pose_to_sim(table_pose_w[env_ids], env_ids=env_ids)
+            table_vel = torch.zeros((len(env_ids_np), 6), dtype=torch.float32, device=self.device)
+            self.table_rigid.write_root_velocity_to_sim(table_vel, env_ids=env_ids)
         self._sample_camera_randomization(env_ids_np)
 
         start_poses = self._sample_start_poses()[env_ids_np]
