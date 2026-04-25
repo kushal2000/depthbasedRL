@@ -134,8 +134,7 @@ mkdir -p "$OMNI_KIT_CACHE_PATH"
 python -u isaacsimenvs/train.py \
     --task "$TASK_ID" \
     --agent "$AGENT_KEY" \
-    --headless --enable_cameras \
-    --capture_video --video_interval 100 \
+    --headless \
     --wandb_activate \
     --wandb_project "$WANDB_PROJECT" \
     --wandb_group "$WANDB_GROUP" \
