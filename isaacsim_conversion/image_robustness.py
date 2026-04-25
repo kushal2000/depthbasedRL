@@ -42,6 +42,7 @@ class DepthAugCfg:
 @dataclass
 class ImageDelayCfg:
     enabled: bool = False
+    queue_length_frames: int | None = None
     fixed_delay_frames: int | None = None
     max_random_delay_frames: int = 0
     resample_on_reset: bool = True
@@ -134,6 +135,9 @@ def image_robustness_cfg_from_dict(data: dict | None) -> ImageRobustnessCfg:
     )
     image_delay = ImageDelayCfg(
         enabled=bool(image_delay_raw.get("enabled", False)),
+        queue_length_frames=(
+            None if image_delay_raw.get("queue_length_frames") is None else int(image_delay_raw.get("queue_length_frames"))
+        ),
         fixed_delay_frames=(
             None if image_delay_raw.get("fixed_delay_frames") is None else int(image_delay_raw.get("fixed_delay_frames"))
         ),
@@ -218,6 +222,12 @@ class TrainImageRobustifier:
         self._delay_steps = torch.zeros(num_envs, dtype=torch.long, device=device)
         self._delay_queue: list[torch.Tensor] = []
 
+    def _max_random_delay_frames(self) -> int:
+        if self.cfg.image_delay.queue_length_frames is not None:
+            # Queue length M samples delays in [0, M - 1]. M=1 is latest/no delay.
+            return max(int(self.cfg.image_delay.queue_length_frames) - 1, 0)
+        return max(int(self.cfg.image_delay.max_random_delay_frames), 0)
+
     def _load_background_images(self) -> list[torch.Tensor]:
         bg_dir = self.cfg.rgb_aug.background_dir
         if not bg_dir:
@@ -247,7 +257,7 @@ class TrainImageRobustifier:
         if self.cfg.image_delay.fixed_delay_frames is not None:
             self._delay_steps[env_ids] = int(max(self.cfg.image_delay.fixed_delay_frames, 0))
             return
-        max_delay = max(int(self.cfg.image_delay.max_random_delay_frames), 0)
+        max_delay = self._max_random_delay_frames()
         if max_delay <= 0:
             self._delay_steps[env_ids] = 0
             return

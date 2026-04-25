@@ -664,6 +664,9 @@ def _capture_rgb_frame(env: IsaacSimDistillEnv, env_id: int) -> np.ndarray | Non
 
 
 def _single_channel_to_rgb_u8(channel: np.ndarray) -> np.ndarray:
+    finite = channel[np.isfinite(channel)]
+    if finite.size > 0 and (float(np.nanmin(finite)) < 0.0 or float(np.nanmax(finite)) > 1.5):
+        channel = (channel - 0.5) / (1.6 - 0.5)
     channel = np.clip(channel, 0.0, 1.0)
     img = (channel * 255.0).round().astype(np.uint8)
     return np.repeat(img[..., None], 3, axis=-1)

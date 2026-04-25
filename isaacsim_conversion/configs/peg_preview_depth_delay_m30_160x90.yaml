@@ -1,0 +1,48 @@
+num_episodes: 1
+max_steps: 180
+action_loss_weight: 1.0
+aux_object_pos_weight: 1.0
+hand_moving_average: 0.1
+arm_moving_average: 0.1
+dof_speed_scale: 1.5
+control_dt: 0.016666666666666666
+beta_mode: always_teacher
+beta_start: 1.0
+beta_end: 1.0
+beta_decay: 0.0
+beta_metric_threshold: 1.0
+beta_update_episodes: 1
+beta_hold_episodes: 0
+checkpoint_interval: 10
+eval_interval: 999
+eval_num_envs: 0
+eval_max_steps: 180
+image_height: 90
+image_width: 160
+learning_rate: 0.0001
+num_envs: 4
+env_spacing: 4.0
+ground_plane_size: 500.0
+object_start_mode: fixed
+object_pos_noise_xyz: [0.0, 0.0, 0.0]
+object_yaw_noise_deg: 0.0
+object_rotation_noise_mode: yaw
+camera_pos_noise_xyz: [0.0, 0.0, 0.0]
+camera_rot_noise_deg: [0.0, 0.0, 0.0]
+hole_pos_noise_xyz: [0.0, 0.0, 0.0]
+hole_yaw_noise_deg: 0.0
+camera_backend: tiled
+depth_preprocess_mode: metric
+depth_min_m: 0.0
+depth_max_m: 5.0
+episode_length: 180
+reset_when_dropped: false
+online_num_iters: 1000
+online_log_interval: 100
+online_update_interval: 1
+image_robustness:
+  enabled: true
+  image_delay:
+    enabled: true
+    queue_length_frames: 30
+    resample_on_reset: true
