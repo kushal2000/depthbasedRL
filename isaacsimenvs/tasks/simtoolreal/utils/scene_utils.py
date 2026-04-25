@@ -20,7 +20,6 @@ configs).
 from __future__ import annotations
 
 import tempfile
-from typing import Optional
 
 import torch
 
@@ -38,7 +37,6 @@ from isaaclab.sim.schemas import (
 )
 from isaaclab.sim.spawners.materials import RigidBodyMaterialCfg
 from isaaclab.sim.utils import (
-    bind_physics_material,
     find_matching_prim_paths,
     get_current_stage,
 )
@@ -503,84 +501,6 @@ def _iter_collision_prim_paths(root_prim_path: str) -> list[str]:
     return paths
 
 
-def _bind_material(material_path: str, collider_paths: list[str]) -> None:
-    """Bind a material prim to a list of collider prims (unwrapping decorators)."""
-    fn = getattr(bind_physics_material, "__wrapped__", bind_physics_material)
-    for collider in collider_paths:
-        fn(collider, material_path)
-
-
-def _apply_physx_collision_offsets(
-    root_prim_path: str,
-    contact_offset: float,
-    rest_offset: float,
-) -> None:
-    """Author ``physxCollision:contactOffset`` and ``physxCollision:restOffset``
-    on every leaf collider prim under ``root_prim_path``.
-
-    The spawn-cfg ``CollisionPropertiesCfg(contact_offset=..., rest_offset=...)``
-    runs through Lab's ``apply_nested`` walker which bails on instanced prims.
-    For ``MultiUsdFileCfg``-spawned assets (Object/GoalViz) and the
-    ``UrdfFileCfg``-spawned Robot/Table, the actual collider leaves live
-    under instanceable prototypes at spawn time, so the configured offsets
-    silently default to PhysX values (contact_offset≈0.02 m, ~10× looser
-    than the cfg-set 2 mm). Walk the un-instanced subtree (via
-    ``_iter_collision_prim_paths``) and set the attributes leaf-by-leaf.
-
-    Verified by ``debug_differences/verify_collision_props.py``: before
-    this pass, 0 prims under Robot/Table/Object/GoalViz have an authored
-    contactOffset/restOffset value; after, every leaf collider does.
-    """
-    from pxr import PhysxSchema
-    stage = get_current_stage()
-    for path in _iter_collision_prim_paths(root_prim_path):
-        prim = stage.GetPrimAtPath(path)
-        if not PhysxSchema.PhysxCollisionAPI(prim):
-            PhysxSchema.PhysxCollisionAPI.Apply(prim)
-        api = PhysxSchema.PhysxCollisionAPI(prim)
-        attr = api.GetContactOffsetAttr() or api.CreateContactOffsetAttr()
-        attr.Set(float(contact_offset))
-        attr = api.GetRestOffsetAttr() or api.CreateRestOffsetAttr()
-        attr.Set(float(rest_offset))
-
-
-def _disable_collisions_in_subtree(root_prim_path: str) -> None:
-    """Set ``physics:collisionEnabled=False`` on every collider prim under
-    ``root_prim_path``.
-
-    Lab's ``CollisionPropertiesCfg(collision_enabled=False)`` on a spawn cfg
-    is silently a no-op for nested colliders: ``schemas.modify_collision_properties``
-    (schemas.py:401-402) checks ``UsdPhysics.CollisionAPI(prim)`` on the
-    spawn target prim (the GoalViz root, which is an Xform/Articulation root
-    without CollisionAPI applied), and returns immediately. The actual
-    colliders are leaf shape prims (Cube/Cylinder/Mesh) under e.g.
-    ``/World/envs/env_K/GoalViz/object_root/collisions/mesh_0`` — ``collisions``
-    is just a *grouping Xform*; the API lives on its descendants. Setting
-    collisionEnabled on the group prim is a no-op because PhysX evaluates
-    the attr on the leaf with the API applied.
-
-    Walk the whole subtree, identify every prim that already has
-    ``UsdPhysics.CollisionAPI`` applied, and disable it. (Diagnostic:
-    inspecting the GoalViz prim tree showed the legacy "name == 'collisions'"
-    filter never matched any leaves on the URDF-converted hammer asset, so
-    the disable was silently a no-op and goal_viz still collided with the
-    object — empirically the hammer is blocked at ~4 cm = hammer-head
-    radius, exactly the distance you'd expect if GoalViz still had its
-    head colliders enabled.)
-    """
-    # _iter_collision_prim_paths un-instances the subtree first (so the
-    # leaf colliders living under instanceable prototypes become writable)
-    # and then returns leaf prims with UsdPhysics.CollisionAPI applied.
-    # We just flip collisionEnabled=False on each.
-    from pxr import UsdPhysics
-    stage = get_current_stage()
-    for path in _iter_collision_prim_paths(root_prim_path):
-        prim = stage.GetPrimAtPath(path)
-        api = UsdPhysics.CollisionAPI(prim)
-        attr = api.GetCollisionEnabledAttr() or api.CreateCollisionEnabledAttr()
-        attr.Set(False)
-
-
 _DEFAULT_MATERIAL_PATH = "/World/PhysicsMaterials/simtoolreal_default"
 _FINGERTIP_MATERIAL_PATH = "/World/PhysicsMaterials/simtoolreal_fingertip"
 
@@ -623,38 +543,96 @@ def _split_fingertip_colliders(
     return fingertip, non_fingertip
 
 
-def bind_physics_materials_for_env(
-    *,
-    robot_prim_root: str,
-    table_prim_root: str,
-    object_prim_root: str,
-    goal_viz_prim_root: Optional[str],
-    assets_cfg,
-) -> None:
-    """Bind the shared materials to one env's colliders.
+def apply_physics_props_for_env(env_id: int, assets_cfg) -> None:
+    """Author all per-env physics properties for one env in a single pass.
 
-    Authors materials via ``author_physics_materials`` must have been called
-    once beforehand (outside the per-env loop). This is the per-env half of
-    the original isaacsim_conversion pattern at isaacsim_env.py:370-403.
+    Walks each role's collider subtree exactly once (Robot, Table, Object,
+    GoalViz) and authors:
+
+      - ``MaterialBindingAPI`` to the default friction material on every
+        non-fingertip leaf, and to the fingertip-friction material on every
+        fingertip leaf (gated on ``assets_cfg.modify_asset_frictions``).
+      - ``physxCollision:contactOffset = 2 mm`` and ``restOffset = 0`` on
+        every leaf — undoing the spawn-cfg's silent default-to-2-cm caused
+        by ``apply_nested``'s instance-proxy bail (see commit a926a86).
+      - ``physics:collisionEnabled = False`` on every GoalViz leaf — the
+        spawn-cfg ``collision_enabled=False`` is a no-op on nested colliders
+        (see commit e51aeda); without this the kinematic visual twin still
+        collides with the real object and the trained hammer wedges at
+        ~4 cm from the goal.
+
+    Replaces the previous three sequential per-env loops (steps 10/11/12 in
+    setup_scene), which together walked each subtree 9× per env. Author
+    materials via ``author_physics_materials`` must have already run.
+
+    Layering w.r.t. ``Sdf.ChangeBlock``:
+      - Walks (``_iter_collision_prim_paths``) run *outside* the block —
+        they include ``SetInstanceable(False)`` writes whose effects must
+        be visible to the subsequent ``GetChildren()`` walk.
+      - ``MaterialBindingAPI.Apply`` runs *outside* — empirically, applying
+        it inside a ChangeBlock causes the subsequent ``Bind`` to write a
+        relationship that ``GetDirectBindingRel`` can't see (apiSchemas
+        metadata write is queued; relationship name doesn't resolve).
+      - ``PhysxCollisionAPI.Apply`` and all ``Set``/``Bind`` calls go
+        *inside* the block — those are pure attribute / relationship writes
+        and benefit from the notification batching.
     """
-    if not assets_cfg.modify_asset_frictions:
-        return
+    from pxr import PhysxSchema, Sdf, UsdPhysics, UsdShade
 
-    robot_colliders = _iter_collision_prim_paths(robot_prim_root)
-    fingertip_colliders, robot_non_fingertip = _split_fingertip_colliders(
-        robot_colliders, robot_prim_root
+    stage = get_current_stage()
+
+    role_roots = {
+        "Robot":   f"/World/envs/env_{env_id}/Robot",
+        "Table":   f"/World/envs/env_{env_id}/Table",
+        "Object":  f"/World/envs/env_{env_id}/Object",
+        "GoalViz": f"/World/envs/env_{env_id}/GoalViz",
+    }
+    leaves_by_role = {
+        role: _iter_collision_prim_paths(root) for role, root in role_roots.items()
+    }
+    fingertip_leaves, robot_non_fingertip = _split_fingertip_colliders(
+        leaves_by_role["Robot"], role_roots["Robot"]
     )
-    table_colliders = _iter_collision_prim_paths(table_prim_root)
-    object_colliders = _iter_collision_prim_paths(object_prim_root)
-    goal_viz_colliders = (
-        _iter_collision_prim_paths(goal_viz_prim_root) if goal_viz_prim_root else []
-    )
-    _bind_material(
-        _DEFAULT_MATERIAL_PATH,
-        robot_non_fingertip + table_colliders + object_colliders + goal_viz_colliders,
-    )
-    if fingertip_colliders:
-        _bind_material(_FINGERTIP_MATERIAL_PATH, fingertip_colliders)
+
+    bind_materials = assets_cfg.modify_asset_frictions
+    if bind_materials:
+        default_material = UsdShade.Material(stage.GetPrimAtPath(_DEFAULT_MATERIAL_PATH))
+        fingertip_material = UsdShade.Material(stage.GetPrimAtPath(_FINGERTIP_MATERIAL_PATH))
+        default_paths = (
+            robot_non_fingertip
+            + leaves_by_role["Table"]
+            + leaves_by_role["Object"]
+            + leaves_by_role["GoalViz"]
+        )
+        default_apis = [
+            UsdShade.MaterialBindingAPI.Apply(stage.GetPrimAtPath(p))
+            for p in default_paths
+        ]
+        fingertip_apis = [
+            UsdShade.MaterialBindingAPI.Apply(stage.GetPrimAtPath(p))
+            for p in fingertip_leaves
+        ]
+        bind_strength = UsdShade.Tokens.strongerThanDescendants
+
+    with Sdf.ChangeBlock():
+        if bind_materials:
+            for api in default_apis:
+                api.Bind(default_material, bindingStrength=bind_strength, materialPurpose="physics")
+            for api in fingertip_apis:
+                api.Bind(fingertip_material, bindingStrength=bind_strength, materialPurpose="physics")
+        # Contact / rest offsets on every leaf.
+        for leaves in leaves_by_role.values():
+            for path in leaves:
+                prim = stage.GetPrimAtPath(path)
+                px = PhysxSchema.PhysxCollisionAPI.Apply(prim)
+                (px.GetContactOffsetAttr() or px.CreateContactOffsetAttr()).Set(0.002)
+                (px.GetRestOffsetAttr() or px.CreateRestOffsetAttr()).Set(0.0)
+        # Disable collisions on every GoalViz leaf (kinematic visual twin
+        # must not collide with the real object).
+        for path in leaves_by_role["GoalViz"]:
+            prim = stage.GetPrimAtPath(path)
+            ce = UsdPhysics.CollisionAPI(prim)
+            (ce.GetCollisionEnabledAttr() or ce.CreateCollisionEnabledAttr()).Set(False)
 
 
 # ----------------------------------------------------------------------------
@@ -790,38 +768,12 @@ def setup_scene(env) -> None:
     env.scene.rigid_objects["object"] = env.object
     env.scene.rigid_objects["goal_viz"] = env.goal_viz
 
-    # 10. Physics materials: author once, bind per env.
+    # 10. Per-env physics-prop authoring — material binding, contact/rest
+    #     offsets, and GoalViz collision-disable, fused into one walk per
+    #     role per env (was three separate loops in pre-fusion code).
     author_physics_materials(assets_cfg)
     for env_id in range(num_envs):
-        bind_physics_materials_for_env(
-            robot_prim_root=f"/World/envs/env_{env_id}/Robot",
-            table_prim_root=f"/World/envs/env_{env_id}/Table",
-            object_prim_root=f"/World/envs/env_{env_id}/Object",
-            goal_viz_prim_root=f"/World/envs/env_{env_id}/GoalViz",
-            assets_cfg=assets_cfg,
-        )
-
-    # 11. Disable colliders on every GoalViz nested collider prim. The
-    #     spawn-cfg `collision_enabled=False` is a no-op (see helper docstring)
-    #     so we walk into the subtree and flip the attr ourselves. Mirrors
-    #     legacy gym's per-actor collision-group filter.
-    for env_id in range(num_envs):
-        _disable_collisions_in_subtree(f"/World/envs/env_{env_id}/GoalViz")
-
-    # 12. Apply contact_offset / rest_offset on every collider leaf for
-    #     Robot/Table/Object/GoalViz. The spawn-cfg `CollisionPropertiesCfg`
-    #     fails silently on instanced prims (Lab's apply_nested skips them),
-    #     so PhysX defaults to ~2 cm contact_offset instead of the configured
-    #     2 mm. Re-author leaf-by-leaf after un-instancing — same trick we
-    #     use for collisionEnabled in step 11. The values mirror the spawn
-    #     cfg in build_*_rigid_object_cfg / build_robot_articulation_cfg.
-    for env_id in range(num_envs):
-        for role in ("Robot", "Table", "Object", "GoalViz"):
-            _apply_physx_collision_offsets(
-                root_prim_path=f"/World/envs/env_{env_id}/{role}",
-                contact_offset=0.002,
-                rest_offset=0.0,
-            )
+        apply_physics_props_for_env(env_id, assets_cfg)
 
 
 __all__ = [
@@ -843,6 +795,6 @@ __all__ = [
     "build_object_rigid_object_cfg",
     "build_goal_viz_rigid_object_cfg",
     "author_physics_materials",
-    "bind_physics_materials_for_env",
+    "apply_physics_props_for_env",
     "setup_scene",
 ]
