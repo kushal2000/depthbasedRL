@@ -27,3 +27,36 @@ python debug_differences/plot_sine_hand_diff.py
 
 Outputs land in `data/` (npz) and `plots/` (per-joint PNGs + summary CSV).
 Both subdirs are gitignored.
+
+## Experiment 2 — pretrained policy rollout, fixed object + fixed goal
+
+Closed-loop rollout of `pretrained_policy/model.pth` on both backends with
+the procedural pool collapsed to a single hammer URDF and the goal pinned
+to one env-local pose (`(0, 0, 0.78, identity)` — center of the trained
+target volume). All DR/reset noise off, deterministic actions. Each driver
+dumps `(obs, action, joint_pos, joint_vel, joint_targets, object_state,
+goal_pose, reward)` per policy step plus an mp4. The diff script aligns
+the two npz traces by joint name (canonical order on both sides) and
+plots overlays.
+
+```bash
+# isaacgym side
+source .venv/bin/activate
+python debug_differences/policy_rollout_isaacgym.py
+
+# isaacsim side
+source .venv_isaacsim/bin/activate
+python debug_differences/policy_rollout_isaacsim.py
+
+# diff + plot (any env with numpy + matplotlib)
+python debug_differences/plot_policy_rollout_diff.py
+```
+
+Outputs:
+- `data/{isaacgym,isaacsim}_policy_rollout.npz`
+- `plots/{isaacgym,isaacsim}_policy_rollout.mp4`
+- `plots/policy_joint_overlay.png` — 5×6 q grid (gym vs sim vs target)
+- `plots/policy_action_overlay.png` — 5×6 action grid
+- `plots/policy_object_traj.png` — object/goal xyz + ‖Δobj_pos‖, Δobj_rot
+- `plots/policy_reward_curve.png`
+- `plots/policy_summary.csv` — per-channel mean/max abs error, sorted
