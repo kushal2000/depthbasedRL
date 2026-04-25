@@ -234,6 +234,14 @@ class IsaacSimDistillEnv:
     def _camera_mount_mode(self) -> str:
         return getattr(self.camera_pose, "mount", "world")
 
+    def _uses_manual_tiled_world_camera(self) -> bool:
+        return (
+            self.enable_camera
+            and self.camera_backend == "tiled"
+            and self._camera_mount_mode() == "world"
+            and (np.any(self.camera_pos_noise_xyz > 0.0) or np.any(self.camera_rot_noise_deg > 0.0))
+        )
+
     def _data_types_for_modality(self, modality: str) -> list[str]:
         if modality == "depth":
             return ["distance_to_image_plane"]
@@ -311,7 +319,7 @@ class IsaacSimDistillEnv:
                 ),
                 init_state=AssetBaseCfg.InitialStateCfg(pos=(0.0, 0.0, 0.38)),
             )
-        if self.enable_camera:
+        if self.enable_camera and not self._uses_manual_tiled_world_camera():
             from isaaclab.sensors import CameraCfg, TiledCameraCfg
 
             camera_types = list(self.camera_data_types)
@@ -527,7 +535,8 @@ class IsaacSimDistillEnv:
         self.robot = self.scene.articulations["robot"]
         self.table_rigid = self.scene.rigid_objects.get("table")
         self.object_rigid = self.scene.rigid_objects["object"]
-        self.camera = self.scene.sensors["camera"] if self.enable_camera else None
+        manual_tiled_world_camera = self._uses_manual_tiled_world_camera()
+        self.camera = self.scene.sensors["camera"] if self.enable_camera and not manual_tiled_world_camera else None
         self.env_origins = self.scene.env_origins
         self.device = self.sim.device
         self.q_lower_limits_t = torch.tensor(Q_LOWER_LIMITS_np, dtype=torch.float32, device=self.device)
@@ -539,6 +548,10 @@ class IsaacSimDistillEnv:
             * (OBJECT_BASE_SIZE * KEYPOINT_SCALE / 2.0)
         ).unsqueeze(0)
         self._apply_physics_material_overrides(sim_utils)
+        self._initialize_static_scene_randomizations()
+        if manual_tiled_world_camera:
+            self.camera = self._create_manual_tiled_world_camera(sim_utils)
+            self.scene.sensors["camera"] = self.camera
         self.sim.reset()
         self.scene.reset()
         self._apply_robot_adjacent_self_collision_filtering()
@@ -552,8 +565,64 @@ class IsaacSimDistillEnv:
             )
         else:
             _log("Distill camera disabled for this run")
-        self._initialize_static_scene_randomizations()
         self.reset()
+
+    def _create_manual_tiled_world_camera(self, sim_utils):
+        from isaaclab.sensors import TiledCamera, TiledCameraCfg
+        from isaaclab.utils.math import convert_camera_frame_orientation_convention
+
+        camera_spawn_cfg = sim_utils.PinholeCameraCfg(
+            focal_length=self.camera_intrinsics.focal_length,
+            focus_distance=self.camera_intrinsics.focus_distance,
+            horizontal_aperture=self.camera_intrinsics.horizontal_aperture,
+            clipping_range=self.camera_intrinsics.clipping_range,
+        )
+        if camera_spawn_cfg.vertical_aperture is None:
+            camera_spawn_cfg.vertical_aperture = (
+                camera_spawn_cfg.horizontal_aperture * self.camera_intrinsics.height / self.camera_intrinsics.width
+            )
+
+        base_quat_xyzw = np.asarray(self.camera_pose.quat_wxyz, dtype=np.float32)[[1, 2, 3, 0]]
+        base_rot = R.from_quat(base_quat_xyzw)
+        local_positions = []
+        local_quats_opengl = []
+        for env_id in range(self.num_envs):
+            local_pos = np.asarray(self.camera_pose.pos, dtype=np.float32) + self.camera_pos_jitter[env_id]
+            jitter_xyzw = self.camera_rot_jitter_wxyz[env_id][[1, 2, 3, 0]]
+            local_quat_xyzw = (R.from_quat(jitter_xyzw) * base_rot).as_quat().astype(np.float32)
+            local_quat_wxyz = local_quat_xyzw[[3, 0, 1, 2]]
+            local_quat_opengl = convert_camera_frame_orientation_convention(
+                torch.tensor(local_quat_wxyz, dtype=torch.float32).unsqueeze(0),
+                origin=self.camera_pose.convention,
+                target="opengl",
+            )[0].cpu().numpy()
+            local_positions.append(local_pos)
+            local_quats_opengl.append(local_quat_opengl)
+
+        # Keep randomized world cameras outside the cloned env tree. Prim edits
+        # under /World/envs/env_0 are inherited by clones and collapse every
+        # tiled view to the same local transform.
+        camera_positions_w = self.env_origins.detach().cpu().numpy() + np.asarray(local_positions, dtype=np.float32)
+        for env_id in range(self.num_envs):
+            camera_spawn_cfg.func(
+                f"/World/DistillCameras/env_{env_id}/DistillCamera",
+                camera_spawn_cfg,
+                translation=tuple(float(x) for x in camera_positions_w[env_id]),
+                orientation=tuple(float(x) for x in local_quats_opengl[env_id]),
+            )
+
+        camera_cfg = TiledCameraCfg(
+            prim_path="/World/DistillCameras/env_.*/DistillCamera",
+            update_period=0,
+            update_latest_camera_pose=True,
+            height=self.camera_intrinsics.height,
+            width=self.camera_intrinsics.width,
+            data_types=list(self.camera_data_types),
+            spawn=None,
+            offset=TiledCameraCfg.OffsetCfg(),
+        )
+        _log("Created manual per-env world TiledCamera prims outside cloned envs with baked pose randomization")
+        return TiledCamera(camera_cfg)
 
     def _validate_joint_ordering(self):
         sim_names = list(self.robot.joint_names)
@@ -825,6 +894,13 @@ class IsaacSimDistillEnv:
             orientations_xyzw = (R.from_quat(jitter_xyzw) * base_rot).as_quat().astype(np.float32)
             orientations = orientations_xyzw[:, [3, 0, 1, 2]]
         if self.camera_backend == "tiled":
+            if self._uses_manual_tiled_world_camera():
+                self.camera.set_world_poses(
+                    positions=torch.tensor(positions, dtype=torch.float32, device=self.device),
+                    orientations=torch.tensor(orientations, dtype=torch.float32, device=self.device),
+                    env_ids=env_ids,
+                    convention=self.camera_pose.convention,
+                )
             self.camera_world_pos[env_ids_np] = positions
             self.camera_world_quat_wxyz[env_ids_np] = orientations
             return
