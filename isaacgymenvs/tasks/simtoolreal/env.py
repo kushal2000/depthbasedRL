@@ -1728,7 +1728,13 @@ class SimToolReal(VecTask):
         # The head is at +x from the handle
         # There is no relative rotation between the handle and head
 
-        NUM_OBJECTS_PER_TYPE = 100
+        # Pool sizing: knobs for debug runs that want a tiny deterministic
+        # pool. Defaults preserve the legacy behavior of training (100/type +
+        # shuffled). debug_differences/policy_rollout_isaacgym.py sets these
+        # to (1, False) to compose a pool whose pool[0] is the cuboid hammer
+        # (first matching ObjectSizeDistribution) — matching the sim port
+        # for side-by-side comparison.
+        NUM_OBJECTS_PER_TYPE = self.cfg["env"].get("numAssetsPerType", 100)
         np.random.seed(42)
 
         from isaacgymenvs.tasks.simtoolreal.generate_objects import (
@@ -1820,8 +1826,10 @@ class SimToolReal(VecTask):
             for (x, y, z) in all_scales
         ]
 
-        # Randomize order
-        RANDOMIZE_ORDER = True
+        # Randomize order: legacy behavior (training) is True so env i sees
+        # uniform coverage over types via i % len(pool). Debug/parity runs
+        # set this False to keep pool[0] == first matching ObjectSizeDistribution.
+        RANDOMIZE_ORDER = self.cfg["env"].get("randomizeAssetOrder", True)
         if RANDOMIZE_ORDER:
             indices = list(range(len(all_files)))
             np.random.shuffle(indices)

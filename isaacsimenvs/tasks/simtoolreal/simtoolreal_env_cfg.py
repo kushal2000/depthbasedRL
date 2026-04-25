@@ -69,6 +69,13 @@ class AssetsCfg:
     )
     num_assets_per_type: int = 100
 
+    # Shuffle the procedural pool after generation. Legacy default (True)
+    # gives env i uniform coverage over types via i % len(pool). Debug/parity
+    # runs set this False so pool[0] is the first matching distribution
+    # (cuboid hammer ahead of cylinder hammer, etc.) — see
+    # debug_differences/policy_rollout_isaacsim.py.
+    shuffle_assets: bool = True
+
     # Static per-material frictions (set once at asset creation, not per-reset DR).
     modify_asset_frictions: bool = True
     robot_friction: float = 0.5

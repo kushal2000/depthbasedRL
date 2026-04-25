@@ -283,6 +283,7 @@ def generate_handle_head_urdfs(
     out_dir: Union[str, Path] = "/tmp/simtoolreal_assets",
     object_base_size: float = _OBJECT_BASE_SIZE,
     seed: int = _SEED,
+    shuffle: bool = True,
 ) -> tuple[list[str], list[tuple[float, float, float]]]:
     """Generate a pool of URDFs across the requested handle-head types.
 
@@ -360,11 +361,14 @@ def generate_handle_head_urdfs(
     ]
 
     # Shuffle (paths, scales) in lockstep so the per-type ordering doesn't bias
-    # env-i-gets-asset-i%N. Matches legacy env.py:1824-1830.
-    indices = np.arange(len(paths))
-    np.random.shuffle(indices)
-    paths = [paths[i] for i in indices]
-    scales_norm = [scales_norm[i] for i in indices]
+    # env-i-gets-asset-i%N. Matches legacy env.py:1824-1830. Disabled for
+    # debug-parity runs (debug_differences/policy_rollout_isaacsim.py) where
+    # we want pool[0] = first matching ObjectSizeDistribution.
+    if shuffle:
+        indices = np.arange(len(paths))
+        np.random.shuffle(indices)
+        paths = [paths[i] for i in indices]
+        scales_norm = [scales_norm[i] for i in indices]
 
     return paths, scales_norm
 

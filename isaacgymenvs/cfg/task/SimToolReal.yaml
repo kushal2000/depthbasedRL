@@ -231,6 +231,12 @@ env:
   goalObjectPose: ${eval:"None"}  # If None, does nothing. Otherwise, forces the goal object pose to be this value. Must be a 7-element list of [x, y, z, qx, qy, qz, qw]
 
   handleHeadTypes: ["hammer", "screwdriver", "marker", "spatula", "eraser", "brush"]
+  # Procedural-pool sizing knobs. Defaults preserve legacy training behavior
+  # (100 samples per type, randomly shuffled). Debug/parity rollouts under
+  # debug_differences/ override these to (1, False) to lock pool[0] to the
+  # first matching ObjectSizeDistribution.
+  numAssetsPerType: 100
+  randomizeAssetOrder: True
 
   # asset Friction settings
   modifyAssetFrictions: True
