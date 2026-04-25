@@ -456,8 +456,39 @@ def build_goal_viz_rigid_object_cfg(usd_paths: list[str]) -> RigidObjectCfg:
 # ----------------------------------------------------------------------------
 
 
+def _uninstance_subtree(root_prim_path: str) -> None:
+    """Promote any instanced prim under ``root_prim_path`` to non-instanced.
+
+    Required before walking for leaf colliders or material-bound prims:
+    ``MultiUsdFileCfg`` re-instances the per-env USDs, which makes the
+    actual collider Mesh leaves live under the shared prototype (read-only
+    via instance proxies). After this call, the leaves are local-stage
+    writable and discoverable by a regular ``GetChildren()`` walk.
+    Idempotent — re-calling on an already-uninstanced subtree is a no-op.
+    """
+    from pxr import Usd
+    stage = get_current_stage()
+    root = stage.GetPrimAtPath(root_prim_path)
+    if not root.IsValid():
+        return
+    for prim in Usd.PrimRange(root, Usd.TraverseInstanceProxies()):
+        if prim.IsInstance():
+            prim.SetInstanceable(False)
+
+
 def _iter_collision_prim_paths(root_prim_path: str) -> list[str]:
-    """Collect every collider prim under a root (children named 'collisions')."""
+    """Collect every *leaf* collider prim (has ``UsdPhysics.CollisionAPI``
+    applied) under ``root_prim_path``.
+
+    Auto un-instances the subtree first — required so that USDs spawned via
+    ``MultiUsdFileCfg`` (per-env Object/GoalViz) actually expose their
+    collider Mesh leaves on the local stage. The legacy "child named
+    'collisions'" filter returned the *grouping Xform*, not the leaf shape
+    that PhysX evaluates the API on; material bindings to the grouping
+    prim relied on USD inheritance and were a no-op for instanced assets.
+    """
+    from pxr import UsdPhysics
+    _uninstance_subtree(root_prim_path)
     stage = get_current_stage()
     root = stage.GetPrimAtPath(root_prim_path)
     if not root.IsValid():
@@ -466,9 +497,9 @@ def _iter_collision_prim_paths(root_prim_path: str) -> list[str]:
     stack = [root]
     while stack:
         prim = stack.pop()
-        if prim.GetName() == "collisions":
-            paths.append(str(prim.GetPath()))
         stack.extend(list(prim.GetChildren()))
+        if prim.HasAPI(UsdPhysics.CollisionAPI):
+            paths.append(str(prim.GetPath()))
     return paths
 
 
@@ -488,18 +519,30 @@ def _disable_collisions_in_subtree(root_prim_path: str) -> None:
     (schemas.py:401-402) checks ``UsdPhysics.CollisionAPI(prim)`` on the
     spawn target prim (the GoalViz root, which is an Xform/Articulation root
     without CollisionAPI applied), and returns immediately. The actual
-    colliders are nested at e.g. ``/World/envs/env_K/GoalViz/object_root/collisions``.
-    We have to walk into the subtree and disable each collider explicitly.
+    colliders are leaf shape prims (Cube/Cylinder/Mesh) under e.g.
+    ``/World/envs/env_K/GoalViz/object_root/collisions/mesh_0`` — ``collisions``
+    is just a *grouping Xform*; the API lives on its descendants. Setting
+    collisionEnabled on the group prim is a no-op because PhysX evaluates
+    the attr on the leaf with the API applied.
+
+    Walk the whole subtree, identify every prim that already has
+    ``UsdPhysics.CollisionAPI`` applied, and disable it. (Diagnostic:
+    inspecting the GoalViz prim tree showed the legacy "name == 'collisions'"
+    filter never matched any leaves on the URDF-converted hammer asset, so
+    the disable was silently a no-op and goal_viz still collided with the
+    object — empirically the hammer is blocked at ~4 cm = hammer-head
+    radius, exactly the distance you'd expect if GoalViz still had its
+    head colliders enabled.)
     """
+    # _iter_collision_prim_paths un-instances the subtree first (so the
+    # leaf colliders living under instanceable prototypes become writable)
+    # and then returns leaf prims with UsdPhysics.CollisionAPI applied.
+    # We just flip collisionEnabled=False on each.
     from pxr import UsdPhysics
+    stage = get_current_stage()
     for path in _iter_collision_prim_paths(root_prim_path):
-        stage = get_current_stage()
         prim = stage.GetPrimAtPath(path)
-        if not prim.IsValid():
-            continue
         api = UsdPhysics.CollisionAPI(prim)
-        if not api:
-            api = UsdPhysics.CollisionAPI.Apply(prim)
         attr = api.GetCollisionEnabledAttr() or api.CreateCollisionEnabledAttr()
         attr.Set(False)
 
@@ -612,6 +655,7 @@ def setup_scene(env) -> None:
         handle_head_types=tuple(assets_cfg.handle_head_types),
         num_per_type=assets_cfg.num_assets_per_type,
         out_dir=env._tmp_asset_dir,
+        shuffle=assets_cfg.shuffle_assets,
     )
 
     # 2. Force-convert URDFs → USDs. force_usd_conversion=True regenerates
