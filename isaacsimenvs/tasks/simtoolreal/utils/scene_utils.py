@@ -416,10 +416,12 @@ def build_object_rigid_object_cfg(usd_paths: list[str]) -> RigidObjectCfg:
                 disable_gravity=False,
                 max_depenetration_velocity=1000.0,
             ),
-            collision_props=CollisionPropertiesCfg(
-                contact_offset=0.002,
-                rest_offset=0.0,
-            ),
+            # collision_props omitted on purpose: Lab's apply_nested walker
+            # bails on instance-proxy descendants where the colliders live,
+            # emitting "Could not perform 'modify_collision_properties'"
+            # warnings per spawn (300+/launch). We re-author contact_offset
+            # and rest_offset leaf-by-leaf in apply_physics_props_for_env,
+            # so passing them here is pure waste.
             articulation_props=ArticulationRootPropertiesCfg(articulation_enabled=False),
         ),
     )
@@ -444,11 +446,11 @@ def build_goal_viz_rigid_object_cfg(usd_paths: list[str]) -> RigidObjectCfg:
                 kinematic_enabled=True,
                 disable_gravity=True,
             ),
-            collision_props=CollisionPropertiesCfg(
-                collision_enabled=False,
-                contact_offset=0.002,
-                rest_offset=0.0,
-            ),
+            # collision_props omitted on purpose: same reason as the Object
+            # builder above (apply_nested fails silently on instance-proxy
+            # descendants). collision_enabled=False, contact_offset and
+            # rest_offset are all re-authored leaf-by-leaf in
+            # apply_physics_props_for_env.
             articulation_props=ArticulationRootPropertiesCfg(articulation_enabled=False),
         ),
     )
