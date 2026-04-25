@@ -6,7 +6,7 @@ Isolates:
   - ArticulationCfg / RigidObjectCfg builders for robot and table.
   - Per-env distinct-USD spawning via MultiUsdFileCfg (one of the procedural
     handle-head USDs is bound into each env's Object + GoalViz).
-  - Physics-material attachment (default friction + fingertip override).
+  - Contact-material assignment through PhysX tensor views after sim startup.
 
 Gains are taken from isaacsim_conversion/isaacsim_env.py (lines 24-80) — they
 originate in isaacgymenvs/tasks/simtoolreal/utils.py and were verified to work
@@ -33,14 +33,9 @@ import isaaclab.sim as sim_utils
 from isaaclab.actuators import ImplicitActuatorCfg
 from isaaclab.assets import Articulation, ArticulationCfg, RigidObject, RigidObjectCfg
 from isaaclab.sim.converters import UrdfConverter, UrdfConverterCfg
-from isaaclab.sim.spawners import UrdfFileCfg
 from isaaclab.sim.spawners.from_files import GroundPlaneCfg, UsdFileCfg, spawn_ground_plane
 from isaaclab.sim.spawners.wrappers import MultiUsdFileCfg
-from isaaclab.sim.schemas import (
-    ArticulationRootPropertiesCfg,
-    CollisionPropertiesCfg,
-    RigidBodyPropertiesCfg,
-)
+from isaaclab.sim.schemas import RigidBodyPropertiesCfg
 from isaaclab.sim.utils import (
     find_matching_prim_paths,
     get_current_stage,
@@ -234,118 +229,6 @@ ARM_DEFAULT_JOINT_POS: dict[str, float] = {
 # ----------------------------------------------------------------------------
 
 
-def build_robot_articulation_cfg(
-    assets_cfg, usd_dir: str | None = None, force_usd_conversion: bool = False
-) -> ArticulationCfg:
-    """Assemble the IIWA14 + SHARPA hand `ArticulationCfg`.
-
-    Robot is fixed-base, gravity disabled, self-collisions off. Joint drives use
-    explicit `ImplicitActuatorCfg` groups together with a USD-level
-    JointDriveCfg (see two-layer comment below).
-
-    `usd_dir` overrides Isaac Lab's default `/tmp/IsaacLab/usd_<ts>_<id>`
-    cache — required on shared filesystems where the default parent dir is
-    owned by whichever user ran first and others hit EACCES.
-
-    Open-loop sine-wave parity vs the legacy isaacgym SimToolReal env (per
-    ``debug_differences/sine_hand_*.py`` ablation, branch
-    ``2026_04_24_debug_isaac_gym_sim_differences``):
-
-      - 180/π pre-compensation on USD joint drive: required (without it
-        the hand overshoots ~1 rad on a 0.07-rad command).
-      - ``HAND_JOINT_ARMATURE`` on the hand actuator: 18× residual
-        reduction (0.32 mrad max vs 5.79 mrad without).
-      - ``HAND_JOINT_FRICTION``: NOT applied — Lab's ``friction`` is a
-        unitless coefficient on transmitted force, the legacy gymapi
-        values are Coulomb torques in Nm. Dropping legacy numbers in
-        directly locks the hand. The dict is left in scope for a future
-        proper port (e.g. via `dynamic_friction` after unit conversion).
-    """
-    return ArticulationCfg(
-        prim_path="/World/envs/env_.*/Robot",
-        spawn=UrdfFileCfg(
-            asset_path=assets_cfg.robot_urdf,
-            usd_dir=usd_dir,
-            force_usd_conversion=force_usd_conversion,
-            fix_base=True,
-            merge_fixed_joints=True,
-            self_collision=False,
-            # make_instanceable=False so per-link material binding (fingertip
-            # friction override) can reach individual collider prims under
-            # /World/envs/env_*/Robot/<link>/collisions.
-            make_instanceable=False,
-            # Two-layer drive setup, mirroring the proven-working
-            # `isaacsim_conversion/isaacsim_env.py:228-235`:
-            #   - USD-level JointDriveCfg sets drive_type=force / target=position
-            #     plus the (180/π)-compensated gains so the USD joint drive is
-            #     consistent with PhysX units.
-            #   - The ImplicitActuatorCfg below applies the *uncompensated*
-            #     gains at runtime; ImplicitActuator pushes them straight into
-            #     PhysX without the rad→deg conversion.
-            # Setting joint_drive=None left the USD drive in a stub state and
-            # produced an over-damped/sluggish hand response.
-            # The JointDriveCfg authors a USD `UsdPhysics.DriveAPI` prim on
-            # each joint with the configured drive_type / target_type. PhysX
-            # only registers a drive on a joint when this prim is present —
-            # without it, ImplicitActuator's runtime gain writes have no slot
-            # to land in (verified empirically: joint_drive=None gives 0.94 rad
-            # max parity error while production gives 1.6 mrad).
-            #
-            # The numeric stiffness/damping values inside PDGainsCfg are
-            # OVERWRITTEN at simulation start by the ImplicitActuatorCfg below
-            # (Lab actuator_base.py:175-200 documents this precedence: cfg-set
-            # values win over USD-parsed values). They are also subject to a
-            # rad→deg multiplication inside UrdfConverter for revolute joints
-            # (urdf_converter.py:304-305). We pass 0.0 here to make it explicit
-            # that the runtime layer is the source of truth — no need to dual-
-            # maintain compensated copies.
-            joint_drive=UrdfConverterCfg.JointDriveCfg(
-                drive_type="force",
-                target_type="position",
-                gains=UrdfConverterCfg.JointDriveCfg.PDGainsCfg(
-                    stiffness=0.0,
-                    damping=0.0,
-                ),
-            ),
-            rigid_props=RigidBodyPropertiesCfg(
-                disable_gravity=True,
-                max_depenetration_velocity=1000.0,
-            ),
-            collision_props=CollisionPropertiesCfg(
-                contact_offset=0.002,
-                rest_offset=0.0,
-            ),
-            articulation_props=ArticulationRootPropertiesCfg(
-                enabled_self_collisions=False,
-                solver_position_iteration_count=8,
-                solver_velocity_iteration_count=0,
-            ),
-        ),
-        init_state=ArticulationCfg.InitialStateCfg(
-            pos=(0.0, 0.8, 0.0),
-            rot=(1.0, 0.0, 0.0, 0.0),
-            joint_pos={
-                **ARM_DEFAULT_JOINT_POS,
-                **{name: 0.0 for name in HAND_JOINT_STIFFNESS},
-            },
-            joint_vel={".*": 0.0},
-        ),
-        actuators={
-            "arm": ImplicitActuatorCfg(
-                joint_names_expr=[ARM_JOINT_REGEX],
-                stiffness=ARM_JOINT_STIFFNESS,
-                damping=ARM_JOINT_DAMPING,
-            ),
-            "hand": ImplicitActuatorCfg(
-                joint_names_expr=[HAND_JOINT_REGEX],
-                stiffness=HAND_JOINT_STIFFNESS,
-                damping=HAND_JOINT_DAMPING,
-                armature=HAND_JOINT_ARMATURE,
-            ),
-        },
-    )
-
-
 def build_robot_articulation_usd_cfg(usd_path: str) -> ArticulationCfg:
     """Robot cfg from a pre-converted, postprocessed USD."""
     return ArticulationCfg(
@@ -373,46 +256,6 @@ def build_robot_articulation_usd_cfg(usd_path: str) -> ArticulationCfg:
                 armature=HAND_JOINT_ARMATURE,
             ),
         },
-    )
-
-
-def build_table_rigid_object_cfg(
-    assets_cfg, z: float, usd_dir: str | None = None, force_usd_conversion: bool = False
-) -> RigidObjectCfg:
-    """Table as a static (kinematic) rigid body at world height `z`.
-
-    fix_base=False on purpose: with fix_base=True, UrdfConverter inserts a
-    fixed PhysicsJoint between world and the base link, which PhysX rejects
-    as a "joint between static bodies" once each env owns its own copy of
-    the prim (the legacy instance-proxy flow swallowed the error). The
-    kinematic_enabled rigid prop is what actually pins the table in place
-    — kinematic bodies don't fall under gravity and only move when their
-    pose is explicitly written, so we don't need the URDF root joint.
-    """
-    return RigidObjectCfg(
-        prim_path="/World/envs/env_.*/Table",
-        spawn=UrdfFileCfg(
-            asset_path=assets_cfg.table_urdf,
-            usd_dir=usd_dir,
-            force_usd_conversion=force_usd_conversion,
-            fix_base=False,
-            merge_fixed_joints=True,
-            make_instanceable=False,
-            joint_drive=None,
-            rigid_props=RigidBodyPropertiesCfg(
-                kinematic_enabled=True,
-                disable_gravity=True,
-            ),
-            collision_props=CollisionPropertiesCfg(
-                contact_offset=0.002,
-                rest_offset=0.0,
-            ),
-            articulation_props=ArticulationRootPropertiesCfg(articulation_enabled=False),
-        ),
-        init_state=RigidObjectCfg.InitialStateCfg(
-            pos=(0.0, 0.0, z),
-            rot=(1.0, 0.0, 0.0, 0.0),
-        ),
     )
 
 
@@ -503,58 +346,11 @@ def build_goal_viz_rigid_object_cfg(usd_paths: list[str]) -> RigidObjectCfg:
 
 
 # ----------------------------------------------------------------------------
-# Physics materials (default friction + fingertip override)
+# USD baking and contact materials
 # ----------------------------------------------------------------------------
 
 
-def _uninstance_subtree(root_prim_path: str) -> None:
-    """Promote any instanced prim under ``root_prim_path`` to non-instanced.
-
-    Required before walking for leaf colliders or material-bound prims:
-    ``MultiUsdFileCfg`` re-instances the per-env USDs, which makes the
-    actual collider Mesh leaves live under the shared prototype (read-only
-    via instance proxies). After this call, the leaves are local-stage
-    writable and discoverable by a regular ``GetChildren()`` walk.
-    Idempotent — re-calling on an already-uninstanced subtree is a no-op.
-    """
-    from pxr import Usd
-    stage = get_current_stage()
-    root = stage.GetPrimAtPath(root_prim_path)
-    if not root.IsValid():
-        return
-    for prim in Usd.PrimRange(root, Usd.TraverseInstanceProxies()):
-        if prim.IsInstance():
-            prim.SetInstanceable(False)
-
-
-def _iter_collision_prim_paths(root_prim_path: str) -> list[str]:
-    """Collect every *leaf* collider prim (has ``UsdPhysics.CollisionAPI``
-    applied) under ``root_prim_path``.
-
-    Auto un-instances the subtree first — required so that USDs spawned via
-    ``MultiUsdFileCfg`` (per-env Object/GoalViz) actually expose their
-    collider Mesh leaves on the local stage. The legacy "child named
-    'collisions'" filter returned the *grouping Xform*, not the leaf shape
-    that PhysX evaluates the API on; material bindings to the grouping
-    prim relied on USD inheritance and were a no-op for instanced assets.
-    """
-    from pxr import UsdPhysics
-    _uninstance_subtree(root_prim_path)
-    stage = get_current_stage()
-    root = stage.GetPrimAtPath(root_prim_path)
-    if not root.IsValid():
-        return []
-    paths: list[str] = []
-    stack = [root]
-    while stack:
-        prim = stack.pop()
-        stack.extend(list(prim.GetChildren()))
-        if prim.HasAPI(UsdPhysics.CollisionAPI):
-            paths.append(str(prim.GetPath()))
-    return paths
-
-
-_USD_BAKE_VERSION = "simtoolreal_usd_bake_v5_no_asset_materials"
+_USD_BAKE_VERSION = "simtoolreal_usd_bake_v6_schema_only"
 _CONTACT_OFFSET = 0.002
 _REST_OFFSET = 0.0
 
@@ -582,7 +378,7 @@ def _raw_usd_fingerprint(usd_path: str) -> dict[str, int | str]:
     }
 
 
-def _bake_spec(raw_usd_path: str, role: str, assets_cfg) -> dict:
+def _bake_spec(raw_usd_path: str, role: str) -> dict:
     """Small sidecar spec for invalidating role-specific baked USDs."""
     return {
         "version": _USD_BAKE_VERSION,
@@ -590,8 +386,7 @@ def _bake_spec(raw_usd_path: str, role: str, assets_cfg) -> dict:
         "raw_usd": _raw_usd_fingerprint(raw_usd_path),
         "contact_offset": _CONTACT_OFFSET,
         "rest_offset": _REST_OFFSET,
-        "modify_asset_frictions": bool(assets_cfg.modify_asset_frictions),
-        "materials_bound_in_composed_stage": True,
+        "materials_set_via_physx_view": True,
     }
 
 
@@ -635,7 +430,7 @@ def _asset_root_prim(stage):
     return None
 
 
-def _collision_leaf_prims(stage, root_prim) -> list:
+def _collision_leaf_prims(root_prim) -> list:
     from pxr import Usd, UsdPhysics
 
     leaves = []
@@ -663,7 +458,7 @@ def _set_usd_attr(prim, name: str, value, value_type) -> None:
     attr.Set(value)
 
 
-def _bake_role_schema_props(stage, root_prim, role: str) -> None:
+def _bake_role_schema_props(root_prim, role: str) -> None:
     from pxr import PhysxSchema, Sdf, Usd, UsdPhysics
 
     for prim in Usd.PrimRange(root_prim):
@@ -722,18 +517,18 @@ def _bake_role_schema_props(stage, root_prim, role: str) -> None:
 
 
 def bake_physics_props_into_usd(
-    raw_usd_path: str, bake_root: Path, role: str, assets_cfg, force: bool = False
+    raw_usd_path: str, bake_root: Path, role: str, force: bool = False
 ) -> str:
     """Create a role-specific USD with static collider props pre-authored.
 
-    This moves Object/GoalViz leaf writes out of the per-env setup loop. The
-    baked USD is invalidated by a small sidecar hash that includes the raw
-    converter output fingerprint, role, contact offsets, and material values.
+    This moves leaf-schema writes out of the per-env setup loop. The baked USD
+    is invalidated by a small sidecar hash that includes the raw converter
+    output fingerprint, role, contact offsets, and bake behavior version.
     """
     from pxr import PhysxSchema, Sdf, Usd, UsdPhysics
 
     baked_usd_path = _baked_usd_path(raw_usd_path, bake_root, role)
-    spec = _bake_spec(raw_usd_path, role, assets_cfg)
+    spec = _bake_spec(raw_usd_path, role)
     digest = _spec_digest(spec)
     sidecar = baked_usd_path.with_suffix(baked_usd_path.suffix + ".simtoolreal_post_hash")
     if (
@@ -753,8 +548,8 @@ def bake_physics_props_into_usd(
         raise RuntimeError(f"No root prim found in USD: {baked_usd_path}")
 
     _uninstance_stage_subtree(root)
-    leaves = _collision_leaf_prims(stage, root)
-    _bake_role_schema_props(stage, root, role)
+    leaves = _collision_leaf_prims(root)
+    _bake_role_schema_props(root, role)
 
     for prim in leaves:
         px = PhysxSchema.PhysxCollisionAPI(prim)
@@ -782,8 +577,6 @@ def apply_physx_material_properties(env) -> None:
     assets_cfg = env.cfg.assets
     if not assets_cfg.modify_asset_frictions:
         return
-
-    import torch
 
     t0 = time.perf_counter()
     default = torch.tensor(
@@ -828,6 +621,99 @@ def apply_physx_material_properties(env) -> None:
     )
 
 
+def _resolve_usd_cache_root() -> Path:
+    cache_root_env = os.environ.get("SIMTOOLREAL_CACHE_ROOT")
+    if cache_root_env:
+        return Path(cache_root_env)
+    if Path("/scratch").is_dir() and os.access("/scratch", os.W_OK):
+        return Path("/scratch") / "simtoolreal_assets" / "v1"
+    return Path.home() / ".cache" / "simtoolreal_assets" / "v1"
+
+
+def _convert_urdf_to_usd(
+    asset_path: str,
+    usd_cache_root: Path,
+    *,
+    force_rebuild: bool,
+    fix_base: bool,
+    merge_fixed_joints: bool = True,
+    make_instanceable: bool = False,
+    self_collision: bool | None = None,
+    joint_drive=None,
+) -> str:
+    cfg_kwargs = {
+        "asset_path": asset_path,
+        "usd_dir": str(usd_cache_root / Path(asset_path).stem),
+        "force_usd_conversion": force_rebuild,
+        "fix_base": fix_base,
+        "merge_fixed_joints": merge_fixed_joints,
+        "make_instanceable": make_instanceable,
+        "joint_drive": joint_drive,
+    }
+    if self_collision is not None:
+        cfg_kwargs["self_collision"] = self_collision
+    return UrdfConverter(UrdfConverterCfg(**cfg_kwargs)).usd_path
+
+
+def _robot_joint_drive_cfg():
+    # The DriveAPI prims must exist for ImplicitActuator runtime gains to land.
+    return UrdfConverterCfg.JointDriveCfg(
+        drive_type="force",
+        target_type="position",
+        gains=UrdfConverterCfg.JointDriveCfg.PDGainsCfg(
+            stiffness=0.0,
+            damping=0.0,
+        ),
+    )
+
+
+def _convert_object_urdfs_to_usds(
+    urdf_paths: list[str],
+    usd_cache_root: Path,
+    *,
+    force_rebuild: bool,
+) -> list[str]:
+    return [
+        _convert_urdf_to_usd(
+            urdf,
+            usd_cache_root,
+            force_rebuild=force_rebuild,
+            fix_base=False,
+            joint_drive=None,
+        )
+        for urdf in urdf_paths
+    ]
+
+
+def _materialize_env_prims(env) -> None:
+    stage = get_current_stage()
+    for env_path in env.scene.env_prim_paths:
+        if not stage.GetPrimAtPath(env_path).IsValid():
+            stage.DefinePrim(env_path, "Xform")
+
+
+def _build_object_scale_tensor(env, object_scales_normalized, num_object_usds: int) -> None:
+    num_envs = env.num_envs
+    object_prim_paths = find_matching_prim_paths("/World/envs/env_.*/Object")
+    if len(object_prim_paths) != num_envs:
+        raise RuntimeError(
+            f"Expected {num_envs} Object prims after MultiUsdFileCfg spawn, "
+            f"got {len(object_prim_paths)}. Cloner-drop bug may have returned."
+        )
+
+    env._object_scale_per_env = torch.zeros(
+        num_envs, 3, device=env.device, dtype=torch.float32
+    )
+    for source_idx, obj_path in enumerate(object_prim_paths):
+        env_segment = obj_path.rsplit("/", 2)[-2]  # ".../env_K/Object" -> "env_K"
+        env_id = int(env_segment.removeprefix("env_"))
+        env._object_scale_per_env[env_id] = torch.tensor(
+            object_scales_normalized[source_idx % num_object_usds],
+            device=env.device,
+            dtype=torch.float32,
+        )
+
+
 # ----------------------------------------------------------------------------
 # Scene orchestrator (Phase B)
 # ----------------------------------------------------------------------------
@@ -835,8 +721,7 @@ def apply_physx_material_properties(env) -> None:
 
 def setup_scene(env) -> None:
     """Top-level ``_setup_scene`` body — spawns robot, table, per-env
-    distinct-USD object + goal-viz, ground plane + lighting, and binds
-    physics materials.
+    distinct-USD object + goal-viz, ground plane + lighting.
 
     Mutates env: sets ``env.robot``, ``env.table``, ``env.object``,
     ``env.goal_viz``, ``env._object_scale_per_env``, ``env._tmp_asset_dir``.
@@ -883,50 +768,17 @@ def setup_scene(env) -> None:
             "Check cfg.assets.handle_head_types and num_assets_per_type."
         )
 
-    # 2. URDF→USD conversion, persistent cache. Lab's converter writes one
-    #    .asset_hash sidecar per usd_dir (asset_converter_base.py:89), so
-    #    EACH asset must get its own usd_dir — sharing one dir across the
-    #    600 procedural URDFs would race-write the hash file and every
-    #    converter would always cache-miss. Stem of the URDF filename
-    #    (which already encodes scale + density via the generator's naming)
-    #    is a stable, collision-free per-asset key.
-    #
-    #    Cache root resolution (in priority order):
-    #      1. ``$SIMTOOLREAL_CACHE_ROOT`` env var — explicit override.
-    #      2. ``/scratch/simtoolreal_assets/v1`` — local NVMe on slurm
-    #         compute nodes (much faster than NFS-mounted $HOME for the
-    #         small-USD metadata reads that dominate proto-load).
-    #      3. ``~/.cache/simtoolreal_assets/v1`` — fallback for hosts
-    #         without /scratch (laptops, head nodes without local scratch).
-    #    The ``v1/`` segment is a manual cache-bust knob;
-    #    ``cfg.assets.rebuild_assets=True`` toggles the converter's force
-    #    flag for runtime-controlled invalidation.
-    #    joint_drive=None because procedural objects have no joints.
-    cache_root_env = os.environ.get("SIMTOOLREAL_CACHE_ROOT")
-    if cache_root_env:
-        usd_cache_root = Path(cache_root_env)
-    elif Path("/scratch").is_dir() and os.access("/scratch", os.W_OK):
-        usd_cache_root = Path("/scratch") / "simtoolreal_assets" / "v1"
-    else:
-        usd_cache_root = Path.home() / ".cache" / "simtoolreal_assets" / "v1"
+    # 2. URDF -> USD conversion, persistent cache. Each asset gets its own
+    #    converter dir because Isaac Lab stores one .asset_hash per usd_dir.
+    usd_cache_root = _resolve_usd_cache_root()
     usd_cache_root.mkdir(parents=True, exist_ok=True)
     env._usd_cache_root = str(usd_cache_root)
     _scene_debug(f"using USD cache root {usd_cache_root}", start_time=setup_t0)
-    usd_paths: list[str] = []
-    for urdf in urdf_paths:
-        asset_dir = usd_cache_root / Path(urdf).stem
-        converter = UrdfConverter(
-            UrdfConverterCfg(
-                asset_path=urdf,
-                usd_dir=str(asset_dir),
-                fix_base=False,
-                merge_fixed_joints=True,
-                force_usd_conversion=force_rebuild,
-                make_instanceable=False,
-                joint_drive=None,
-            )
-        )
-        usd_paths.append(converter.usd_path)
+    usd_paths = _convert_object_urdfs_to_usds(
+        urdf_paths,
+        usd_cache_root,
+        force_rebuild=force_rebuild,
+    )
     _scene_debug(f"resolved {len(usd_paths)} object USDs", start_time=setup_t0)
     baked_cache_root = usd_cache_root / "_baked"
     object_usd_paths = [
@@ -957,64 +809,41 @@ def setup_scene(env) -> None:
     #    default, and its clone_environments() with replicate_physics=False
     #    is a no-op against an empty source — so we materialize the prims
     #    here ourselves and let each spawner fill them in.
-    stage = get_current_stage()
-    for env_path in env.scene.env_prim_paths:
-        if not stage.GetPrimAtPath(env_path).IsValid():
-            stage.DefinePrim(env_path, "Xform")
+    _materialize_env_prims(env)
     _scene_debug(
         f"materialized {len(env.scene.env_prim_paths)} env prims",
         start_time=setup_t0,
     )
 
-    # 4. Robot + table — homogeneous regex spawn. The @clone-decorated
-    #    UrdfFileCfg spawner now resolves the regex to all env_* prims and
-    #    writes a copy of the converted USD into each. usd_dir routes the
-    #    converter's USD cache to the per-process tmpdir (avoids the
-    #    /tmp/IsaacLab shared-host EACCES).
-    # Robot + Table: per-asset subdirs of the cache root (same .asset_hash
-    # one-per-dir constraint as the procedural loop above).
-    robot_cache = usd_cache_root / Path(assets_cfg.robot_urdf).stem
-    table_cache = usd_cache_root / Path(assets_cfg.table_urdf).stem
-    robot_converter = UrdfConverter(
-        UrdfConverterCfg(
-            asset_path=assets_cfg.robot_urdf,
-            usd_dir=str(robot_cache),
-            force_usd_conversion=force_rebuild,
-            fix_base=True,
-            merge_fixed_joints=True,
-            self_collision=False,
-            make_instanceable=False,
-            joint_drive=UrdfConverterCfg.JointDriveCfg(
-                drive_type="force",
-                target_type="position",
-                gains=UrdfConverterCfg.JointDriveCfg.PDGainsCfg(
-                    stiffness=0.0,
-                    damping=0.0,
-                ),
-            ),
-        )
+    # 4. Robot + table — pre-convert URDFs into persistent cache, bake static
+    #    schema props into role-specific USDs, then spawn those USDs across
+    #    all envs. Robot + table use per-asset subdirs of the cache root
+    #    (same .asset_hash one-per-dir constraint as the procedural loop).
+    robot_raw_usd = _convert_urdf_to_usd(
+        assets_cfg.robot_urdf,
+        usd_cache_root,
+        force_rebuild=force_rebuild,
+        fix_base=True,
+        self_collision=False,
+        joint_drive=_robot_joint_drive_cfg(),
     )
-    table_converter = UrdfConverter(
-        UrdfConverterCfg(
-            asset_path=assets_cfg.table_urdf,
-            usd_dir=str(table_cache),
-            force_usd_conversion=force_rebuild,
-            fix_base=False,
-            merge_fixed_joints=True,
-            make_instanceable=False,
-            joint_drive=None,
-        )
+    table_raw_usd = _convert_urdf_to_usd(
+        assets_cfg.table_urdf,
+        usd_cache_root,
+        force_rebuild=force_rebuild,
+        fix_base=False,
+        joint_drive=None,
     )
     _scene_debug("resolved robot/table raw USDs", start_time=setup_t0)
     robot_usd_path = bake_physics_props_into_usd(
-        raw_usd_path=robot_converter.usd_path,
+        raw_usd_path=robot_raw_usd,
         bake_root=baked_cache_root,
         role="robot",
         assets_cfg=assets_cfg,
         force=force_rebuild,
     )
     table_usd_path = bake_physics_props_into_usd(
-        raw_usd_path=table_converter.usd_path,
+        raw_usd_path=table_raw_usd,
         bake_root=baked_cache_root,
         role="table",
         assets_cfg=assets_cfg,
@@ -1062,28 +891,7 @@ def setup_scene(env) -> None:
     #    source_prim_paths with `index % len(usd_paths)` cycling, so the
     #    source_idx → usd_idx mapping is direct; we then store the scale
     #    indexed by env_id (parsed from ".../env_K/Object").
-    num_envs = env.num_envs
-    object_prim_paths = find_matching_prim_paths("/World/envs/env_.*/Object")
-    if len(object_prim_paths) != num_envs:
-        raise RuntimeError(
-            f"Expected {num_envs} Object prims after MultiUsdFileCfg spawn, "
-            f"got {len(object_prim_paths)}. Cloner-drop bug may have returned."
-        )
-    # object_scales_normalized[i] is a (sx, sy, sz) 3-tuple, so the
-    # per-env tensor is shape (N, 3) — matches the legacy `torch.tensor(
-    # [scales[chosen]] * N)` allocation that downstream obs/reward code
-    # expects.
-    env._object_scale_per_env = torch.zeros(
-        num_envs, 3, device=env.device, dtype=torch.float32
-    )
-    for source_idx, obj_path in enumerate(object_prim_paths):
-        env_segment = obj_path.rsplit("/", 2)[-2]  # ".../env_K/Object" → "env_K"
-        env_id = int(env_segment.removeprefix("env_"))
-        env._object_scale_per_env[env_id] = torch.tensor(
-            object_scales_normalized[source_idx % len(usd_paths)],
-            device=env.device,
-            dtype=torch.float32,
-        )
+    _build_object_scale_tensor(env, object_scales_normalized, len(usd_paths))
     _scene_debug("built per-env object scale tensor", start_time=setup_t0)
 
     # 9. Register with scene so DirectRLEnv refreshes their tensors each step.
@@ -1114,8 +922,8 @@ __all__ = [
     "HAND_JOINT_ARMATURE",
     "HAND_JOINT_FRICTION",
     "ARM_DEFAULT_JOINT_POS",
-    "build_robot_articulation_cfg",
-    "build_table_rigid_object_cfg",
+    "build_robot_articulation_usd_cfg",
+    "build_table_rigid_object_usd_cfg",
     "build_object_rigid_object_cfg",
     "build_goal_viz_rigid_object_cfg",
     "apply_physx_material_properties",
