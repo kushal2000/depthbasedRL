@@ -1419,6 +1419,7 @@ def save_camera_debug(
     run_dir: Path,
     debug_frames: dict[str, list[np.ndarray]] | None = None,
 ):
+    import csv
     import imageio.v3 as iio
     import json
 
@@ -1435,6 +1436,7 @@ def save_camera_debug(
     if outputs.get("distance_to_image_plane") is not None:
         depth_batch = outputs["distance_to_image_plane"].cpu().numpy()
         depth_images = []
+        depth_stats = []
         for env_id, depth in enumerate(depth_batch):
             if depth.ndim == 3:
                 depth = depth[..., 0]
@@ -1443,6 +1445,34 @@ def save_camera_debug(
                 finite_depth = depth[finite_mask]
                 depth_min = float(np.min(finite_depth))
                 depth_max = float(np.max(finite_depth))
+                valid_window = (finite_depth >= env.depth_min_m) & (finite_depth <= env.depth_max_m)
+                normalized = (finite_depth - env.depth_min_m) / (env.depth_max_m - env.depth_min_m)
+                policy_window = np.where(valid_window, normalized, 0.0)
+                stats = {
+                    "env_id": env_id,
+                    "raw_min_m": depth_min,
+                    "raw_q25_m": float(np.quantile(finite_depth, 0.25)),
+                    "raw_median_m": float(np.quantile(finite_depth, 0.50)),
+                    "raw_mean_m": float(np.mean(finite_depth)),
+                    "raw_q75_m": float(np.quantile(finite_depth, 0.75)),
+                    "raw_max_m": depth_max,
+                    "raw_frac_below_window": float(np.mean(finite_depth < env.depth_min_m)),
+                    "raw_frac_above_window": float(np.mean(finite_depth > env.depth_max_m)),
+                    "raw_frac_in_window": float(np.mean(valid_window)),
+                    "in_window_raw_min_m": float(np.min(finite_depth[valid_window])) if np.any(valid_window) else 0.0,
+                    "in_window_raw_q25_m": float(np.quantile(finite_depth[valid_window], 0.25)) if np.any(valid_window) else 0.0,
+                    "in_window_raw_median_m": float(np.quantile(finite_depth[valid_window], 0.50)) if np.any(valid_window) else 0.0,
+                    "in_window_raw_mean_m": float(np.mean(finite_depth[valid_window])) if np.any(valid_window) else 0.0,
+                    "in_window_raw_q75_m": float(np.quantile(finite_depth[valid_window], 0.75)) if np.any(valid_window) else 0.0,
+                    "in_window_raw_max_m": float(np.max(finite_depth[valid_window])) if np.any(valid_window) else 0.0,
+                    "policy_window_min": float(np.min(policy_window)),
+                    "policy_window_q25": float(np.quantile(policy_window, 0.25)),
+                    "policy_window_median": float(np.quantile(policy_window, 0.50)),
+                    "policy_window_mean": float(np.mean(policy_window)),
+                    "policy_window_q75": float(np.quantile(policy_window, 0.75)),
+                    "policy_window_max": float(np.max(policy_window)),
+                }
+                depth_stats.append(stats)
                 denom = max(depth_max - depth_min, 1e-6)
                 depth_vis = np.zeros_like(depth, dtype=np.float32)
                 depth_vis[finite_mask] = np.clip((depth[finite_mask] - depth_min) / denom, 0.0, 1.0)
@@ -1452,6 +1482,22 @@ def save_camera_debug(
             depth_images.append(depth_img)
             iio.imwrite(run_dir / "camera_debug" / f"env_{env_id}_depth.png", depth_img)
         iio.imwrite(run_dir / "camera_debug" / "depth_grid.png", _make_grid(depth_images))
+        policy_depth = env._preprocess_depth(outputs["distance_to_image_plane"].detach()).cpu().numpy()
+        if policy_depth.ndim == 4 and policy_depth.shape[-1] == 1:
+            policy_depth = np.transpose(policy_depth, (0, 3, 1, 2))
+        if policy_depth.ndim == 3:
+            policy_depth = policy_depth[:, None, ...]
+        policy_depth_images = []
+        for env_id, depth in enumerate(policy_depth[:, 0]):
+            depth_img = (np.clip(depth, 0.0, 1.0) * 255).astype(np.uint8)
+            policy_depth_images.append(depth_img)
+            iio.imwrite(run_dir / "camera_debug" / f"env_{env_id}_policy_depth.png", depth_img)
+        iio.imwrite(run_dir / "camera_debug" / "policy_depth_grid.png", _make_grid(policy_depth_images))
+        if depth_stats:
+            with open(run_dir / "camera_debug" / "depth_stats.csv", "w", newline="") as f:
+                writer = csv.DictWriter(f, fieldnames=list(depth_stats[0].keys()))
+                writer.writeheader()
+                writer.writerows(depth_stats)
     for group_name, frames in (debug_frames or {}).items():
         _write_debug_frame_group(run_dir, group_name, frames)
 
