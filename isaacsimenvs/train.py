@@ -49,6 +49,12 @@ def main() -> None:
     # --- Runtime toggles ---
     parser.add_argument("--test", action="store_true", help="Run inference (player) instead of training")
     parser.add_argument("--checkpoint", default=None, help="Path to .pth to restore")
+    parser.add_argument(
+        "--checkpoint_load_mode",
+        choices=("resume", "weights"),
+        default="resume",
+        help="resume restores optimizer/rollout/env state; weights starts fresh from model weights.",
+    )
     parser.add_argument("--rl_device", default="cuda:0")
     parser.add_argument("--sim_device", default="cuda:0")
     # --- Video ---
@@ -210,6 +216,7 @@ def main() -> None:
                 "train": not args_cli.test,
                 "play": args_cli.test,
                 "checkpoint": args_cli.checkpoint,
+                "checkpoint_load_mode": args_cli.checkpoint_load_mode,
             }
         )
 

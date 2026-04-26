@@ -26,6 +26,7 @@ _CFG_DIR = Path(__file__).resolve().parents[2] / "cfg"
 gym.register(
     id="Isaacsimenvs-SimToolReal-Direct-v0",
     entry_point="isaacsimenvs.tasks.simtoolreal.simtoolreal_env:SimToolRealEnv",
+    order_enforce=False,
     disable_env_checker=True,
     kwargs={
         "env_cfg_entry_point": "isaacsimenvs.tasks.simtoolreal.simtoolreal_env_cfg:SimToolRealEnvCfg",

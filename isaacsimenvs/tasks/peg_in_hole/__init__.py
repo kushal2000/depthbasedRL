@@ -17,6 +17,7 @@ _CFG_DIR = Path(__file__).resolve().parents[2] / "cfg"
 gym.register(
     id="Isaacsimenvs-PegInHole-Direct-v0",
     entry_point="isaacsimenvs.tasks.peg_in_hole.peg_in_hole_env:PegInHoleEnv",
+    order_enforce=False,
     disable_env_checker=True,
     kwargs={
         "env_cfg_entry_point": "isaacsimenvs.tasks.peg_in_hole.peg_in_hole_env_cfg:PegInHoleEnvCfg",

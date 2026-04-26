@@ -131,6 +131,7 @@ python -u isaacsimenvs/train.py \
     --task "$TASK_ID" \
     --agent "$AGENT_KEY" \
     --checkpoint "$CHECKPOINT" \
+    --checkpoint_load_mode weights \
     --headless \
     --capture_viewer \
     --capture_viewer_len "$CAPTURE_VIEWER_LEN" \
