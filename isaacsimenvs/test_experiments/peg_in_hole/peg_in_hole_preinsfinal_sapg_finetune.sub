@@ -32,6 +32,8 @@ GPU_MAX_RIGID_PATCH_COUNT=8388608
 # ── Peg-in-hole settings ─────────────────────────────────────
 GOAL_MODE="preInsertAndFinal"
 GOAL_XY_OBS_NOISE=0.002
+SUCCESS_TOLERANCE=0.01
+TARGET_SUCCESS_TOLERANCE=0.01
 ENABLE_RETRACT=True
 RETRACT_REWARD_SCALE=1.0
 RETRACT_DISTANCE_THRESHOLD=0.1
@@ -149,6 +151,8 @@ python -u isaacsimenvs/train.py \
     env.sim.physx.gpu_max_rigid_patch_count=$GPU_MAX_RIGID_PATCH_COUNT \
     env.peg_in_hole.goal_mode="$GOAL_MODE" \
     env.peg_in_hole.goal_xy_obs_noise=$GOAL_XY_OBS_NOISE \
+    env.termination.success_tolerance=$SUCCESS_TOLERANCE \
+    env.termination.target_success_tolerance=$TARGET_SUCCESS_TOLERANCE \
     env.peg_in_hole.enable_retract=$ENABLE_RETRACT \
     env.peg_in_hole.retract_reward_scale=$RETRACT_REWARD_SCALE \
     env.peg_in_hole.retract_distance_threshold=$RETRACT_DISTANCE_THRESHOLD \
