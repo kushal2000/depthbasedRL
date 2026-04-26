@@ -27,6 +27,7 @@ MINIBATCH_SIZE=98304
 MAX_ITERATIONS=1000000
 SEED=42
 GPU_MAX_RIGID_CONTACT_COUNT=16777216
+GPU_MAX_RIGID_PATCH_COUNT=8388608
 
 # ── Peg-in-hole settings ─────────────────────────────────────
 GOAL_MODE="preInsertAndFinal"
@@ -145,6 +146,7 @@ python -u isaacsimenvs/train.py \
     --wandb_name "$EXPERIMENT_NAME" \
     env.scene.num_envs=$NUM_ENVS \
     env.sim.physx.gpu_max_rigid_contact_count=$GPU_MAX_RIGID_CONTACT_COUNT \
+    env.sim.physx.gpu_max_rigid_patch_count=$GPU_MAX_RIGID_PATCH_COUNT \
     env.peg_in_hole.goal_mode="$GOAL_MODE" \
     env.peg_in_hole.goal_xy_obs_noise=$GOAL_XY_OBS_NOISE \
     env.peg_in_hole.enable_retract=$ENABLE_RETRACT \

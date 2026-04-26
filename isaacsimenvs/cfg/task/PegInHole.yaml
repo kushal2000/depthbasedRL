@@ -15,6 +15,7 @@ sim:
     bounce_threshold_velocity: 0.2
     friction_offset_threshold: 0.04
     friction_correlation_distance: 0.025
+    gpu_max_rigid_patch_count: 8388608
 
 scene:
   num_envs: 8192
