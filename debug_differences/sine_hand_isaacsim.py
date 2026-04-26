@@ -98,11 +98,11 @@ def main() -> None:
     rs.reset_position_noise_x = 0.0
     rs.reset_position_noise_y = 0.0
     rs.reset_position_noise_z = 0.0
-    rs.randomize_object_rotation = False
     rs.reset_dof_pos_random_interval_arm = 0.0
     rs.reset_dof_pos_random_interval_fingers = 0.0
     rs.reset_dof_vel_random_interval = 0.0
     rs.table_reset_z_range = 0.0
+    rs.fixed_start_pose = (0.0, 0.0, rs.table_reset_z + rs.table_object_z_offset, 1.0, 0.0, 0.0, 0.0)
 
     env = gym.make("Isaacsimenvs-SimToolReal-Direct-v0", cfg=cfg)
     inner = env.unwrapped

@@ -53,7 +53,6 @@ OBJECT_SCALE_NOISE_RANGE="[1.0,1.0]"  # cfg default; widen e.g. [0.9,1.1]
 RESET_POSITION_NOISE_X=0.1
 RESET_POSITION_NOISE_Y=0.1
 RESET_POSITION_NOISE_Z=0.02
-RANDOMIZE_OBJECT_ROTATION=True
 RESET_DOF_POS_NOISE_ARM=0.1
 RESET_DOF_POS_NOISE_FINGERS=0.1
 RESET_DOF_VEL_NOISE=0.5
@@ -167,7 +166,6 @@ python -u isaacsimenvs/train.py \
     env.reset.reset_position_noise_x=$RESET_POSITION_NOISE_X \
     env.reset.reset_position_noise_y=$RESET_POSITION_NOISE_Y \
     env.reset.reset_position_noise_z=$RESET_POSITION_NOISE_Z \
-    env.reset.randomize_object_rotation=$RANDOMIZE_OBJECT_ROTATION \
     env.reset.reset_dof_pos_random_interval_arm=$RESET_DOF_POS_NOISE_ARM \
     env.reset.reset_dof_pos_random_interval_fingers=$RESET_DOF_POS_NOISE_FINGERS \
     env.reset.reset_dof_vel_random_interval=$RESET_DOF_VEL_NOISE \

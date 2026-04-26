@@ -8,7 +8,139 @@ coercion). The training algorithm/Runner/PPO/SAPG code still comes from
 
 from __future__ import annotations
 
+import copy
+from collections import deque
+
+import numpy as np
+import torch
 from rl_games.common.algo_observer import AlgoObserver
+from rl_games.common.custom_utils import remove_envs_from_info
+
+
+def _flatten_dict(d: dict, prefix: str = "", separator: str = "/") -> dict:
+    out = {}
+    for key, value in d.items():
+        name = f"{prefix}{key}"
+        if isinstance(value, dict):
+            out.update(_flatten_dict(value, name + separator, separator))
+        else:
+            out[name] = value
+    return out
+
+
+def _is_scalar(value) -> bool:
+    return isinstance(value, (float, int)) or (
+        isinstance(value, torch.Tensor) and value.ndim == 0
+    )
+
+
+def _as_float(value) -> float:
+    if isinstance(value, torch.Tensor):
+        return float(value.detach().cpu().item())
+    return float(value)
+
+
+def _value_at(value, index: int) -> float:
+    if isinstance(value, torch.Tensor):
+        if value.ndim > 0:
+            return float(value[index].detach().cpu().item())
+        return float(value.detach().cpu().item())
+    if isinstance(value, np.ndarray):
+        return float(value[index].item() if value.ndim > 0 else value.item())
+    if isinstance(value, (list, tuple)):
+        return float(value[index])
+    return float(value)
+
+
+class EnvStatsAlgoObserver(AlgoObserver):
+    """Log env-provided episode stats through rl_games' summary writer."""
+
+    def __init__(self):
+        super().__init__()
+        self.algo = None
+        self.writer = None
+        self.episode_cumulative = {}
+        self.episode_cumulative_avg = {}
+        self.episode_final_avg = {}
+        self.direct_info = {}
+        self.new_finished_episodes = False
+
+    def after_init(self, algo):
+        self.algo = algo
+        self.writer = self.algo.writer
+
+    def process_infos(self, infos, done_indices, **kwargs):
+        if not isinstance(infos, dict):
+            return
+
+        ignore_env_boundary = kwargs.get("ignore_env_boundary", 0)
+        if ignore_env_boundary > 0:
+            infos = remove_envs_from_info(copy.deepcopy(infos), ignore_env_boundary)
+            done_indices = done_indices[done_indices >= ignore_env_boundary] - ignore_env_boundary
+
+        done_indices = done_indices.reshape(-1).detach().cpu().tolist()
+        self._process_episode_cumulative(infos.get("episode_cumulative"), done_indices)
+        self._process_episode_final(infos.get("episode_final"), done_indices)
+
+        self.direct_info = {
+            key: value
+            for key, value in _flatten_dict(infos).items()
+            if _is_scalar(value)
+        }
+
+    def _process_episode_cumulative(self, terms, done_indices: list[int]) -> None:
+        if not terms:
+            return
+
+        for key, value in terms.items():
+            if key not in self.episode_cumulative:
+                self.episode_cumulative[key] = torch.zeros_like(value)
+            if key not in self.episode_cumulative_avg:
+                self.episode_cumulative_avg[key] = deque([], maxlen=self.algo.games_to_track)
+            self.episode_cumulative[key] += value
+
+        for done_idx in done_indices:
+            self.new_finished_episodes = True
+            for key in terms:
+                self.episode_cumulative_avg[key].append(
+                    _value_at(self.episode_cumulative[key], done_idx)
+                )
+                self.episode_cumulative[key][done_idx] = 0
+
+    def _process_episode_final(self, values, done_indices: list[int]) -> None:
+        if not values or not done_indices:
+            return
+
+        self.new_finished_episodes = True
+        for key, value in values.items():
+            if key not in self.episode_final_avg:
+                self.episode_final_avg[key] = deque([], maxlen=self.algo.games_to_track)
+            for done_idx in done_indices:
+                self.episode_final_avg[key].append(_value_at(value, done_idx))
+
+    def after_clear_stats(self):
+        self.episode_cumulative_avg.clear()
+        self.episode_final_avg.clear()
+        self.direct_info.clear()
+        self.new_finished_episodes = False
+
+    def after_print_stats(self, frame, epoch_num, total_time):
+        if self.writer is None:
+            return
+
+        if self.new_finished_episodes:
+            for key, values in self.episode_cumulative_avg.items():
+                if values:
+                    self.writer.add_scalar(f"episode_cumulative/{key}", np.mean(values), frame)
+                    self.writer.add_scalar(f"episode_cumulative_min/{key}_min", np.min(values), frame)
+                    self.writer.add_scalar(f"episode_cumulative_max/{key}_max", np.max(values), frame)
+            for key, values in self.episode_final_avg.items():
+                if values:
+                    self.writer.add_scalar(f"episode_final/{key}", np.mean(values), frame)
+            self.new_finished_episodes = False
+
+        for key, value in self.direct_info.items():
+            self.writer.add_scalar(key, _as_float(value), frame)
 
 
 class MultiObserver(AlgoObserver):

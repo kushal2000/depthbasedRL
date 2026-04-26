@@ -1,17 +1,4 @@
-"""Termination + tolerance-curriculum helpers for SimToolReal.
-
-Both entry points are called from :meth:`SimToolRealEnv._get_dones`:
-
-  1. :func:`update_tolerance_curriculum` — advances ``_current_success_tolerance``
-     toward ``target_success_tolerance`` once per curriculum-interval when the
-     policy averages ≥3 successes per episode (legacy
-     ``isaacgymenvs/tasks/simtoolreal/utils.py:tolerance_curriculum``).
-  2. :func:`compute_terminations` — reads the cached intermediate values,
-     updates ``_successes``, handles mid-episode goal-hit (tracker reset +
-     ``episode_length_buf`` zero), and returns
-     ``(terminated, truncated)`` (legacy env.py:2496-2560, minus the
-     peg-in-hole / resetWhenDropped causes).
-"""
+"""Termination and success-tolerance curriculum helpers."""
 
 from __future__ import annotations
 
@@ -21,38 +8,26 @@ from .reset_utils import reset_goal_trackers
 
 
 def update_tolerance_curriculum(env) -> None:
-    """Shrink ``env._current_success_tolerance`` toward the floor when the
-    policy consistently hits goals. Mutates env state in-place.
-
-    Gating:
-      - Frame cadence: at least ``tolerance_curriculum_interval`` policy
-        steps since the last update (global counter, not per-env).
-      - Performance: ``mean(env._prev_episode_successes) >= 3.0``.
-    """
+    """Shrink success tolerance when completed episodes average enough goals."""
     env._frame_counter += 1
     term = env.cfg.termination
     if env._frame_counter - env._last_curriculum_update >= term.tolerance_curriculum_interval:
-        if env._prev_episode_successes.float().mean().item() >= 3.0:
+        if (
+            env._prev_episode_successes.float().mean().item()
+            >= term.tolerance_curriculum_success_threshold
+        ):
             new_tol = env._current_success_tolerance * term.tolerance_curriculum_increment
             new_tol = max(min(new_tol, term.success_tolerance), term.target_success_tolerance)
             env._current_success_tolerance = new_tol
             env._last_curriculum_update = env._frame_counter
 
-    # Eval override (mirrors legacy env.py:1573-1575): when set, pin tolerance
-    # to a fixed value and skip the curriculum entirely. Used by the eval
-    # drivers so success criterion is reproducible across runs.
+    # Eval pins the success criterion.
     if term.eval_success_tolerance is not None:
         env._current_success_tolerance = float(term.eval_success_tolerance)
 
 
 def compute_terminations(env) -> tuple[torch.Tensor, torch.Tensor]:
-    """Return ``(terminated, truncated)`` bool tensors of shape ``(N,)``.
-
-    Reads cached intermediates (``_is_success``, ``_curr_fingertip_distances``)
-    populated by :func:`compute_intermediate_values`. Mutates env on goal-hit:
-    increments ``_successes``, resets per-target trackers, zeroes
-    ``episode_length_buf`` for the hit envs (legacy env.py:2503-2505).
-    """
+    """Update goal-hit state and return ``(terminated, truncated)``."""
     term_cfg = env.cfg.termination
     env_origins = env.scene.env_origins
     is_success = env._is_success
@@ -62,11 +37,10 @@ def compute_terminations(env) -> tuple[torch.Tensor, torch.Tensor]:
     goal_reset_ids = is_success.nonzero(as_tuple=False).squeeze(-1)
     if goal_reset_ids.numel() > 0:
         reset_goal_trackers(env, goal_reset_ids)
-        # Extend episode: zero the length buf so truncation doesn't fire
-        # on a step that just reached the goal.
+        # zero the length buf so truncation doesn't fire
         env.episode_length_buf[goal_reset_ids] = 0
 
-    # Termination causes (hardcoded thresholds; legacy env.py:2500, 2529).
+    # Termination causes.
     object_z_local = env.object.data.root_pos_w[:, 2] - env_origins[:, 2]
     fall = object_z_local < 0.1
 
@@ -79,6 +53,12 @@ def compute_terminations(env) -> tuple[torch.Tensor, torch.Tensor]:
 
     terminated = fall | max_successes_reached | hand_far
     truncated = env.episode_length_buf >= env.max_episode_length
+    env._termination_reasons = {
+        "fall": fall,
+        "max_successes": max_successes_reached,
+        "hand_far": hand_far,
+        "timeout": truncated,
+    }
     return terminated, truncated
 
 

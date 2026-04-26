@@ -83,13 +83,6 @@ class AssetsCfg:
     object_friction: float = 0.5
     table_friction: float = 0.5
 
-    # Force a rebuild of the converted USDs (Robot, Table, every procedural
-    # handle-head) instead of reusing the persistent cache at
-    # ~/.cache/simtoolreal_assets/v1/. Set when the procedural URDF generator
-    # changes, the source robot/table URDF changes in a way the converter
-    # won't notice (e.g. mesh referenced by URDF), or when bumping Lab.
-    rebuild_assets: bool = False
-
 # ----------------------------------------------------------------------------
 # obs
 # ----------------------------------------------------------------------------
@@ -190,7 +183,7 @@ class ResetCfg:
     reset_position_noise_x: float = 0.1
     reset_position_noise_y: float = 0.1
     reset_position_noise_z: float = 0.02
-    randomize_object_rotation: bool = True
+    fixed_start_pose: tuple[float, float, float, float, float, float, float] | None = None
 
     # Joint state noise on reset
     reset_dof_pos_random_interval_arm: float = 0.1
@@ -245,6 +238,7 @@ class TerminationCfg:
     # Tolerance curriculum (the only curriculum in v1).
     tolerance_curriculum_increment: float = 0.9  # multiplicative per step
     tolerance_curriculum_interval: int = 3000  # env steps across all agents
+    tolerance_curriculum_success_threshold: float = 3.0
 
 
 # ----------------------------------------------------------------------------

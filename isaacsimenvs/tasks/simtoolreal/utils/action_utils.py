@@ -1,17 +1,4 @@
-"""Action-pipeline helpers for SimToolReal (Phase C + force/torque DR).
-
-Two entry points, both called from :meth:`SimToolRealEnv._pre_physics_step`:
-  - :func:`apply_action_pipeline` — action delay + arm velocity-delta + hand
-    absolute-scale + EMA smoothing + clamp + ``_prev_targets`` update.
-  - :func:`apply_wrench_dr` — decayed force/torque impulses on the object
-    body, gated by ``_lifted_object``.
-
-Legacy references (isaacgymenvs/tasks/simtoolreal/env.py):
-  - 3841-3854: action delay queue + per-step lag sampling.
-  - 3886-3895: arm velocity-delta (useRelativeControl=False branch).
-  - 3904-3918: hand absolute-scale + EMA.
-  - 4001-4060: force/torque impulses (decay, sample, lift-gate).
-"""
+"""Action processing and random object wrench helpers."""
 
 from __future__ import annotations
 
@@ -29,14 +16,8 @@ def sample_log_uniform(lo_hi: tuple[float, float], n: int) -> torch.Tensor:
 
 
 def apply_action_pipeline(env, actions: torch.Tensor) -> None:
-    """Run the action pipeline in-place on the env state.
-
-    Reads/writes ``env._action_queue``, ``env._prev_targets``, ``env._cur_targets``.
-    Uses the arm vs hand joint id masks cached in Phase C.
-    """
-    # Replay override for debugging: caller writes a Lab-order target to
-    # env._replay_target_lab_order; we skip the action pipeline and push that
-    # straight into _cur_targets so _apply_action sends it verbatim to PhysX.
+    """Apply delay, canonical-to-Lab mapping, smoothing, and target clamps."""
+    # Debug replay path accepts an already Lab-order target.
     replay_target = getattr(env, "_replay_target_lab_order", None)
     if replay_target is not None:
         env._cur_targets[:] = replay_target
@@ -49,15 +30,14 @@ def apply_action_pipeline(env, actions: torch.Tensor) -> None:
 
     actions = actions.clone().to(env.device)
 
-    # 0. Convert action from canonical (legacy isaacgymenvs/pretrained-policy)
-    #    order to Lab parser order. The arm/hand split below expects Lab-order
-    #    storage: positions 0-6 are arm (matches both orderings), positions
-    #    7-28 are the 22 hand joints in Lab BFS order. _perm_canon_to_lab
-    #    realigns canonical-DFS hand actions to Lab-BFS positions.
+    # Canonical policy order -> Lab parser order.
     actions = actions[:, env._perm_canon_to_lab]
 
-    # 1. Action delay — roll queue, insert newest, sample per-env lag each step.
+    # Action delay.
     if dr.use_action_delay and dr.action_delay_max > 0:
+        episode_start = (env.episode_length_buf == 0) & (env._successes == 0)
+        if episode_start.any():
+            env._action_queue[episode_start] = actions[episode_start].unsqueeze(1)
         env._action_queue = torch.roll(env._action_queue, shifts=1, dims=1)
         env._action_queue[:, 0, :] = actions
         delay_idx = torch.randint(
@@ -67,7 +47,7 @@ def apply_action_pipeline(env, actions: torch.Tensor) -> None:
             torch.arange(env.num_envs, device=env.device), delay_idx
         ]
 
-    # 2. Arm (action[:7]) — velocity-delta accumulator (env.py:3886-3895).
+    # Arm: velocity-delta accumulator.
     arm_action = actions[:, :7]
     arm_raw = env._prev_targets[:, :7] + act_cfg.dof_speed_scale * dt * arm_action
     arm_raw = torch.clamp(arm_raw, env._arm_lower, env._arm_upper)
@@ -77,7 +57,7 @@ def apply_action_pipeline(env, actions: torch.Tensor) -> None:
     )
     arm_smoothed = torch.clamp(arm_smoothed, env._arm_lower, env._arm_upper)
 
-    # 3. Hand (action[7:]) — absolute scale [-1,1] → [lower, upper] (env.py:3904-3918).
+    # Hand: absolute [-1, 1] scale.
     hand_action = actions[:, 7:]
     hand_raw = env._hand_lower + 0.5 * (hand_action + 1.0) * (
         env._hand_upper - env._hand_lower
@@ -88,25 +68,18 @@ def apply_action_pipeline(env, actions: torch.Tensor) -> None:
     )
     hand_smoothed = torch.clamp(hand_smoothed, env._hand_lower, env._hand_upper)
 
-    # 4. Combine into _cur_targets at joint-id positions.
+    # Write Lab-order targets and cache them for the next step.
     env._cur_targets[:, env._arm_joint_ids] = arm_smoothed
     env._cur_targets[:, env._hand_joint_ids] = hand_smoothed
-
-    # 5. Update prev_targets for next-step EMA + Phase D's obs builder.
     env._prev_targets = env._cur_targets.clone()
 
 
 def apply_wrench_dr(env) -> None:
-    """Sample + apply random force/torque impulses on the object body.
-
-    Uses ``env._lifted_object`` from the PREVIOUS step's state (legacy has this
-    one-step delay too since ``_lifted_object`` updates in the reward, which
-    runs after this hook).
-    """
+    """Apply decayed random force/torque impulses to the object."""
     dr = env.cfg.domain_randomization
     dt_pol = env.step_dt
 
-    # Decay previous wrench (env.py:4002-4004).
+    # Decay previous wrench.
     if dr.force_decay > 0.0:
         env._object_forces *= dr.force_decay ** (dt_pol / dr.force_decay_interval)
     else:
@@ -133,6 +106,7 @@ def apply_wrench_dr(env) -> None:
     env._object_forces = torch.where(force_fire, new_force, env._object_forces)
     env._object_torques = torch.where(torque_fire, new_torque, env._object_torques)
 
+    # _lifted_object is from the previous step because rewards update later.
     if dr.force_only_when_lifted:
         env._object_forces *= env._lifted_object.float().view(-1, 1, 1)
     if dr.torque_only_when_lifted:

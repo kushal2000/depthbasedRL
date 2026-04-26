@@ -107,7 +107,11 @@ def main() -> None:
 
     import isaacsimenvs  # noqa: F401  triggers gym.register side effects
     from isaacsimenvs.utils.hydra_utils import hydra_task_config_with_yaml
-    from isaacsimenvs.utils.rlgames_utils import MultiObserver, register_rlgames_env
+    from isaacsimenvs.utils.rlgames_utils import (
+        EnvStatsAlgoObserver,
+        MultiObserver,
+        register_rlgames_env,
+    )
 
     @hydra_task_config_with_yaml(args_cli.task, args_cli.agent)
     def run(env_cfg, agent_cfg: dict) -> None:
@@ -171,7 +175,7 @@ def main() -> None:
             clip_actions=clip_actions,
         )
 
-        observers = []
+        observers = [EnvStatsAlgoObserver()]
         if args_cli.wandb_activate:
             from isaacsimenvs.utils.wandb_utils import WandbAlgoObserver
 
@@ -192,7 +196,7 @@ def main() -> None:
             )
             observers.append(WandbAlgoObserver(wandb_cfg))
 
-        runner = Runner(MultiObserver(observers)) if observers else Runner()
+        runner = Runner(MultiObserver(observers))
         # Co-locate rl_games artifacts (checkpoints, summaries) with the Hydra
         # run dir so slurm logs + config + videos all live together.
         agent_cfg["params"]["config"]["train_dir"] = hydra_run_dir

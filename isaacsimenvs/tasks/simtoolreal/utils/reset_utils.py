@@ -1,17 +1,4 @@
-"""Reset + state-allocation helpers for SimToolReal.
-
-Public entry points used by :class:`SimToolRealEnv`:
-  - :func:`allocate_state_buffers` — one-shot ``__init__`` buffer allocation
-    (body/joint-id caches, joint-limit tensors, action-pipeline buffers,
-    DR queues + priors, reward trackers, curriculum state).
-  - :func:`reset_env_state` — full per-env reset, called from ``_reset_idx``
-    after ``super()._reset_idx``.
-  - :func:`reset_goal_trackers` — partial (mid-episode) reset: tracker clear
-    + goal-pose resample. Called from :func:`compute_terminations` on
-    ``is_success``.
-
-Legacy reference: isaacgymenvs/tasks/simtoolreal/env.py:3611-3796 (reset_idx).
-"""
+"""State allocation and reset helpers for SimToolReal."""
 
 from __future__ import annotations
 
@@ -30,12 +17,6 @@ from .scene_utils import (
     PALM_BODY_NAME,
 )
 
-
-# ----------------------------------------------------------------------------
-# __init__ buffer allocation
-# ----------------------------------------------------------------------------
-
-
 def allocate_state_buffers(env) -> None:
     """Populate every per-env buffer + index cache used by the hooks.
 
@@ -46,34 +27,16 @@ def allocate_state_buffers(env) -> None:
     dr = env.cfg.domain_randomization
     rew = env.cfg.reward
 
-    # --- Joint/body id caches (Phase C + D) ---
+    # --- Joint/body id caches ---
     env._arm_joint_ids = env.robot.find_joints(ARM_JOINT_REGEX)[0]      # 7
     env._hand_joint_ids = env.robot.find_joints(HAND_JOINT_REGEX)[0]     # 22
     env._palm_body_id = env.robot.find_bodies(PALM_BODY_NAME)[0][0]
     env._fingertip_body_ids = env.robot.find_bodies(FINGERTIP_BODY_REGEX)[0]  # 5
     assert len(env._fingertip_body_ids) == NUM_FINGERTIPS
 
-    # --- Joint-order permutation tensors (Lab parser <-> legacy isaacgym) ---
-    # The pretrained policy + external code expect joints in
-    # JOINT_NAMES_CANONICAL order, but Isaac Lab parses them differently
-    # (BFS across fingers vs canonical DFS within finger). The env stores
-    # all joint state in Lab order; these perms convert at the policy I/O
-    # boundary only (action input, joint obs output).
-    #
-    #   actions_lab = actions_canon[:, _perm_canon_to_lab]
-    #     -> for each Lab position j, source the action from canonical
-    #        index `canonical_names.index(lab_names[j])`.
-    #
-    #   tensor_canon = tensor_lab[:, _perm_lab_to_canon]
-    #     -> for each canonical position k, source from Lab index
-    #        `lab_names.index(canonical_names[k])`.
+    # Convert between Lab parser order and canonical policy order.
     lab_names = list(env.robot.data.joint_names)
-    assert len(lab_names) == len(JOINT_NAMES_CANONICAL), (
-        f"robot has {len(lab_names)} joints, canonical list has "
-        f"{len(JOINT_NAMES_CANONICAL)}"
-    )
-    missing = set(JOINT_NAMES_CANONICAL) - set(lab_names)
-    assert not missing, f"canonical joints absent from robot: {missing}"
+    assert set(lab_names) == set(JOINT_NAMES_CANONICAL)
     env._perm_canon_to_lab = torch.tensor(
         [JOINT_NAMES_CANONICAL.index(n) for n in lab_names],
         device=env.device, dtype=torch.long,
@@ -83,57 +46,38 @@ def allocate_state_buffers(env) -> None:
         device=env.device, dtype=torch.long,
     )
 
-    # --- Canonical-order joint limits (for joint_pos obs unscale) ---
-    # Legacy isaacgymenvs obs builder normalizes joint_pos to [-1, 1] via
-    # unscale(q, lower, upper) — we must match that for the pretrained
-    # policy. Cache once in canonical order; per-env limits are identical
-    # across envs (same robot URDF), so we take env_0's row.
     limits = env.robot.data.joint_pos_limits  # (N, num_joints, 2), Lab order
+
+    # Canonical-order limits for normalizing joint_pos observations.
     env._joint_lower_canon = limits[0, :, 0][env._perm_lab_to_canon]  # (29,)
     env._joint_upper_canon = limits[0, :, 1][env._perm_lab_to_canon]  # (29,)
 
-    # --- Joint limits (raw URDF values, not soft). ---
-    limits = env.robot.data.joint_pos_limits  # (N, num_joints, 2)
+    # Lab-order limits for action target clamping.
     env._arm_lower = limits[:, env._arm_joint_ids, 0]
     env._arm_upper = limits[:, env._arm_joint_ids, 1]
     env._hand_lower = limits[:, env._hand_joint_ids, 0]
     env._hand_upper = limits[:, env._hand_joint_ids, 1]
 
-    # --- Action-pipeline buffers (Phase C) ---
+    # --- Action target buffers  ---
     action_space = env.cfg.action_space
     env._cur_targets = torch.zeros(env.num_envs, action_space, device=env.device)
     env._prev_targets = torch.zeros(env.num_envs, action_space, device=env.device)
-    env._action_queue = torch.zeros(
-        env.num_envs,
-        max(1, dr.action_delay_max),
-        action_space,
-        device=env.device,
-    )
 
     # --- Keypoint offsets in object local frame ---
     corners = torch.tensor(
         KEYPOINT_CORNERS, device=env.device, dtype=torch.float32
     )  # (4, 3)
-    # Per-env scaled (always used for obs + for reward when fixed flag is False).
-    per_env_half = (
-        env._object_scale_per_env * rew.object_base_size * rew.keypoint_scale * 0.5
-    )
-    env._keypoint_offsets = corners.unsqueeze(0) * per_env_half.unsqueeze(1)  # (N, 4, 3)
-    # Fixed-size offsets (reward when fixed_size_keypoint_reward=True).
-    # Legacy gym (env.py:2191-2193) multiplies the corner positions by
-    # ``fixed_size * keypoint_scale / 2``. Dropping the ``keypoint_scale``
-    # factor here would shrink sim's fixed keypoints by 1/keypoint_scale
-    # (=2/3 with the default 1.5), making `keypoints_max_dist_fixed_size`
-    # smaller than gym's at the same physical state — sim would fire
-    # success at poses where gym wouldn't, breaking the success-criterion
-    # parity we depend on for cross-backend evaluation.
-    fixed_half = 0.5 * rew.keypoint_scale * torch.tensor(
-        rew.fixed_size, device=env.device
-    )
-    offsets_fixed = corners * fixed_half.unsqueeze(0)
-    env._keypoint_offsets_fixed = offsets_fixed.unsqueeze(0).expand(
-        env.num_envs, -1, -1
-    ).contiguous()
+
+    env._keypoint_offsets = (
+        corners.unsqueeze(0)
+        * (env._object_scale_per_env * rew.object_base_size * rew.keypoint_scale * 0.5).unsqueeze(1)
+    )  # (N, 4, 3)
+
+    # Fixed-size reward keypoints follow legacy: fixed_size * keypoint_scale / 2.
+    env._keypoint_offsets_fixed = (
+        corners
+        * (0.5 * rew.keypoint_scale * torch.tensor(rew.fixed_size, device=env.device)).unsqueeze(0)
+    ).unsqueeze(0).expand(env.num_envs, -1, -1).contiguous()
 
     # --- Per-env DR priors (re-sampled on reset; seeded once here) ---
     lo, hi = dr.object_scale_noise_multiplier_range
@@ -141,28 +85,29 @@ def allocate_state_buffers(env) -> None:
         env.num_envs, 3, device=env.device
     ).uniform_(lo, hi)
 
-    # --- Reward / termination trackers (Phase E/F) ---
+    # --- Reward / termination trackers  ---
+    # whether the object is lifted
     env._lifted_object = torch.zeros(
         env.num_envs, dtype=torch.bool, device=env.device
     )
-    # -1 sentinel + lazy-init in compute_intermediate_values (mirrors
-    # legacy env.py:3152-3160). A positive "very far" reset value would
-    # cause ``keypoint_reward`` to fire a phantom one-shot bonus on the
-    # step after a goal-hit reset.
+    # the maximum distance between the object and the goal since the last goal reset
     env._closest_keypoint_max_dist = torch.full(
         (env.num_envs,), -1.0, device=env.device
     )
+    # the minimum distance between a fingertip and the object since the last goal reset
     env._closest_fingertip_dist = torch.full(
         (env.num_envs, NUM_FINGERTIPS), -1.0, device=env.device
     )
+    # the number of succeesses in the current episode
     env._successes = torch.zeros(
         env.num_envs, dtype=torch.long, device=env.device
     )
+    # the number of consecutive steps that the object is near the goal
     env._near_goal_steps = torch.zeros(
         env.num_envs, dtype=torch.long, device=env.device
     )
 
-    # --- Tolerance curriculum state (Phase H) ---
+    # --- Tolerance curriculum state ---
     env._current_success_tolerance: float = env.cfg.termination.success_tolerance
     env._prev_episode_successes = torch.zeros(
         env.num_envs, dtype=torch.long, device=env.device
@@ -176,7 +121,12 @@ def allocate_state_buffers(env) -> None:
         (env.num_envs,), init_z, device=env.device
     )
 
-    # --- DR rolling buffers (Phase D) ---
+    # --- Per-env table surface z (randomized in _reset_table_pose) ---
+    env._table_z_per_env = torch.full(
+        (env.num_envs,), env.cfg.reset.table_reset_z, device=env.device
+    )
+
+    # --- DR rolling buffers ---
     env._object_state_queue = torch.zeros(
         env.num_envs,
         max(1, dr.object_state_delay_max),
@@ -187,6 +137,12 @@ def allocate_state_buffers(env) -> None:
         env.num_envs,
         max(1, dr.obs_delay_max),
         env.cfg.observation_space,
+        device=env.device,
+    )
+    env._action_queue = torch.zeros(
+        env.num_envs,
+        max(1, dr.action_delay_max),
+        action_space,
         device=env.device,
     )
 
@@ -213,75 +169,79 @@ def allocate_state_buffers(env) -> None:
         env.num_envs, dtype=torch.bool, device=env.device
     )
 
-    # DirectRLEnv only sets `reward_buf` after first `_get_rewards`; defensive
-    # init so first `_get_observations` (called during reset) can read it.
+    # set the reward buffer to 0
     env.reward_buf = torch.zeros(env.num_envs, device=env.device)
 
 
-# ----------------------------------------------------------------------------
-# Per-phase reset helpers
-# ----------------------------------------------------------------------------
-
-
 def _randomize_robot_dof_state(env, env_ids: torch.Tensor) -> None:
-    """Multiplicative-on-range DOF noise around default + symmetric velocity
-    noise (legacy env.py:3708-3738). Also re-seeds ``_prev_targets`` so the
-    arm velocity-delta accumulator starts from the reset DOF pose."""
+    """Reset DOF state and seed previous targets from the reset pose."""
     cfg = env.cfg.reset
     default_pos = env.robot.data.default_joint_pos[env_ids]  # (n, num_dofs)
     lower = env.robot.data.joint_pos_limits[env_ids, :, 0]
     upper = env.robot.data.joint_pos_limits[env_ids, :, 1]
 
-    delta_min = lower - default_pos
-    delta_max = upper - default_pos
-    rand = torch.rand_like(default_pos)
+    reset_scale = torch.zeros_like(default_pos)
+    reset_scale[:, env._arm_joint_ids] = cfg.reset_dof_pos_random_interval_arm
+    reset_scale[:, env._hand_joint_ids] = cfg.reset_dof_pos_random_interval_fingers
 
-    noise_coeff = torch.zeros_like(default_pos)
-    noise_coeff[:, env._arm_joint_ids] = cfg.reset_dof_pos_random_interval_arm
-    noise_coeff[:, env._hand_joint_ids] = cfg.reset_dof_pos_random_interval_fingers
-
-    joint_pos = default_pos + noise_coeff * (
-        delta_min + (delta_max - delta_min) * rand
+    sampled_pos = lower + (upper - lower) * torch.rand_like(default_pos)
+    joint_pos = torch.lerp(default_pos, sampled_pos, reset_scale).clamp(lower, upper)
+    joint_vel = torch.empty_like(default_pos).uniform_(
+        -cfg.reset_dof_vel_random_interval,
+        cfg.reset_dof_vel_random_interval,
     )
-    joint_pos = torch.clamp(joint_pos, lower, upper)
-
-    joint_vel = (torch.rand_like(default_pos) * 2.0 - 1.0) * cfg.reset_dof_vel_random_interval
 
     env.robot.write_joint_state_to_sim(joint_pos, joint_vel, env_ids=env_ids)
-
     env._prev_targets[env_ids] = joint_pos
     env._cur_targets[env_ids] = joint_pos
 
 
-def _reset_object_pose(env, env_ids: torch.Tensor) -> None:
-    """Reset object to table-relative position + configured noise + optional
-    random quat. Updates ``env._object_init_z`` for the lifting reward
-    (legacy env.py:3488-3568)."""
+def _reset_table_pose(env, env_ids: torch.Tensor) -> None:
+    """Randomize the table's surface height per env and write the new pose."""
     cfg = env.cfg.reset
     n = env_ids.numel()
     env_origins = env.scene.env_origins[env_ids]
 
-    rand = torch.rand(n, 3, device=env.device) * 2.0 - 1.0  # symmetric uniform
-    z_table_jitter = (torch.rand(n, device=env.device) * 2.0 - 1.0) * cfg.table_reset_z_range
+    dz = torch.empty(n, device=env.device).uniform_(
+        -cfg.table_reset_z_range, cfg.table_reset_z_range
+    )
+    table_z = cfg.table_reset_z + dz
+    env._table_z_per_env[env_ids] = table_z
 
     pos_local = torch.zeros(n, 3, device=env.device)
-    pos_local[:, 0] = rand[:, 0] * cfg.reset_position_noise_x
-    pos_local[:, 1] = rand[:, 1] * cfg.reset_position_noise_y
-    pos_local[:, 2] = (
-        cfg.table_reset_z
-        + cfg.table_object_z_offset
-        + z_table_jitter
-        + rand[:, 2] * cfg.reset_position_noise_z
-    )
-    pos_world = pos_local + env_origins
+    pos_local[:, 2] = table_z
+    quat = torch.tensor(
+        [1.0, 0.0, 0.0, 0.0], device=env.device, dtype=torch.float32
+    ).unsqueeze(0).expand(n, -1)
 
-    if cfg.randomize_object_rotation:
-        quat = random_orientation(n, device=env.device)
+    pose = torch.cat([pos_local + env_origins, quat], dim=-1)
+    env.table.write_root_pose_to_sim(pose, env_ids=env_ids)
+
+def _reset_object_pose(env, env_ids: torch.Tensor) -> None:
+    """Reset object pose and lifted-reward reference height."""
+    cfg = env.cfg.reset
+    n = env_ids.numel()
+    env_origins = env.scene.env_origins[env_ids]
+
+    if cfg.fixed_start_pose is not None:
+        fixed = torch.as_tensor(cfg.fixed_start_pose, device=env.device, dtype=torch.float32)
+        pos_local = fixed[:3].unsqueeze(0).expand(n, -1)
+        quat = fixed[3:].unsqueeze(0).expand(n, -1)
     else:
-        quat = torch.zeros(n, 4, device=env.device)
-        quat[:, 0] = 1.0  # identity wxyz
+        noise = torch.empty(n, 3, device=env.device).uniform_(-1.0, 1.0)
+        pos_local = torch.stack(
+            (
+                noise[:, 0] * cfg.reset_position_noise_x,
+                noise[:, 1] * cfg.reset_position_noise_y,
+                env._table_z_per_env[env_ids]
+                + cfg.table_object_z_offset
+                + noise[:, 2] * cfg.reset_position_noise_z,
+            ),
+            dim=-1,
+        )
+        quat = random_orientation(n, device=env.device)
 
-    pose = torch.cat([pos_world, quat], dim=-1)  # (n, 7)
+    pose = torch.cat([pos_local + env_origins, quat], dim=-1)
     env.object.write_root_pose_to_sim(pose, env_ids=env_ids)
     env.object.write_root_velocity_to_sim(
         torch.zeros(n, 6, device=env.device), env_ids=env_ids
@@ -291,14 +251,7 @@ def _reset_object_pose(env, env_ids: torch.Tensor) -> None:
 
 
 def _reset_goal_pose(env, env_ids: torch.Tensor, mode: str) -> None:
-    """Resample the goal pose and push it to ``env.goal_viz``.
-
-    ``mode="absolute"`` samples fresh in the scaled workspace box;
-    ``mode="delta"`` perturbs the current goal (chain continuation).
-
-    Debug shortcut: if ``cfg.fixed_goal_pose`` is set, every env_id gets
-    that exact env-local pose, no sampling.
-    """
+    """Resample the goal pose and write it to GoalViz."""
     cfg = env.cfg.reset
     n = env_ids.numel()
     env_origins = env.scene.env_origins[env_ids]
@@ -323,73 +276,54 @@ def _reset_goal_pose(env, env_ids: torch.Tensor, mode: str) -> None:
             maxs=cfg.target_volume_maxs,
             scale=cfg.target_volume_region_scale,
         )
-    else:  # "absolute" or anything unrecognized
+    elif mode == "absolute":
         new_pos_local, new_quat = sample_absolute_goal_pose(
             mins=cfg.target_volume_mins,
             maxs=cfg.target_volume_maxs,
             scale=cfg.target_volume_region_scale,
             n_envs=n,
             device=env.device,
-            randomize_rotation=True,
         )
+    else:
+        raise ValueError(f"unknown goal sampling mode: {mode}")
 
     pose = torch.cat([new_pos_local + env_origins, new_quat], dim=-1)
     env.goal_viz.write_root_pose_to_sim(pose, env_ids=env_ids)
 
 
-# ----------------------------------------------------------------------------
-# Reset orchestrators (public)
-# ----------------------------------------------------------------------------
-
-
-def reset_goal_trackers(env, env_ids: torch.Tensor) -> None:
-    """Mid-episode reset: clear per-target trackers + resample goal pose.
-
-    Called on goal-hit from ``compute_terminations``. Uses the configured
-    ``cfg.reset.goal_sampling_type`` so delta-mode chains from the previous
-    goal while absolute-mode samples fresh.
-    """
+def _clear_goal_trackers(env, env_ids: torch.Tensor) -> None:
     env._closest_keypoint_max_dist[env_ids] = -1.0
     env._closest_fingertip_dist[env_ids] = -1.0
     env._near_goal_steps[env_ids] = 0
+
+
+def reset_goal_trackers(env, env_ids: torch.Tensor) -> None:
+    """Clear per-goal trackers and sample the next goal."""
+    _clear_goal_trackers(env, env_ids)
     _reset_goal_pose(env, env_ids, mode=env.cfg.reset.goal_sampling_type)
 
 
 def reset_env_state(env, env_ids: torch.Tensor) -> None:
-    """Full per-env reset (after ``super()._reset_idx``).
-
-    Order:
-      1. DOF noise + object pose + goal pose (absolute).
-      2. Capture ``_prev_episode_successes`` BEFORE zeroing ``_successes``
-         (needed by the tolerance curriculum).
-      3. Clear per-env trackers.
-      4. Zero DR queues + wrench state.
-      5. Re-sample per-env DR priors.
-    """
+    """Full per-env reset after ``super()._reset_idx``."""
     n = env_ids.numel()
 
     _randomize_robot_dof_state(env, env_ids)
+    _reset_table_pose(env, env_ids)
     _reset_object_pose(env, env_ids)
     _reset_goal_pose(env, env_ids, mode="absolute")  # full reset → always absolute
 
-    # Capture ending episode's success count for curriculum (legacy env.py:3630).
     env._prev_episode_successes[env_ids] = env._successes[env_ids]
 
-    # Per-env trackers.
+    _clear_goal_trackers(env, env_ids)
     env._lifted_object[env_ids] = False
-    env._closest_keypoint_max_dist[env_ids] = -1.0
-    env._closest_fingertip_dist[env_ids] = -1.0
     env._successes[env_ids] = 0
-    env._near_goal_steps[env_ids] = 0
 
-    # DR rolling buffers + wrench state.
     env._action_queue[env_ids] = 0.0
     env._obs_queue[env_ids] = 0.0
     env._object_state_queue[env_ids] = 0.0
     env._object_forces[env_ids] = 0.0
     env._object_torques[env_ids] = 0.0
 
-    # Re-sample per-env DR priors.
     dr = env.cfg.domain_randomization
     env._random_force_prob[env_ids] = sample_log_uniform(
         dr.force_prob_range, n
