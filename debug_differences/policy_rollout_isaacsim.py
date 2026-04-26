@@ -139,9 +139,8 @@ def main() -> None:
     print("=" * 78)
     # ---- end DIAG ----
 
-    # Optional camera sensor — same pose used by sine_hand_isaacsim.py /
-    # eval_simtoolreal.py (matches legacy isaacgym cam: pos=(0,-1,1.03),
-    # target=(0,0,0.53)).
+    # Optional camera sensor matching the legacy IsaacGym camera pose:
+    # pos=(0,-1,1.03), target=(0,0,0.53).
     camera = None
     frames: list = []
     if args.video:

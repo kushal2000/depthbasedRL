@@ -108,8 +108,8 @@ def main() -> None:
     inner = env.unwrapped
     inner._replay_target_lab_order = None  # set per-step below
 
-    # Optional camera sensor for video — same pose used by eval_simtoolreal.py
-    # (matches legacy isaacgym cam: pos=(0,-1,1.03), target=(0,0,0.53)).
+    # Optional camera sensor for video matching the legacy IsaacGym camera pose:
+    # pos=(0,-1,1.03), target=(0,0,0.53).
     camera = None
     frames: list = []
     if args.video:

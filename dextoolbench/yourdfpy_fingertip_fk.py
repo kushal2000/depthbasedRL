@@ -11,9 +11,9 @@ Two modes:
                  Tells us whether the 2mm drift is constant in world or
                  varies with arm orientation.
 
-The .npz files are produced by:
-  - dextoolbench/eval_simtoolreal_base.py    (legacy / Isaac Gym)
-  - isaacsimenvs/tasks/simtoolreal/eval_simtoolreal.py --obs_dump_npz ...
+The legacy .npz file is produced by dextoolbench/eval_simtoolreal_base.py.
+The Isaac Lab comparison dump was produced by the retired DirectRLEnv eval
+script and is kept as a historical debugging input.
 """
 
 from __future__ import annotations

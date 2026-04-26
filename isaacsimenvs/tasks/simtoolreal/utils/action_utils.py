@@ -34,11 +34,9 @@ def apply_action_pipeline(env, actions: torch.Tensor) -> None:
     Reads/writes ``env._action_queue``, ``env._prev_targets``, ``env._cur_targets``.
     Uses the arm vs hand joint id masks cached in Phase C.
     """
-    # Replay override — eval_simtoolreal.py --replay_targets_npz path. Caller
-    # writes a Lab-order target to env._replay_target_lab_order; we skip the
-    # action pipeline and push that straight into _cur_targets so
-    # _apply_action sends it verbatim to PhysX. Used to isolate PhysX 4 vs
-    # PhysX 5 physics response from action-pipeline math.
+    # Replay override for debugging: caller writes a Lab-order target to
+    # env._replay_target_lab_order; we skip the action pipeline and push that
+    # straight into _cur_targets so _apply_action sends it verbatim to PhysX.
     replay_target = getattr(env, "_replay_target_lab_order", None)
     if replay_target is not None:
         env._cur_targets[:] = replay_target

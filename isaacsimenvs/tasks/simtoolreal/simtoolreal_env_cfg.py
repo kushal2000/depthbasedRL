@@ -328,9 +328,9 @@ class SimToolRealEnvCfg(DirectRLEnvCfg):
     decimation: int = 2  # 2 physics substeps per policy step
     episode_length_s: float = 10.0  # 600 policy steps * 2 * (1/120) = 10s
     action_space: int = 29  # 7-DOF IIWA + 22-DOF SHARPA hand
-    # Obs/state sizes are derived from obs.obs_list / obs.state_list in Phase D.
-    # Placeholder matches the 140-dim pretrained-policy convention used by
-    # play_simtoolreal.py so the configclass is instantiable today.
+    # Obs/state sizes are derived from obs.obs_list / obs.state_list at env init.
+    # Placeholder keeps the configclass instantiable before the env computes the
+    # final spaces.
     observation_space: int = 140
     state_space: int = 140
 

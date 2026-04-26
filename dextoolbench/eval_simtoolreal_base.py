@@ -1,11 +1,11 @@
 """Run the pretrained policy against the *base* SimToolReal env (legacy
 isaacgymenvs path) and dump per-step obs / joint state / action to a .npz.
 
-Pairs with isaacsimenvs/tasks/simtoolreal/eval_simtoolreal.py — same policy,
+Historically paired with the retired DirectRLEnv eval script: same policy,
 same procedural handle_head pool, but different physics backend (Isaac Gym
-vs Isaac Lab/Sim). Diff the resulting npz files to surface wiring bugs in
-the new port (e.g., joint-pos normalization, frame conventions, obs
-ordering, missing transforms).
+vs Isaac Lab/Sim). Diffing those npz files surfaced wiring bugs in the port
+(e.g., joint-pos normalization, frame conventions, obs ordering, missing
+transforms).
 
     python dextoolbench/eval_simtoolreal_base.py \\
         --num_steps 240 --output_npz /tmp/simtoolreal_base_obs.npz
@@ -14,8 +14,8 @@ Notes:
 - Built from dextoolbench/eval.py — strips viser, fabrica object overrides,
   fixedGoalStates, video recording. Keeps the legacy DR-off override pattern
   so initial state and step dynamics are deterministic per seed.
-- Uses the SAME RlPlayer + checkpoint as eval_simtoolreal.py
-  (pretrained_policy/model.pth) so the action stream is identical given
+- Uses the same RlPlayer + pretrained_policy/model.pth checkpoint as the
+  retired Isaac Lab comparison path, so the action stream is identical given
   identical obs.
 - Exits after num_steps regardless of done — we want a fixed-length trace
   even if the legacy env auto-resets.
@@ -94,9 +94,7 @@ class Args:
 
     fixed_goal_pose: Optional[Tuple[float, float, float, float, float, float, float]] = None
     """Pin the goal to a single env-local pose (x, y, z, qx, qy, qz, qw) — xyzw
-    quaternion convention (matches isaacgym's root_state_tensor). Pairs with
-    isaacsimenvs/.../eval_simtoolreal.py's `--fixed_goal_pose` (same xyzw CLI;
-    that side converts to wxyz internally)."""
+    quaternion convention (matches isaacgym's root_state_tensor)."""
 
     video_path: Optional[Path] = None
     """If set, attach a camera sensor matching the sim eval rig (pose
@@ -181,9 +179,8 @@ def main():
     env = _build_env(args)
     device = "cuda" if torch.cuda.is_available() else "cpu"
 
-    # Optional camera sensor — same pose + intrinsics as the sim Camera
-    # in isaacsimenvs/.../eval_simtoolreal.py so the two mp4s are
-    # byte-comparable. Skipped entirely when video_path is None.
+    # Optional camera sensor matching the historical Isaac Lab comparison rig.
+    # Skipped entirely when video_path is None.
     camera_handle = None
     cam_props = None
     frames: list = []

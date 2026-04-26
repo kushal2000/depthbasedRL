@@ -1,9 +1,9 @@
 """Diff per-step obs traces from the legacy isaacgym SimToolReal env vs the
 new isaacsimenvs (Isaac Lab) SimToolReal env.
 
-Inputs are the .npz files produced by:
-  - dextoolbench/eval_simtoolreal_base.py    (legacy isaacgym)
-  - isaacsimenvs/tasks/simtoolreal/eval_simtoolreal.py --obs_dump_npz ...
+Inputs are legacy .npz dumps produced by dextoolbench/eval_simtoolreal_base.py
+and historical Isaac Lab comparison dumps from the retired DirectRLEnv eval
+script.
 
 Both runs use the same pretrained policy and the same DR-off configuration,
 so initial-state and step dynamics differences flag *port-level* bugs, not

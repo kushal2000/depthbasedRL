@@ -1,11 +1,7 @@
 """SimToolReal task registration.
 
 Registers ``Isaacsimenvs-SimToolReal-Direct-v0`` with the gymnasium registry
-so the Cartpole play/train pattern extends uniformly to this task. The env
-class (``simtoolreal_env.py:SimToolRealEnv``) is a DirectRLEnv stub — the
-training hooks land in Phases B–H (see
-``.claude/plans/we-are-currently-in-twinkling-bengio.md``). The
-pretrained-policy rollout runs via ``play_simtoolreal.py``, not ``gym.make``.
+for the DirectRLEnv training path.
 
 Entry points:
 - ``env_cfg_entry_point``           → SimToolRealEnvCfg (typed defaults in code)

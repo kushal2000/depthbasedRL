@@ -131,8 +131,8 @@ def main() -> None:
     )
     env.gym.refresh_dof_state_tensor(env.sim)
 
-    # Optional camera sensor for video — same pose as eval_simtoolreal.py /
-    # legacy env.py:397 viewer (cam_pos=(0,-1,1.03), cam_target=(0,0,0.53)).
+    # Optional camera sensor for video matching legacy env.py:397 viewer
+    # (cam_pos=(0,-1,1.03), cam_target=(0,0,0.53)).
     camera_handle = None
     frames: list = []
     if args.video:

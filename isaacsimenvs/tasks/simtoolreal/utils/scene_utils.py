@@ -83,10 +83,9 @@ PALM_BODY_NAME = "iiwa14_link_7"
 # Fingertip body = the merged DP link. Both Isaac Lab and isaacgym
 # collapse the DP / elastomer / fingertip chain when merge=True (the
 # default we keep), so DP holds the merged body. There is a small (~2mm)
-# parser drift between the two sims on the merged body's anchor — see
-# dextoolbench/diff_simtoolreal_obs.py and STATUS.md. Switching merge=False
-# bypasses that drift but creates a worse problem (different inertia
-# aggregation between sims).
+# parser drift between the two sims on the merged body's anchor. Switching
+# merge=False bypasses that drift but creates a worse problem: different
+# inertia aggregation between sims.
 FINGERTIP_BODY_REGEX = "left_(index|middle|ring|thumb|pinky)_DP"
 FINGERTIP_LINK_NAMES: tuple[str, ...] = (
     "left_index_DP",
