@@ -64,6 +64,14 @@ WANDB_PROJECT="isaacsimenvs"
 WANDB_GROUP="simtoolreal_pretraining"
 EXPERIMENT_TAG="simtoolreal_pretraining"
 
+# ── Pose-only interactive viewer ─────────────────────────────
+# Writes tensor-state → Three.js HTML/W&B artifacts. This does not use Isaac
+# cameras, Replicator, RTX sensors, or --enable_cameras.
+CAPTURE_VIEWER_LEN=600
+CAPTURE_VIEWER_INTERVAL=6000
+CAPTURE_VIEWER_ENV_ID=0
+CAPTURE_VIEWER_WANDB_KEY="interactive_viewer"
+
 # ╔══════════════════════════════════════════════════════════════╗
 # ║         END CONFIG — generally don't edit below here        ║
 # ╚══════════════════════════════════════════════════════════════╝
@@ -134,8 +142,12 @@ mkdir -p "$OMNI_KIT_CACHE_PATH"
 python -u isaacsimenvs/train.py \
     --task "$TASK_ID" \
     --agent "$AGENT_KEY" \
-    --headless --enable_cameras \
-    --capture_video --video_interval 100 \
+    --headless \
+    --capture_viewer \
+    --capture_viewer_len "$CAPTURE_VIEWER_LEN" \
+    --capture_viewer_interval "$CAPTURE_VIEWER_INTERVAL" \
+    --capture_viewer_env_id "$CAPTURE_VIEWER_ENV_ID" \
+    --capture_viewer_wandb_key "$CAPTURE_VIEWER_WANDB_KEY" \
     --wandb_activate \
     --wandb_project "$WANDB_PROJECT" \
     --wandb_group "$WANDB_GROUP" \

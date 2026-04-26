@@ -16,9 +16,9 @@ Pipeline:
 
 CLI shape:
     python isaacsimenvs/train.py \
-        --task Isaacsimenvs-Cartpole-Direct-v0 \
-        --agent rl_games_cfg_entry_point \        # or rl_games_sapg_cfg_entry_point
-        --headless --enable_cameras --capture_video \
+        --task Isaacsimenvs-SimToolReal-Direct-v0 \
+        --agent rl_games_sapg_cfg_entry_point \   # or rl_games_cfg_entry_point
+        --headless --capture_viewer \
         --wandb_activate --wandb_project X --wandb_name Y \
         env.scene.num_envs=4096 \
         agent.params.config.max_epochs=200 \
@@ -56,6 +56,27 @@ def main() -> None:
     parser.add_argument("--video_interval", type=int, default=10)
     parser.add_argument("--video_capture_frames", type=int, default=120)
     parser.add_argument("--video_fps", type=int, default=30)
+    # --- Pose-only interactive HTML viewer (no cameras / no renderer) ---
+    parser.add_argument(
+        "--capture_viewer",
+        action="store_true",
+        help="Write periodic pose-only interactive HTML viewers; does not enable Isaac cameras.",
+    )
+    parser.add_argument("--capture_viewer_len", type=int, default=600)
+    parser.add_argument("--capture_viewer_interval", type=int, default=6000)
+    parser.add_argument("--capture_viewer_env_id", type=int, default=0)
+    parser.add_argument("--capture_viewer_wandb_key", default="interactive_viewer")
+    parser.add_argument(
+        "--capture_viewer_github_raw_base",
+        default="",
+        help="GitHub raw base URL used by the browser to fetch robot URDF meshes.",
+    )
+    parser.add_argument(
+        "--capture_viewer_url_check",
+        choices=("skip", "warn", "error"),
+        default="skip",
+        help="Whether to HEAD-check the robot URDF URL before writing viewer HTML.",
+    )
     # --- wandb ---
     parser.add_argument("--wandb_activate", action="store_true")
     parser.add_argument("--wandb_project", default="isaacsimenvs")
@@ -120,6 +141,22 @@ def main() -> None:
                 step_trigger=lambda step: step % args_cli.video_interval == 0,
                 video_length=args_cli.video_capture_frames,
                 disable_logger=True,
+            )
+
+        if args_cli.capture_viewer:
+            from pathlib import Path
+
+            from isaacsimenvs.tasks.simtoolreal.pose_viewer import SimToolRealPoseViewerWrapper
+
+            env = SimToolRealPoseViewerWrapper(
+                env,
+                output_dir=Path(hydra_run_dir) / "interactive_viewer",
+                capture_len=args_cli.capture_viewer_len,
+                capture_interval=args_cli.capture_viewer_interval,
+                env_id=args_cli.capture_viewer_env_id,
+                wandb_key=args_cli.capture_viewer_wandb_key,
+                github_raw_base=args_cli.capture_viewer_github_raw_base,
+                url_check=args_cli.capture_viewer_url_check,
             )
 
         # Clip bounds live in the rl_games YAML (params.env.*). Default to

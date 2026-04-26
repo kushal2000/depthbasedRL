@@ -704,14 +704,19 @@ def _build_object_scale_tensor(env, object_scales_normalized, num_object_usds: i
     env._object_scale_per_env = torch.zeros(
         num_envs, 3, device=env.device, dtype=torch.float32
     )
+    env._object_asset_index_per_env = torch.zeros(
+        num_envs, device=env.device, dtype=torch.long
+    )
     for source_idx, obj_path in enumerate(object_prim_paths):
         env_segment = obj_path.rsplit("/", 2)[-2]  # ".../env_K/Object" -> "env_K"
         env_id = int(env_segment.removeprefix("env_"))
+        asset_index = source_idx % num_object_usds
         env._object_scale_per_env[env_id] = torch.tensor(
-            object_scales_normalized[source_idx % num_object_usds],
+            object_scales_normalized[asset_index],
             device=env.device,
             dtype=torch.float32,
         )
+        env._object_asset_index_per_env[env_id] = asset_index
 
 
 # ----------------------------------------------------------------------------
@@ -754,6 +759,7 @@ def setup_scene(env) -> None:
         out_dir=env._tmp_asset_dir,
         shuffle=assets_cfg.shuffle_assets,
     )
+    env._object_urdf_paths = [str(path) for path in urdf_paths]
     _scene_debug(
         f"generated {len(urdf_paths)} object URDFs in {env._tmp_asset_dir}",
         start_time=setup_t0,
