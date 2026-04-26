@@ -145,6 +145,15 @@ def object_urdf_text_for_env(env, env_id: int) -> str:
     return urdf_path.read_text(encoding="utf-8")
 
 
+def table_urdf_text_for_env(env, env_id: int) -> str:
+    """Return the table URDF text assigned to one env."""
+
+    table_paths = getattr(env, "_table_urdf_paths", None)
+    if table_paths:
+        return Path(table_paths[env_id % len(table_paths)]).read_text(encoding="utf-8")
+    return TABLE_URDF_PATH.read_text(encoding="utf-8")
+
+
 def capture_pose_viewer_frame(env, env_id: int) -> dict[str, Any]:
     """Capture one env-local frame from a live SimToolRealEnv."""
 
@@ -180,6 +189,7 @@ def build_pose_viewer_html(
     *,
     frames: list[dict[str, Any]],
     object_urdf_text: str,
+    table_urdf_text: str,
     github_raw_base: str | None = None,
     url_check: str = "skip",
 ) -> str:
@@ -199,7 +209,7 @@ def build_pose_viewer_html(
     timestamps = np.arange(len(frames), dtype=np.float32) / 60.0
     robots = [
         make_url_robot(name="robot", urdf_url=robot_urdf_url, animated=True),
-        make_embedded_robot(name="table", urdf_text=TABLE_URDF_PATH.read_text(encoding="utf-8")),
+        make_embedded_robot(name="table", urdf_text=table_urdf_text),
         make_embedded_robot(name="object", urdf_text=object_urdf_text),
         make_embedded_robot(
             name="goal",
@@ -255,6 +265,7 @@ class SimToolRealPoseViewerWrapper(gym.Wrapper):
         self.github_raw_base = github_raw_base
         self.url_check = url_check
         self._object_urdf_text = object_urdf_text_for_env(inner, self.env_id)
+        self._table_urdf_text = table_urdf_text_for_env(inner, self.env_id)
 
         self._step = 0
         self._capture_index = 0
@@ -299,6 +310,7 @@ class SimToolRealPoseViewerWrapper(gym.Wrapper):
         html_text = build_pose_viewer_html(
             frames=frames,
             object_urdf_text=self._object_urdf_text,
+            table_urdf_text=self._table_urdf_text,
             github_raw_base=self.github_raw_base,
             url_check=self.url_check,
         )

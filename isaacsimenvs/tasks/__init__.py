@@ -6,6 +6,7 @@ to expose all task ids to ``gym.make`` / ``gym.spec``.
 """
 
 from . import cartpole  # side effect: gym.register("Isaacsimenvs-Cartpole-Direct-v0", ...)
+from . import peg_in_hole  # side effect: gym.register("Isaacsimenvs-PegInHole-Direct-v0", ...)
 from . import simtoolreal  # side effect: gym.register("Isaacsimenvs-SimToolReal-Direct-v0", ...)
 
-__all__ = ["cartpole", "simtoolreal"]
+__all__ = ["cartpole", "peg_in_hole", "simtoolreal"]
