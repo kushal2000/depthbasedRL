@@ -96,13 +96,31 @@ def main() -> None:
         # something we expect in the task YAML.
         env_cfg.sim.device = args_cli.sim_device
 
-        env = gym.make(args_cli.task, cfg=env_cfg)
+        # render_mode="rgb_array" makes DirectRLEnv.render() lazily create a
+        # single omni.replicator render_product at cfg.viewer.cam_prim_path —
+        # one buffer, num_envs-independent. The custom attach_record_camera
+        # path we used before created a Camera sensor and called sim.reset()
+        # *after* env init, which momentarily doubled the PhysX scene state
+        # (~400 GB at 24576 envs) and OOM'd the slurm cgroup. The Lab-
+        # canonical pattern is render_mode + gym.wrappers.RecordVideo (see
+        # IsaacLab tests/test_record_video.py).
+        env = gym.make(
+            args_cli.task,
+            cfg=env_cfg,
+            render_mode="rgb_array" if args_cli.capture_video else None,
+        )
 
         if args_cli.capture_video:
-            from isaacsimenvs.utils.video_capture import attach_record_camera
+            from pathlib import Path
 
-            # gym.make wraps the DirectRLEnv; attach_record_camera pokes .scene.
-            attach_record_camera(env.unwrapped)
+            video_folder = str(Path(hydra_run_dir) / "videos")
+            env = gym.wrappers.RecordVideo(
+                env,
+                video_folder=video_folder,
+                step_trigger=lambda step: step % args_cli.video_interval == 0,
+                video_length=args_cli.video_capture_frames,
+                disable_logger=True,
+            )
 
         # Clip bounds live in the rl_games YAML (params.env.*). Default to
         # +inf if absent so a task without clip YAML just runs unbounded —
@@ -136,22 +154,6 @@ def main() -> None:
                 }
             )
             observers.append(WandbAlgoObserver(wandb_cfg))
-
-        if args_cli.capture_video:
-            from pathlib import Path
-            from isaacsimenvs.utils.video_capture import WandbVideoObserver
-
-            exp_name = agent_cfg["params"]["config"]["name"]
-            video_dir = Path(hydra_run_dir) / exp_name / "videos"
-            observers.append(
-                WandbVideoObserver(
-                    env.unwrapped,
-                    video_interval=args_cli.video_interval,
-                    capture_frames=args_cli.video_capture_frames,
-                    video_fps=args_cli.video_fps,
-                    video_dir=video_dir,
-                )
-            )
 
         runner = Runner(MultiObserver(observers)) if observers else Runner()
         # Co-locate rl_games artifacts (checkpoints, summaries) with the Hydra

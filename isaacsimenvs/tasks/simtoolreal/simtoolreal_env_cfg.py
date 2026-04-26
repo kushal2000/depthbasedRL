@@ -31,7 +31,7 @@ all DirectRLEnv hooks raise NotImplementedError. Phases B–H populate them.
 
 from __future__ import annotations
 
-from isaaclab.envs import DirectRLEnvCfg
+from isaaclab.envs import DirectRLEnvCfg, ViewerCfg
 from isaaclab.scene import InteractiveSceneCfg
 from isaaclab.sim import PhysxCfg, SimulationCfg
 from isaaclab.utils import configclass
@@ -336,6 +336,16 @@ class SimToolRealEnvCfg(DirectRLEnvCfg):
 
     # --- Isaac Lab base fields ---
     sim: SimulationCfg = _default_sim_cfg()
+    # Viewer is the camera DirectRLEnv.render('rgb_array') captures from. One
+    # render product (omni.replicator) is lazily allocated at this prim path
+    # on first render() call — single buffer, num_envs-independent. eye/lookat
+    # are world-frame; with replicate_physics=False the central env sits near
+    # world origin at large num_envs, so framing the table/robot here works.
+    viewer: ViewerCfg = ViewerCfg(
+        eye=(0.5, -1.5, 1.2),
+        lookat=(0.0, 0.4, 0.5),
+        resolution=(640, 480),
+    )
     scene: InteractiveSceneCfg = InteractiveSceneCfg(
         num_envs=8192,
         env_spacing=1.2,
