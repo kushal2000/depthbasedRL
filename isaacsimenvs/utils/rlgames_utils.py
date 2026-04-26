@@ -14,7 +14,6 @@ from collections import deque
 import numpy as np
 import torch
 from rl_games.common.algo_observer import AlgoObserver
-from rl_games.common.custom_utils import remove_envs_from_info
 
 
 def _flatten_dict(d: dict, prefix: str = "", separator: str = "/") -> dict:
@@ -60,6 +59,46 @@ def _value_at(value, index: int) -> float:
     return float(value)
 
 
+def _has_env_axis(value, boundary: int) -> bool:
+    if isinstance(value, torch.Tensor):
+        return value.ndim > 0 and value.shape[0] > boundary
+    if isinstance(value, np.ndarray):
+        return value.ndim > 0 and value.shape[0] > boundary
+    if isinstance(value, (list, tuple)):
+        return len(value) > boundary
+    return False
+
+
+def _slice_env_axis(value, start: int):
+    if isinstance(value, tuple):
+        return value[start:]
+    return value[start:]
+
+
+def _remove_env_boundary_from_info(infos: dict, boundary: int) -> dict:
+    """Drop SAPG non-leader env stats while preserving scalar log values."""
+    trimmed = {}
+    for key, value in infos.items():
+        if isinstance(value, dict):
+            trimmed[key] = _remove_env_boundary_from_info(value, boundary)
+            continue
+
+        if not _has_env_axis(value, boundary):
+            trimmed[key] = value
+            continue
+
+        if key in {"successes", "closest_keypoint_max_dist"}:
+            block_size = len(value) - boundary
+            if block_size > 0 and len(value) % block_size == 0:
+                for i in range(len(value) // block_size):
+                    trimmed[f"{key}_per_block/block_{i}"] = value[
+                        i * block_size : (i + 1) * block_size
+                    ]
+        trimmed[key] = _slice_env_axis(value, boundary)
+
+    return trimmed
+
+
 class EnvStatsAlgoObserver(AlgoObserver):
     """Log env-provided episode stats through rl_games' summary writer."""
 
@@ -83,7 +122,7 @@ class EnvStatsAlgoObserver(AlgoObserver):
 
         ignore_env_boundary = kwargs.get("ignore_env_boundary", 0)
         if ignore_env_boundary > 0:
-            infos = remove_envs_from_info(copy.deepcopy(infos), ignore_env_boundary)
+            infos = _remove_env_boundary_from_info(copy.deepcopy(infos), ignore_env_boundary)
             done_indices = done_indices[done_indices >= ignore_env_boundary] - ignore_env_boundary
 
         done_indices = done_indices.reshape(-1).detach().cpu().tolist()
