@@ -33,6 +33,7 @@ SEED=42
 # expl_*, fixed_sigma=coef_cond) are already baked into
 # cfg/train/SimToolRealSAPG.yaml so no CLI override needed.
 GPU_MAX_RIGID_CONTACT_COUNT=16777216
+GPU_MAX_RIGID_PATCH_COUNT=8388608
 
 # ── Domain randomization ─────────────────────────────────────
 # Defaults below match the SimToolReal cfg (`simtoolreal_env_cfg.py`).
@@ -154,6 +155,7 @@ python -u isaacsimenvs/train.py \
     --wandb_name "$EXPERIMENT_NAME" \
     env.scene.num_envs=$NUM_ENVS \
     env.sim.physx.gpu_max_rigid_contact_count=$GPU_MAX_RIGID_CONTACT_COUNT \
+    env.sim.physx.gpu_max_rigid_patch_count=$GPU_MAX_RIGID_PATCH_COUNT \
     env.domain_randomization.force_scale=$FORCE_SCALE \
     env.domain_randomization.torque_scale=$TORQUE_SCALE \
     env.domain_randomization.use_obs_delay=$USE_OBS_DELAY \
