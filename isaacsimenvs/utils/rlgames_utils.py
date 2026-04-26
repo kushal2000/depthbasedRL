@@ -40,6 +40,14 @@ def _as_float(value) -> float:
     return float(value)
 
 
+def _mean_float(value) -> float:
+    if isinstance(value, torch.Tensor):
+        return float(value.float().mean().detach().cpu().item())
+    if isinstance(value, np.ndarray):
+        return float(value.mean())
+    return float(np.mean(value))
+
+
 def _value_at(value, index: int) -> float:
     if isinstance(value, torch.Tensor):
         if value.ndim > 0:
@@ -87,6 +95,7 @@ class EnvStatsAlgoObserver(AlgoObserver):
             for key, value in _flatten_dict(infos).items()
             if _is_scalar(value)
         }
+        self._process_vector_summaries(infos, tag="successes")
 
     def _process_episode_cumulative(self, terms, done_indices: list[int]) -> None:
         if not terms:
@@ -117,6 +126,24 @@ class EnvStatsAlgoObserver(AlgoObserver):
                 self.episode_final_avg[key] = deque([], maxlen=self.algo.games_to_track)
             for done_idx in done_indices:
                 self.episode_final_avg[key].append(_value_at(value, done_idx))
+
+    def _process_vector_summaries(self, infos, *, tag: str) -> None:
+        if tag not in infos:
+            return
+        value = infos[tag]
+        self.direct_info[tag] = _mean_float(value)
+        if isinstance(value, torch.Tensor):
+            self.direct_info[f"{tag}_median"] = float(torch.median(value.float()).detach().cpu().item())
+            self.direct_info[f"{tag}_max"] = float(value.max().detach().cpu().item())
+        else:
+            array = np.asarray(value)
+            self.direct_info[f"{tag}_median"] = float(np.median(array))
+            self.direct_info[f"{tag}_max"] = float(np.max(array))
+
+        prefix = f"{tag}_per_block/"
+        for key, value in _flatten_dict(infos).items():
+            if key.startswith(prefix):
+                self.direct_info[key] = _mean_float(value)
 
     def after_clear_stats(self):
         self.episode_cumulative_avg.clear()
