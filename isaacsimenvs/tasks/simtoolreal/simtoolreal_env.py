@@ -13,7 +13,12 @@ from isaaclab.envs import DirectRLEnv
 from .simtoolreal_env_cfg import SimToolRealEnvCfg
 from .utils.action_utils import apply_action_pipeline, apply_wrench_dr
 from .utils.logging_utils import log_step_metrics
-from .utils.obs_utils import build_observations, compute_intermediate_values, compute_obs_dim
+from .utils.obs_utils import (
+    build_observations,
+    build_student_observations,
+    compute_intermediate_values,
+    compute_obs_dim,
+)
 from .utils.reset_utils import allocate_state_buffers, reset_env_state
 from .utils.reward_utils import compute_rewards
 from .utils.scene_utils import apply_physx_material_properties, setup_scene
@@ -70,3 +75,7 @@ class SimToolRealEnv(DirectRLEnv):
 
     def _get_observations(self) -> dict[str, torch.Tensor]:
         return build_observations(self)
+
+    def get_student_obs(self) -> dict[str, torch.Tensor]:
+        """Return opt-in student observations for distillation code."""
+        return build_student_observations(self)

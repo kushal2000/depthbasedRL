@@ -334,6 +334,117 @@ def build_observations(env) -> dict[str, torch.Tensor]:
     return {"policy": policy_tensor, "critic": state_tensor}
 
 
+def _student_proprio_dict(env) -> dict[str, torch.Tensor]:
+    joint_pos, joint_vel, prev_targets_canon = _canonical_joint_obs(env)
+    return {
+        "joint_pos": joint_pos,
+        "joint_vel": joint_vel,
+        "prev_action_targets": prev_targets_canon,
+    }
+
+
+def _apply_student_tensor_delay(
+    env,
+    values: torch.Tensor,
+    *,
+    queue_attr: str,
+    delay_max: int,
+    enabled: bool,
+) -> torch.Tensor:
+    if not enabled or delay_max <= 0:
+        return values
+
+    flat_values = values.reshape(env.num_envs, -1)
+    queue_len = max(1, int(delay_max))
+    queue = getattr(env, queue_attr, None)
+    expected_shape = (env.num_envs, queue_len, flat_values.shape[-1])
+    if (
+        queue is None
+        or tuple(queue.shape) != expected_shape
+        or queue.device != flat_values.device
+        or queue.dtype != flat_values.dtype
+    ):
+        queue = flat_values.unsqueeze(1).expand(-1, queue_len, -1).clone()
+
+    queue, delayed = _sample_delay(
+        queue,
+        flat_values,
+        env,
+        flush=_episode_start(env),
+    )
+    setattr(env, queue_attr, queue)
+    return delayed.reshape_as(values)
+
+
+def _apply_student_bundle_delay(
+    env,
+    student_obs: dict[str, torch.Tensor],
+) -> dict[str, torch.Tensor]:
+    cfg = env.cfg.student_obs
+    if not cfg.use_student_obs_delay or cfg.student_obs_delay_max <= 0:
+        return student_obs
+
+    keys = [key for key in ("image", "proprio") if key in student_obs]
+    flat_parts = [student_obs[key].reshape(env.num_envs, -1) for key in keys]
+    sizes = [part.shape[-1] for part in flat_parts]
+    packed = torch.cat(flat_parts, dim=-1)
+    delayed = _apply_student_tensor_delay(
+        env,
+        packed,
+        queue_attr="_student_obs_queue",
+        delay_max=int(cfg.student_obs_delay_max),
+        enabled=True,
+    )
+
+    out = dict(student_obs)
+    offset = 0
+    for key, size in zip(keys, sizes):
+        tensor = student_obs[key]
+        out[key] = delayed[:, offset : offset + size].reshape_as(tensor)
+        offset += size
+    return out
+
+
+def build_student_observations(env) -> dict[str, torch.Tensor]:
+    """Assemble optional image/proprio observations for distillation students."""
+    cfg = env.cfg.student_obs
+    if not cfg.enabled:
+        raise RuntimeError(
+            "cfg.student_obs.enabled is false; student observations are disabled."
+        )
+
+    proprio_fields = tuple(cfg.proprio_list)
+    proprio_dict = _student_proprio_dict(env)
+    unsupported = [field for field in proprio_fields if field not in proprio_dict]
+    if unsupported:
+        raise ValueError(
+            f"Unsupported cfg.student_obs.proprio_list fields: {unsupported}. "
+            f"Supported fields: {sorted(proprio_dict)}."
+        )
+
+    if proprio_fields:
+        proprio = torch.cat(
+            [proprio_dict[field].reshape(env.num_envs, -1) for field in proprio_fields],
+            dim=-1,
+        )
+    else:
+        proprio = torch.empty(env.num_envs, 0, device=env.device)
+
+    student_obs = {"proprio": proprio}
+    if cfg.image_enabled:
+        from .scene_utils import read_student_camera_image
+
+        image = read_student_camera_image(env)
+        student_obs["image"] = _apply_student_tensor_delay(
+            env,
+            image,
+            queue_attr="_student_camera_queue",
+            delay_max=int(cfg.camera_delay_max),
+            enabled=bool(cfg.use_camera_delay),
+        )
+    return _apply_student_bundle_delay(env, student_obs)
+
+
 __all__ = [
     "NUM_JOINTS",
     "NUM_FINGERTIPS",
@@ -343,4 +454,5 @@ __all__ = [
     "compute_obs_dim",
     "compute_intermediate_values",
     "build_observations",
+    "build_student_observations",
 ]

@@ -20,6 +20,8 @@ from isaacsimenvs.tasks.simtoolreal.utils.scene_utils import (
     _robot_joint_drive_cfg,
     build_rigid_object_cfg,
     build_robot_articulation_usd_cfg,
+    hide_goal_viz_for_student_camera,
+    setup_student_camera,
 )
 
 
@@ -148,6 +150,8 @@ def setup_scene(env) -> None:
     env.scene.rigid_objects["table"] = env.table
     env.scene.rigid_objects["object"] = env.object
     env.scene.rigid_objects["goal_viz"] = env.goal_viz
+    hide_goal_viz_for_student_camera(env)
+    setup_student_camera(env)
     _log_scene_step(setup_t0, "registered assets with scene")
 
 

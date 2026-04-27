@@ -26,3 +26,17 @@ gym.register(
         "rl_games_sapg_cfg_entry_point": str(_CFG_DIR / "train" / "SimToolRealSAPG.yaml"),
     },
 )
+
+gym.register(
+    id="Isaacsimenvs-PegInHoleDepthStudent-Direct-v0",
+    entry_point="isaacsimenvs.tasks.peg_in_hole.peg_in_hole_env:PegInHoleEnv",
+    order_enforce=False,
+    disable_env_checker=True,
+    kwargs={
+        "env_cfg_entry_point": "isaacsimenvs.tasks.peg_in_hole.peg_in_hole_env_cfg:PegInHoleEnvCfg",
+        "env_cfg_yaml_entry_point": str(_CFG_DIR / "task" / "PegInHoleDepthStudent.yaml"),
+        "rl_games_cfg_entry_point": str(_CFG_DIR / "train" / "SimToolRealPPO.yaml"),
+        "rl_games_sapg_cfg_entry_point": str(_CFG_DIR / "train" / "SimToolRealSAPG.yaml"),
+        "distill_cfg_entry_point": str(_CFG_DIR / "train" / "PegInHoleDepthDistill.yaml"),
+    },
+)

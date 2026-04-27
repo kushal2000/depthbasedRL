@@ -321,6 +321,9 @@ def reset_env_state(env, env_ids: torch.Tensor) -> None:
     env._action_queue[env_ids] = 0.0
     env._obs_queue[env_ids] = 0.0
     env._object_state_queue[env_ids] = 0.0
+    for queue_name in ("_student_camera_queue", "_student_obs_queue"):
+        if hasattr(env, queue_name):
+            getattr(env, queue_name)[env_ids] = 0.0
     env._object_forces[env_ids] = 0.0
     env._object_torques[env_ids] = 0.0
 

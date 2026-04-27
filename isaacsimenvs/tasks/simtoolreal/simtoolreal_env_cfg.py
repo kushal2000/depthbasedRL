@@ -1,11 +1,12 @@
 """SimToolRealEnvCfg — typed defaults for the SimToolReal goal-pose-reaching task.
 
-Organized into eight sectioned sub-configclasses that mirror the YAML overlay
+Organized into sectioned sub-configclasses that mirror the YAML overlay
 in cfg/task/SimToolReal.yaml 1:1:
 
     sim                     → isaaclab.sim.SimulationCfg (+ PhysxCfg)
     scene                   → SimToolRealSceneCfg(InteractiveSceneCfg)
     obs                     → ObsCfg
+    student_obs             → StudentObsCfg (disabled by default)
     action                  → ActionCfg
     reward                  → RewardCfg
     reset                   → ResetCfg   (includes goal sampling)
@@ -126,6 +127,63 @@ class ObsCfg:
     )
 
     clamp_abs_observations: float = 10.0
+
+
+# ----------------------------------------------------------------------------
+# student_obs
+# ----------------------------------------------------------------------------
+
+
+@configclass
+class StudentObsCfg:
+    """Optional camera + proprio observation path for distillation students.
+
+    This is disabled by default and is not part of DirectRLEnv's normal
+    ``_get_observations`` path. Distillation code explicitly calls
+    ``env.unwrapped.get_student_obs()`` when this section is enabled.
+    """
+
+    enabled: bool = False
+
+    # Proprio fields are assembled in this order from the same canonical joint
+    # helper used by the teacher observation path.
+    proprio_list: tuple[str, ...] = (
+        "joint_pos",
+        "joint_vel",
+        "prev_action_targets",
+    )
+
+    image_enabled: bool = True
+    image_modality: str = "depth"  # "depth" | "rgb" | "rgbd"
+    image_width: int = 160
+    image_height: int = 90
+    image_input_width: int = 160
+    image_input_height: int = 90
+    crop_enabled: bool = False
+    crop_top_left: tuple[int, int] = (0, 0)  # (x0, y0), inclusive
+    crop_bottom_right: tuple[int, int] = (0, 0)  # (x1, y1), exclusive
+
+    use_camera_delay: bool = False
+    camera_delay_max: int = 0
+    use_student_obs_delay: bool = False
+    student_obs_delay_max: int = 0
+
+    # "clip_divide" | "window_normalize" | "metric"
+    depth_preprocess_mode: str = "window_normalize"
+    depth_min_m: float = 0.45
+    depth_max_m: float = 1.25
+    hide_goal_viz: bool = True
+
+    camera_backend: str = "tiled"  # "tiled" | "standard"
+    camera_mount: str = "world"
+    camera_convention: str = "ros"
+    camera_pos: tuple[float, float, float] = (0.0, -1.0, 1.0)
+    camera_quat_wxyz: tuple[float, float, float, float] = (1.0, 0.0, 0.0, 0.0)
+
+    focal_length: float = 24.0
+    horizontal_aperture: float = 33.19737869997174
+    focus_distance: float = 400.0
+    clipping_range: tuple[float, float] = (0.1, 5.0)
 
 
 # ----------------------------------------------------------------------------
@@ -360,6 +418,7 @@ class SimToolRealEnvCfg(DirectRLEnvCfg):
     # --- Sectioned sub-configs (mirror YAML sections 1:1) ---
     assets: AssetsCfg = AssetsCfg()
     obs: ObsCfg = ObsCfg()
+    student_obs: StudentObsCfg = StudentObsCfg()
     action: ActionCfg = ActionCfg()
     reward: RewardCfg = RewardCfg()
     reset: ResetCfg = ResetCfg()
@@ -371,6 +430,7 @@ __all__ = [
     "SimToolRealEnvCfg",
     "AssetsCfg",
     "ObsCfg",
+    "StudentObsCfg",
     "ActionCfg",
     "RewardCfg",
     "ResetCfg",

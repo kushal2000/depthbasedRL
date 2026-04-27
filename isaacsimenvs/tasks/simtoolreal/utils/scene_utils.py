@@ -182,6 +182,221 @@ def _log_scene_step(start_time: float, message: str) -> None:
     print(f"[scene_utils][+{time.perf_counter() - start_time:.2f}s] {message}", flush=True)
 
 
+def _student_camera_data_types(modality: str) -> list[str]:
+    modality = str(modality).lower()
+    if modality == "depth":
+        return ["distance_to_image_plane"]
+    if modality == "rgb":
+        return ["rgb"]
+    if modality == "rgbd":
+        return ["rgb", "distance_to_image_plane"]
+    raise ValueError(
+        "cfg.student_obs.image_modality must be one of "
+        f"('depth', 'rgb', 'rgbd'), got {modality!r}."
+    )
+
+
+def hide_goal_viz_for_student_camera(env) -> None:
+    cfg = getattr(env.cfg, "student_obs", None)
+    if cfg is None or not cfg.enabled or not cfg.hide_goal_viz:
+        return
+
+    from pxr import UsdGeom
+
+    stage = get_current_stage()
+    goal_viz_paths = find_matching_prim_paths("/World/envs/env_.*/GoalViz")
+    for prim_path in goal_viz_paths:
+        prim = stage.GetPrimAtPath(prim_path)
+        if prim.IsValid():
+            UsdGeom.Imageable(prim).MakeInvisible()
+    _log_scene_step(
+        time.perf_counter(),
+        f"hid {len(goal_viz_paths)} GoalViz prims from render products",
+    )
+
+
+def setup_student_camera(env) -> None:
+    """Create the optional per-env student camera sensor.
+
+    The camera is registered with ``env.scene.sensors`` so DirectRLEnv owns its
+    lifecycle. Student observations remain opt-in through
+    ``env.unwrapped.get_student_obs()``; the normal teacher/critic observation
+    path does not touch this sensor.
+    """
+    cfg = getattr(env.cfg, "student_obs", None)
+    env.student_camera = None
+    if cfg is None or not cfg.enabled or not cfg.image_enabled:
+        return
+
+    backend = str(cfg.camera_backend).lower()
+    if backend not in ("tiled", "standard"):
+        raise ValueError(
+            "cfg.student_obs.camera_backend must be 'tiled' or 'standard', "
+            f"got {backend!r}."
+        )
+
+    camera_mount = str(cfg.camera_mount).lower()
+    if camera_mount != "world":
+        raise NotImplementedError(
+            "Only world-mounted student cameras are wired into DirectRLEnv right "
+            f"now; got cfg.student_obs.camera_mount={camera_mount!r}."
+        )
+
+    t0 = time.perf_counter()
+    from isaaclab.sensors import Camera, CameraCfg, TiledCamera, TiledCameraCfg
+
+    camera_cfg_cls = TiledCameraCfg if backend == "tiled" else CameraCfg
+    camera_cls = TiledCamera if backend == "tiled" else Camera
+    camera_cfg = camera_cfg_cls(
+        prim_path="/World/envs/env_.*/StudentCamera",
+        update_period=0,
+        update_latest_camera_pose=True,
+        height=int(cfg.image_height),
+        width=int(cfg.image_width),
+        data_types=_student_camera_data_types(cfg.image_modality),
+        spawn=sim_utils.PinholeCameraCfg(
+            focal_length=float(cfg.focal_length),
+            focus_distance=float(cfg.focus_distance),
+            horizontal_aperture=float(cfg.horizontal_aperture),
+            clipping_range=tuple(float(x) for x in cfg.clipping_range),
+        ),
+        offset=camera_cfg_cls.OffsetCfg(
+            pos=tuple(float(x) for x in cfg.camera_pos),
+            rot=tuple(float(x) for x in cfg.camera_quat_wxyz),
+            convention=str(cfg.camera_convention),
+        ),
+    )
+    env.student_camera = camera_cls(cfg=camera_cfg)
+    env.scene.sensors["student_camera"] = env.student_camera
+    _log_scene_step(
+        t0,
+        f"registered student camera backend={backend} "
+        f"modality={cfg.image_modality} "
+        f"size={int(cfg.image_width)}x{int(cfg.image_height)}",
+    )
+
+
+def _preprocess_student_depth(env, depth: torch.Tensor) -> torch.Tensor:
+    cfg = env.cfg.student_obs
+    depth = depth.float()
+    near = float(cfg.depth_min_m)
+    far = float(cfg.depth_max_m)
+    if far <= near:
+        raise ValueError(
+            "cfg.student_obs.depth_max_m must be greater than "
+            "cfg.student_obs.depth_min_m."
+        )
+
+    mode = str(cfg.depth_preprocess_mode).lower()
+    valid = torch.isfinite(depth) & (depth >= near) & (depth <= far)
+    if mode == "clip_divide":
+        clipped = torch.clamp(
+            torch.nan_to_num(depth, nan=far, posinf=far, neginf=near),
+            near,
+            far,
+        )
+        return clipped / far
+    if mode == "metric":
+        return torch.where(valid, depth, torch.zeros_like(depth))
+    if mode == "window_normalize":
+        safe_depth = torch.nan_to_num(depth, nan=far, posinf=far, neginf=near)
+        normalized = (safe_depth - near) / (far - near)
+        return torch.clamp(normalized, 0.0, 1.0)
+    raise ValueError(
+        "cfg.student_obs.depth_preprocess_mode must be one of "
+        f"('clip_divide', 'window_normalize', 'metric'), got {mode!r}."
+    )
+
+
+def _validate_student_image_shape(env, image: torch.Tensor) -> torch.Tensor:
+    cfg = env.cfg.student_obs
+    size = (int(cfg.image_input_height), int(cfg.image_input_width))
+    if image.shape[-2:] == size:
+        return image
+    raise RuntimeError(
+        "Student image shape does not match configured input shape. "
+        "Adjust crop/image_input settings; this path does not resize images. "
+        f"got HxW={tuple(image.shape[-2:])}, expected HxW={size}."
+    )
+
+
+def _crop_student_image(env, image: torch.Tensor) -> torch.Tensor:
+    cfg = env.cfg.student_obs
+    if not cfg.crop_enabled:
+        return image
+
+    height, width = image.shape[-2:]
+    x0, y0 = (int(v) for v in cfg.crop_top_left)
+    x1, y1 = (int(v) for v in cfg.crop_bottom_right)
+    if not (0 <= x0 < x1 <= width and 0 <= y0 < y1 <= height):
+        raise ValueError(
+            "Invalid student image crop coordinates: "
+            f"top_left=({x0}, {y0}), bottom_right=({x1}, {y1}), "
+            f"image={width}x{height}. Coordinates use x/y pixels with "
+            "bottom_right exclusive."
+        )
+    return image[..., y0:y1, x0:x1]
+
+
+def read_student_camera_image(env) -> torch.Tensor:
+    """Return the configured student image as ``(num_envs, channels, H, W)``."""
+    cfg = getattr(env.cfg, "student_obs", None)
+    if cfg is None or not cfg.enabled:
+        raise RuntimeError(
+            "cfg.student_obs.enabled is false; no student image is available."
+        )
+    if not cfg.image_enabled:
+        raise RuntimeError(
+            "cfg.student_obs.image_enabled is false; no student image is available."
+        )
+
+    camera = getattr(env, "student_camera", None)
+    if camera is None:
+        raise RuntimeError(
+            "Student camera was not created. Check cfg.student_obs.enabled and "
+            "launch with cameras enabled."
+        )
+
+    env.sim.render()
+    dt = float(getattr(env, "physics_dt", env.cfg.sim.dt))
+    camera.update(dt, force_recompute=True)
+
+    outputs = camera.data.output
+    available = {key: value for key, value in outputs.items() if value is not None}
+    if not available:
+        raise RuntimeError("Student camera produced no outputs.")
+
+    modality = str(cfg.image_modality).lower()
+    image_parts: list[torch.Tensor] = []
+    if modality in ("rgb", "rgbd"):
+        rgb = available.get("rgb")
+        if rgb is None:
+            raise RuntimeError(
+                f"RGB output missing. Available student camera outputs: {list(available.keys())}"
+            )
+        rgb = rgb[..., :3].permute(0, 3, 1, 2).float() / 255.0
+        image_parts.append(_crop_student_image(env, rgb))
+
+    if modality in ("depth", "rgbd"):
+        depth = available.get("distance_to_image_plane")
+        if depth is None:
+            raise RuntimeError(
+                f"Depth output missing. Available student camera outputs: {list(available.keys())}"
+            )
+        if depth.dim() == 4 and depth.shape[-1] == 1:
+            depth = depth.permute(0, 3, 1, 2)
+        elif depth.dim() == 3:
+            depth = depth.unsqueeze(1)
+        else:
+            raise RuntimeError(f"Unsupported depth tensor shape: {tuple(depth.shape)}")
+        depth = _preprocess_student_depth(env, depth)
+        image_parts.append(_crop_student_image(env, depth))
+
+    if not image_parts:
+        raise ValueError(f"Unsupported student image modality: {modality!r}")
+    return _validate_student_image_shape(env, torch.cat(image_parts, dim=1))
+
+
 def _set_usd_attr(prim, name: str, value, value_type) -> None:
     # The URDF converter occasionally emits attributes with malformed type
     # names; in that case remove and recreate so the typed Set lands.
@@ -486,4 +701,6 @@ def setup_scene(env) -> None:
     env.scene.rigid_objects["table"] = env.table
     env.scene.rigid_objects["object"] = env.object
     env.scene.rigid_objects["goal_viz"] = env.goal_viz
+    hide_goal_viz_for_student_camera(env)
+    setup_student_camera(env)
     _log_scene_step(setup_t0, "registered assets with scene")
