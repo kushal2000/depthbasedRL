@@ -413,8 +413,8 @@ def _draw_depth_sticks(depth_nhw: torch.Tensor, *, cfg, stick_prob: float, max_s
 
     batch_idx = torch.arange(batch, device=device).view(batch, 1, 1, 1)
     flat_idx = (batch_idx * height * width + ys * width + xs)[valid]
-    flat_values = values[..., None, None].expand(-1, -1, max_len, max_width)[valid]
-    depth_nhw.reshape(-1)[flat_idx] = flat_values
+    flat_values = values[..., None, None].expand(-1, -1, max_len, max_width)[valid].clone()
+    depth_nhw.reshape(-1).index_put_((flat_idx,), flat_values, accumulate=False)
 
 
 def _apply_student_depth_noise(env, depth: torch.Tensor) -> torch.Tensor:
