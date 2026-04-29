@@ -19,8 +19,8 @@ ASSEMBLY="fmb_board_1"
 
 # ── Training Details ──────────────────────────────────────────
 CHECKPOINT="/share/portal/kk837/depthbasedRL/pretrained_policy/model.pth"
-NUM_ENVS=4098
-MINIBATCH_SIZE=16392
+NUM_ENVS=4092
+MINIBATCH_SIZE=16368
 SEED=0
 
 # ── Domain Randomization ─────────────────────────────────────
@@ -99,7 +99,7 @@ python -u -m isaacgymenvs.train \
     train.params.config.off_policy_ratio=1.0 \
     train.params.config.expl_type=mixed_expl_learn_param \
     train.params.config.expl_reward_type=entropy \
-    train.params.config.expl_coef_block_size=683 \
+    train.params.config.expl_coef_block_size=682 \
     train.params.config.expl_reward_coef_scale=0.005 \
     train.params.network.space.continuous.fixed_sigma=coef_cond \
     ++task.env.useSparseReward=False \
@@ -136,3 +136,9 @@ python -u -m isaacgymenvs.train \
     train.params.config.central_value_config.minibatch_size=$MINIBATCH_SIZE \
     train.params.config.max_frames=100_000_000_000_000 \
     $CHECKPOINT_ARG
+    checkpoint_load_mode=weights \
+    task.env.targetSuccessTolerance=0.01 \
+    task.env.finalGoalToleranceCurriculumEnabled=False \
+    task.env.finalGoalToleranceInitial=0.01 \
+    task.env.finalGoalToleranceTarget=0.01 \
+    task.env.finalGoalToleranceCurriculumDecrement=0.001
