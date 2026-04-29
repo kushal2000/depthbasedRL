@@ -297,13 +297,20 @@ class PegInHoleEnv(SimToolReal):
                 f"{seen_tols.max()*1000:.3f} mm)."
             )
 
-        # Per-env scene URDF paths (relative to repo_root/assets).
+        # Per-env scene URDF paths (relative to repo_root/assets). Derive the
+        # scenes folder from scenesPath so sibling scene_npz files (e.g. a
+        # tolerance-generalization train/val split, fixtured-task variants)
+        # can share this class without code changes.
+        asset_root_abs = os.path.join(repo_root, "assets")
+        scenes_dir_rel = os.path.relpath(
+            os.path.dirname(scenes_path), asset_root_abs
+        )
         self._pih_scene_urdfs = []
         for env_i in range(num_envs):
             s = int(self._pih_env_scene_idx[env_i])
             ts = int(self._pih_env_tol_slot_idx[env_i])
             self._pih_scene_urdfs.append(
-                f"urdf/peg_in_hole/scenes/scene_{s:04d}/scene_tol{ts:02d}.urdf"
+                f"{scenes_dir_rel}/scene_{s:04d}/scene_tol{ts:02d}.urdf"
             )
 
         print(
