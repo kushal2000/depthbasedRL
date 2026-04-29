@@ -256,7 +256,7 @@ and saves RGB/depth snapshots under `distillation_runs/.../camera_debug/`.
 
 ```bash
 ./scripts/run_in_isaacsim_env.sh python isaacsim_conversion/distill.py \
-    --mode train \
+    --mode train_online \
     --headless \
     --teacher_checkpoint pretrained_policy/model.pth \
     --teacher_config pretrained_policy/config.yaml \
@@ -303,19 +303,17 @@ sbatch --export=CHECKPOINT=distillation_runs/<run>/checkpoints/student_best.pt \
   scripts/cluster/sbatch_student_eval_l40s.sh
 ```
 
-Training defaults in `hammer_distill.yaml` now use:
+Online training defaults in `hammer_distill.yaml` now use:
 
 - depth images
 - `mono_transformer_recurrent`
-- `beta_mode: fixed_decay`
-- `beta_decay: 0.1`
+- student actions for environment stepping
 - randomized object starts
 
-During training, the script now also:
+During online training, the script now also:
 
-- logs a one-time `teacher_eval_baseline`
-- runs periodic `student_eval` every `eval_interval` episodes
-- writes all of those rows into `metrics.csv`
+- writes progress rows into `metrics.csv`
+- saves `student_latest.pt` and `student_best.pt`
 - optionally logs them to Weights & Biases with `--wandb`
 
 ### Student evaluation
@@ -329,19 +327,13 @@ During training, the script now also:
     --teacher_config pretrained_policy/config.yaml
 ```
 
-You can override the beta schedule from the CLI without editing YAML:
-
-```bash
---beta_mode fixed_decay --beta_start 1.0 --beta_end 0.0 --beta_decay 0.1
-```
-
 ### Quick ablations
 
 Disable auxiliary object-position loss:
 
 ```bash
 ./scripts/run_in_isaacsim_env.sh python isaacsim_conversion/distill.py \
-    --mode train \
+    --mode train_online \
     --headless \
     --distill_config isaacsim_conversion/configs/hammer_distill.yaml \
     --student_modality depth

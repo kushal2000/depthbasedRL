@@ -135,6 +135,7 @@ class IsaacSimDistillEnv:
         object_rotation_noise_mode: str = "yaw",
         camera_pos_noise_xyz: tuple[float, float, float] = (0.0, 0.0, 0.0),
         camera_rot_noise_deg: tuple[float, float, float] = (0.0, 0.0, 0.0),
+        force_manual_tiled_world_camera: bool = False,
         hole_pos_noise_xyz: tuple[float, float, float] = (0.0, 0.0, 0.0),
         hole_xy_sample_min: tuple[float, float] | None = None,
         hole_xy_sample_max: tuple[float, float] | None = None,
@@ -159,6 +160,7 @@ class IsaacSimDistillEnv:
         self.object_rotation_noise_mode = object_rotation_noise_mode
         self.camera_pos_noise_xyz = np.array(camera_pos_noise_xyz, dtype=np.float32)
         self.camera_rot_noise_deg = np.array(camera_rot_noise_deg, dtype=np.float32)
+        self.force_manual_tiled_world_camera = bool(force_manual_tiled_world_camera)
         self.hole_pos_noise_xyz = np.array(hole_pos_noise_xyz, dtype=np.float32)
         self.hole_xy_sample_min = None if hole_xy_sample_min is None else np.array(hole_xy_sample_min, dtype=np.float32)
         self.hole_xy_sample_max = None if hole_xy_sample_max is None else np.array(hole_xy_sample_max, dtype=np.float32)
@@ -253,7 +255,11 @@ class IsaacSimDistillEnv:
             self.enable_camera
             and self.camera_backend == "tiled"
             and self._camera_mount_mode() == "world"
-            and (np.any(self.camera_pos_noise_xyz > 0.0) or np.any(self.camera_rot_noise_deg > 0.0))
+            and (
+                self.force_manual_tiled_world_camera
+                or np.any(self.camera_pos_noise_xyz > 0.0)
+                or np.any(self.camera_rot_noise_deg > 0.0)
+            )
         )
 
     def _data_types_for_modality(self, modality: str) -> list[str]:
@@ -277,9 +283,14 @@ class IsaacSimDistillEnv:
             joint_drive=UrdfConverterCfg.JointDriveCfg(
                 drive_type="force",
                 target_type="position",
+                # This gets overridden!! So there are dummy
+                # gains=UrdfConverterCfg.JointDriveCfg.PDGainsCfg(
+                #     stiffness=JOINT_STIFFNESSES_COMPENSATED,
+                #     damping=JOINT_DAMPINGS_COMPENSATED,
+                # ),
                 gains=UrdfConverterCfg.JointDriveCfg.PDGainsCfg(
-                    stiffness=JOINT_STIFFNESSES_COMPENSATED,
-                    damping=JOINT_DAMPINGS_COMPENSATED,
+                    stiffness=0.0,
+                    damping=0.0,
                 ),
             ),
         )
@@ -1378,6 +1389,7 @@ class IsaacSimDistillEnv:
                 depth = depth.permute(0, 3, 1, 2)
             elif depth.dim() == 3:
                 depth = depth.unsqueeze(1)
+            image_dict["depth_metric"] = depth.float()
             image_dict["depth"] = self._preprocess_depth(depth)
         if modality in ("rgb", "rgbd"):
             rgb = outputs.get("rgb")

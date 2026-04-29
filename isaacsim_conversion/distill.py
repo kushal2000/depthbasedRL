@@ -3,7 +3,7 @@ from __future__ import annotations
 import argparse
 import csv
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, fields
 from datetime import datetime
 import os
 from pathlib import Path
@@ -45,8 +45,8 @@ def launch_app():
     parser = argparse.ArgumentParser()
     parser.add_argument(
         "--mode",
-        choices=["train", "train_online", "teacher_eval", "student_eval", "mixed_eval", "camera_debug"],
-        default="train",
+        choices=["train_online", "teacher_eval", "student_eval", "camera_debug"],
+        default="teacher_eval",
     )
     parser.add_argument("--task_source", choices=["fabrica", "dextoolbench", "peg_in_hole"], default="dextoolbench")
     parser.add_argument("--assembly", default="beam")
@@ -81,15 +81,6 @@ def launch_app():
     parser.add_argument("--ground_plane_size", type=float, default=None)
     parser.add_argument("--object_start_mode", choices=["fixed", "randomized"], default=None)
     parser.add_argument("--object_mass_multiplier", type=float, default=1.0)
-    parser.add_argument(
-        "--beta_mode",
-        choices=["metric_driven", "fixed_decay", "always_teacher", "always_student"],
-        default=None,
-    )
-    parser.add_argument("--beta_start", type=float, default=None)
-    parser.add_argument("--beta_end", type=float, default=None)
-    parser.add_argument("--beta_decay", type=float, default=None)
-    parser.add_argument("--eval_interval", type=int, default=None)
     parser.add_argument("--checkpoint_interval", type=int, default=None)
     parser.add_argument("--online_num_iters", type=int, default=None)
     parser.add_argument("--online_log_interval", type=int, default=None)
@@ -134,17 +125,7 @@ class DistillSettings:
     arm_moving_average: float = 0.1
     dof_speed_scale: float = 1.5
     control_dt: float = 1.0 / 60.0
-    beta_mode: str = "metric_driven"
-    beta_start: float = 1.0
-    beta_end: float = 0.0
-    beta_decay: float = 0.1
-    beta_metric_threshold: float = 0.8
-    beta_update_episodes: int = 2
-    beta_hold_episodes: int = 0
     checkpoint_interval: int = 5
-    eval_interval: int = 999
-    eval_num_envs: int = 0
-    eval_max_steps: int = 700
     image_height: int = 224
     image_width: int = 224
     learning_rate: float = 1e-4
@@ -157,13 +138,13 @@ class DistillSettings:
     object_rotation_noise_mode: str = "yaw"
     camera_pos_noise_xyz: tuple[float, float, float] = (0.0, 0.0, 0.0)
     camera_rot_noise_deg: tuple[float, float, float] = (0.0, 0.0, 0.0)
+    force_manual_tiled_world_camera: bool = False
     hole_pos_noise_xyz: tuple[float, float, float] = (0.0, 0.0, 0.0)
     hole_xy_sample_min: tuple[float, float] | None = None
     hole_xy_sample_max: tuple[float, float] | None = None
     hole_yaw_noise_deg: float = 0.0
     image_robustness: dict | None = None
-    monitor_num_envs: int = 0
-    monitor_log_window: int = 10
+    apply_image_robustness_in_eval: bool = False
     camera_backend: str = "tiled"
     depth_preprocess_mode: str = "clip_divide"
     depth_min_m: float = 0.0
@@ -175,40 +156,13 @@ class DistillSettings:
     online_update_interval: int = 1
 
 
-class BetaScheduler:
-    def __init__(self, cfg: DistillSettings):
-        self.cfg = cfg
-        self.beta = cfg.beta_start
-        self.episode_counter = 0
-        self.window: list[float] = []
-
-    def value(self) -> float:
-        if self.cfg.beta_mode == "always_teacher":
-            return 1.0
-        if self.cfg.beta_mode == "always_student":
-            return 0.0
-        return self.beta
-
-    def update(self, goal_completion_ratio: float):
-        self.episode_counter += 1
-        self.window.append(goal_completion_ratio)
-        if self.episode_counter <= self.cfg.beta_hold_episodes:
-            return
-        if self.cfg.beta_mode == "fixed_decay":
-            self.beta = max(self.cfg.beta_end, self.beta - self.cfg.beta_decay)
-            return
-        if self.cfg.beta_mode != "metric_driven":
-            return
-        if len(self.window) < self.cfg.beta_update_episodes:
-            return
-        avg_metric = float(np.mean(self.window[-self.cfg.beta_update_episodes :]))
-        if avg_metric >= self.cfg.beta_metric_threshold:
-            self.beta = max(self.cfg.beta_end, self.beta - self.cfg.beta_decay)
-
-
 def load_distill_settings(path: Path, args) -> DistillSettings:
     cfg = load_yaml(path)
-    settings = DistillSettings(**cfg)
+    valid_keys = {field.name for field in fields(DistillSettings)}
+    ignored_keys = sorted(set(cfg) - valid_keys)
+    if ignored_keys:
+        _log(f"Ignoring legacy distill config keys in {path}: {ignored_keys}")
+    settings = DistillSettings(**{key: value for key, value in cfg.items() if key in valid_keys})
     if args.max_steps is not None:
         settings.max_steps = args.max_steps
     if args.num_episodes is not None:
@@ -221,16 +175,6 @@ def load_distill_settings(path: Path, args) -> DistillSettings:
         settings.ground_plane_size = args.ground_plane_size
     if args.object_start_mode is not None:
         settings.object_start_mode = args.object_start_mode
-    if args.beta_mode is not None:
-        settings.beta_mode = args.beta_mode
-    if args.beta_start is not None:
-        settings.beta_start = args.beta_start
-    if args.beta_end is not None:
-        settings.beta_end = args.beta_end
-    if args.beta_decay is not None:
-        settings.beta_decay = args.beta_decay
-    if args.eval_interval is not None:
-        settings.eval_interval = args.eval_interval
     if args.checkpoint_interval is not None:
         settings.checkpoint_interval = args.checkpoint_interval
     if args.online_num_iters is not None:
@@ -247,14 +191,6 @@ def load_distill_settings(path: Path, args) -> DistillSettings:
 
 
 def validate_distill_settings(settings: DistillSettings):
-    if settings.monitor_num_envs < 0:
-        raise ValueError("monitor_num_envs must be >= 0")
-    if settings.monitor_num_envs >= settings.num_envs:
-        raise ValueError(
-            f"monitor_num_envs ({settings.monitor_num_envs}) must be smaller than num_envs ({settings.num_envs})"
-        )
-    if settings.monitor_log_window <= 0:
-        raise ValueError("monitor_log_window must be > 0")
     if settings.depth_preprocess_mode not in {"clip_divide", "window_normalize", "metric"}:
         raise ValueError(f"Unsupported depth_preprocess_mode={settings.depth_preprocess_mode!r}")
     if settings.depth_max_m <= settings.depth_min_m:
@@ -316,23 +252,6 @@ def resolve_repo_path(repo_root: Path, maybe_relative: str | None) -> str | None
     return str(repo_root / maybe_relative)
 
 
-def choose_stepping_action(beta: float, teacher_action: torch.Tensor, student_action: torch.Tensor) -> torch.Tensor:
-    if beta >= 1.0:
-        return teacher_action
-    if beta <= 0.0:
-        return student_action
-    use_teacher = torch.rand(teacher_action.shape[0], device=teacher_action.device) < beta
-    mask = use_teacher.unsqueeze(-1)
-    return torch.where(mask, teacher_action, student_action)
-
-
-def get_monitor_env_mask(num_envs: int, monitor_num_envs: int) -> np.ndarray:
-    mask = np.zeros(num_envs, dtype=bool)
-    if monitor_num_envs > 0:
-        mask[-monitor_num_envs:] = True
-    return mask
-
-
 def subset_mean(values: np.ndarray, mask: np.ndarray) -> float:
     if mask.size == 0 or not np.any(mask):
         return 0.0
@@ -375,7 +294,14 @@ def make_image_robustifier(settings: DistillSettings, env: IsaacSimDistillEnv) -
     cfg.preprocess.pad_to_size = True
     if not cfg.enabled:
         return None
-    return TrainImageRobustifier(cfg=cfg, num_envs=env.num_envs, device=env.device)
+    return TrainImageRobustifier(
+        cfg=cfg,
+        num_envs=env.num_envs,
+        device=env.device,
+        depth_preprocess_mode=env.depth_preprocess_mode,
+        depth_min_m=env.depth_min_m,
+        depth_max_m=env.depth_max_m,
+    )
 
 
 def build_student_image(
@@ -395,8 +321,13 @@ def build_student_image(
         settings.image_width,
         preprocess_cfg,
     )
-    if train and image_robustifier is not None:
-        _, image = image_robustifier.apply_train_time(processed_images, image, reset_env_ids=reset_env_ids)
+    if (train or settings.apply_image_robustness_in_eval) and image_robustifier is not None:
+        processed_images, image = image_robustifier.apply_train_time(
+            processed_images,
+            image,
+            reset_env_ids=reset_env_ids,
+        )
+    student_obs["images"].update(processed_images)
     return image
 
 
@@ -429,6 +360,17 @@ def tensor_image_stats(image: torch.Tensor, env_ids: list[int], prefix: str) -> 
     return stats
 
 
+def tensor_diff_stats(a: torch.Tensor, b: torch.Tensor, env_ids: list[int], prefix: str) -> dict[str, float]:
+    stats: dict[str, float] = {}
+    with torch.no_grad():
+        for env_id in env_ids:
+            diff = (a[env_id].detach().float() - b[env_id].detach().float()).abs()
+            stats[f"{prefix}/env{env_id}/mean_abs"] = float(diff.mean().item())
+            stats[f"{prefix}/env{env_id}/max_abs"] = float(diff.max().item())
+            stats[f"{prefix}/env{env_id}/q95_abs"] = float(torch.quantile(diff.flatten(), 0.95).item())
+    return stats
+
+
 def append_debug_policy_image_stats(
     run_dir: Path,
     iter_idx: int,
@@ -445,8 +387,20 @@ def append_debug_policy_image_stats(
     images = student_obs["images"]
     if "rgb" in images:
         row.update(tensor_image_stats(images["rgb"], env_ids, "raw_rgb"))
+    if "depth_metric" in images:
+        row.update(tensor_image_stats(images["depth_metric"], env_ids, "raw_depth_metric_m"))
+    if "depth_metric_noisy" in images:
+        row.update(tensor_image_stats(images["depth_metric_noisy"], env_ids, "noisy_depth_metric_m"))
+        row.update(
+            tensor_diff_stats(
+                images["depth_metric_noisy"],
+                images["depth_metric"],
+                env_ids,
+                "noisy_minus_raw_depth_metric_m_abs",
+            )
+        )
     if "depth" in images:
-        row.update(tensor_image_stats(images["depth"], env_ids, "raw_depth"))
+        row.update(tensor_image_stats(images["depth"], env_ids, "normalized_depth"))
     row.update(tensor_image_stats(student_image, env_ids, "policy_image"))
     path = run_dir / "policy_image_stats.csv"
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -528,6 +482,19 @@ def log_csv_row(csv_path: Path, row: dict[str, float | int | str]):
         "goal_completion_ratio",
         "kp_dist",
         "near_goal_steps",
+        "goal_idx_current_avg",
+        "goal_completion_ratio_current_avg",
+        "kp_dist_current_avg",
+        "near_goal_steps_current_avg",
+        "goal_idx_best_avg",
+        "goal_completion_ratio_best_avg",
+        "kp_dist_best_avg",
+        "near_goal_steps_best_avg",
+        "recent_reset_goal_idx_avg",
+        "recent_reset_goal_completion_ratio_avg",
+        "recent_reset_kp_dist_avg",
+        "recent_reset_near_goal_steps_avg",
+        "recent_reset_count",
         "episode_steps",
         "episode_wall_time_s",
         "env_steps_per_s",
@@ -536,13 +503,6 @@ def log_csv_row(csv_path: Path, row: dict[str, float | int | str]):
         "aux_object_pos_loss",
         "aux_object_pos_rmse_m",
         "beta",
-        "goal_completion_ratio_window",
-        "goal_idx_window",
-        "kp_dist_window",
-        "action_loss_window",
-        "action_rmse_window",
-        "aux_object_pos_loss_window",
-        "aux_object_pos_rmse_m_window",
         "reset_object_z_low",
         "reset_time_limit",
         "reset_max_goals",
@@ -702,14 +662,22 @@ def _extract_policy_debug_frames(
     num_envs = student_image.shape[0]
     if "rgb" in images:
         outputs["raw_rgb"] = []
+    if "depth_metric" in images:
+        outputs["raw_depth_metric"] = []
+    if "depth_metric_noisy" in images:
+        outputs["noisy_depth_metric"] = []
     if "depth" in images:
-        outputs["raw_depth"] = []
+        outputs["normalized_depth"] = []
     for env_id in range(num_envs):
         outputs["policy_input"].append(_tensor_chw_to_hwc_u8(student_image[env_id]))
         if "rgb" in images:
             outputs["raw_rgb"].append(_tensor_chw_to_hwc_u8(images["rgb"][env_id]))
+        if "depth_metric" in images:
+            outputs["raw_depth_metric"].append(_tensor_chw_to_hwc_u8(images["depth_metric"][env_id]))
+        if "depth_metric_noisy" in images:
+            outputs["noisy_depth_metric"].append(_tensor_chw_to_hwc_u8(images["depth_metric_noisy"][env_id]))
         if "depth" in images:
-            outputs["raw_depth"].append(_tensor_chw_to_hwc_u8(images["depth"][env_id]))
+            outputs["normalized_depth"].append(_tensor_chw_to_hwc_u8(images["depth"][env_id]))
     return outputs
 
 
@@ -860,9 +828,7 @@ def run_episode(
     env: IsaacSimDistillEnv,
     teacher: RlPlayer,
     student,
-    optimizer: torch.optim.Optimizer | None,
     settings: DistillSettings,
-    beta_scheduler: BetaScheduler,
     run_dir: Path | None = None,
     capture_frames: bool = False,
     capture_frame_stride: int = 1,
@@ -874,7 +840,9 @@ def run_episode(
     capture_viewer_wandb_key: str = "interactive_viewer",
     capture_viewer_video_wandb_key: str = "rollout_video",
     capture_viewer_video_fps: int = 60,
-) -> tuple[dict[str, float], dict[str, float] | None]:
+) -> dict[str, float]:
+    if mode not in {"teacher_eval", "student_eval"}:
+        raise ValueError(f"run_episode only supports eval modes, got {mode!r}")
     episode_start_time = time.perf_counter()
     teacher.reset()
     env.reset()
@@ -885,11 +853,14 @@ def run_episode(
     total_action_loss_per_env = np.zeros(env.num_envs, dtype=np.float64)
     total_aux_loss_per_env = np.zeros(env.num_envs, dtype=np.float64)
     total_steps = 0
-    monitor_mask = get_monitor_env_mask(env.num_envs, settings.monitor_num_envs if mode == "train" else 0)
-    train_mask = ~monitor_mask if mode == "train" else np.ones(env.num_envs, dtype=bool)
+    eval_mask = np.ones(env.num_envs, dtype=bool)
     viewer_env_ids = _get_capture_viewer_env_ids(env, capture_viewer_env_id)
     viewer_frames_by_env: dict[int, list[dict]] = {env_id: [] for env_id in viewer_env_ids}
     viewer_video_frames_by_env: dict[int, list[np.ndarray]] = {env_id: [] for env_id in viewer_env_ids}
+    debug_policy_image_stats_env_ids = parse_env_id_list(
+        _args.debug_policy_image_stats_env_ids,
+        env.num_envs,
+    ) if _args.debug_policy_image_stats else []
     if capture_viewer and run_dir is None:
         raise ValueError("capture_viewer requires run_dir")
 
@@ -906,11 +877,8 @@ def run_episode(
         if student is None or mode == "teacher_eval":
             student_action = teacher_action
         elif _args.student_input == "teacher_obs":
-            if mode == "train":
+            with torch.no_grad():
                 student_out, student_hidden = student(teacher_obs_tensor, student_hidden)
-            else:
-                with torch.no_grad():
-                    student_out, student_hidden = student(teacher_obs_tensor, student_hidden)
             student_action = student_out.action
         else:
             student_obs = env.build_student_obs(sim_state, camera_modality=env.camera_modality)
@@ -919,21 +887,26 @@ def run_episode(
                 env.camera_modality,
                 settings,
                 image_robustifier=image_robustifier,
-                train=mode in ("train", "mixed_eval"),
+                train=False,
             )
-            if mode == "train":
+            if (
+                _args.debug_policy_image_stats
+                and run_dir is not None
+                and ((step_i + 1) == 1 or (step_i + 1) % max(_args.debug_policy_image_stats_stride, 1) == 0)
+            ):
+                append_debug_policy_image_stats(
+                    run_dir=run_dir,
+                    iter_idx=step_i + 1,
+                    env_ids=debug_policy_image_stats_env_ids or [0],
+                    student_obs=student_obs,
+                    student_image=student_image,
+                    modality=env.camera_modality,
+                )
+            with torch.no_grad():
                 student_out, student_hidden = student(student_image, student_obs["proprio"], student_hidden)
-            else:
-                with torch.no_grad():
-                    student_out, student_hidden = student(student_image, student_obs["proprio"], student_hidden)
             student_action = student_out.action
 
-        beta = beta_scheduler.value() if mode in ("train", "mixed_eval") else (1.0 if mode == "teacher_eval" else 0.0)
-        stepping_action = choose_stepping_action(beta, teacher_action, student_action)
-        if mode == "train" and np.any(monitor_mask):
-            monitor_mask_t = torch.from_numpy(monitor_mask).to(device=env.device, dtype=torch.bool)
-            stepping_action = stepping_action.clone()
-            stepping_action[monitor_mask_t] = student_action[monitor_mask_t]
+        stepping_action = teacher_action if mode == "teacher_eval" else student_action
         targets = compute_joint_pos_targets(
             actions=stepping_action.detach().cpu().numpy(),
             prev_targets=env.prev_targets,
@@ -991,32 +964,16 @@ def run_episode(
                 if aux_pred is not None
                 else torch.zeros(env.num_envs, device=env.device)
             )
-        action_loss = torch.mean(action_loss_per_env)
-        aux_loss = torch.mean(aux_loss_per_env)
-        total_loss = settings.action_loss_weight * action_loss + settings.aux_object_pos_weight * aux_loss
-
-        if mode == "train" and optimizer is not None and student is not None:
-            optimizer.zero_grad()
-            total_loss.backward()
-            torch.nn.utils.clip_grad_norm_(student.parameters(), 1.0)
-            optimizer.step()
-            student_hidden = detach_hidden_state(student_hidden)
-
         total_action_loss_per_env += action_loss_per_env.detach().cpu().numpy()
         total_aux_loss_per_env += aux_loss_per_env.detach().cpu().numpy()
         total_steps += 1
 
         if step_i % 60 == 0:
-            monitor_log = ""
-            if mode == "train" and np.any(monitor_mask):
-                monitor_metrics_step = compute_subset_progress_metrics(env, next_sim_state, monitor_mask)
-                monitor_log = (
-                    f", monitor_goal_mean={monitor_metrics_step['goal_idx']:.2f}/{len(env.task_spec.goals)}, "
-                    f"monitor_kp_dist_mean={monitor_metrics_step['kp_dist']:.4f}"
-                )
             _log(
-                f"[distill step {step_i:5d}] mode={mode}, goal_mean={subset_mean(env.goal_idx.astype(np.float32), train_mask):.2f}/{len(env.task_spec.goals)}, "
-                f"kp_dist_mean={subset_mean(next_sim_state.kp_dist.astype(np.float32), train_mask):.4f}, beta={beta:.3f}, num_envs={env.num_envs}{monitor_log}"
+                f"[distill step {step_i:5d}] mode={mode}, "
+                f"goal_mean={subset_mean(env.goal_idx.astype(np.float32), eval_mask):.2f}/{len(env.task_spec.goals)}, "
+                f"kp_dist_mean={subset_mean(next_sim_state.kp_dist.astype(np.float32), eval_mask):.4f}, "
+                f"num_envs={env.num_envs}"
             )
         if finished:
             break
@@ -1048,15 +1005,15 @@ def run_episode(
     final_state = env.compute_sim_state()
     episode_wall_time_s = max(time.perf_counter() - episode_start_time, 1e-9)
     env_steps_per_s = env.num_envs * total_steps / episode_wall_time_s
-    metrics = compute_subset_progress_metrics(env, final_state, train_mask)
+    metrics = compute_subset_progress_metrics(env, final_state, eval_mask)
     metrics.update(
         {
             "episode_steps": float(total_steps),
             "episode_wall_time_s": float(episode_wall_time_s),
             "env_steps_per_s": float(env_steps_per_s),
-            "action_loss": subset_mean((total_action_loss_per_env / max(total_steps, 1)).astype(np.float32), train_mask),
-            "aux_object_pos_loss": subset_mean((total_aux_loss_per_env / max(total_steps, 1)).astype(np.float32), train_mask),
-            "beta": beta_scheduler.value(),
+            "action_loss": subset_mean((total_action_loss_per_env / max(total_steps, 1)).astype(np.float32), eval_mask),
+            "aux_object_pos_loss": subset_mean((total_aux_loss_per_env / max(total_steps, 1)).astype(np.float32), eval_mask),
+            "beta": 1.0 if mode == "teacher_eval" else 0.0,
             "reset_object_z_low": float(env.reset_reason_counts["object_z_low"]),
             "reset_time_limit": float(env.reset_reason_counts["time_limit"]),
             "reset_max_goals": float(env.reset_reason_counts["max_goals"]),
@@ -1078,29 +1035,7 @@ def run_episode(
                 total_steps,
             ),
         )
-    monitor_metrics = None
-    if mode == "train" and np.any(monitor_mask):
-        monitor_metrics = compute_subset_progress_metrics(env, final_state, monitor_mask)
-        monitor_metrics.update(
-            {
-                "episode_steps": float(total_steps),
-                "episode_wall_time_s": float(episode_wall_time_s),
-                "env_steps_per_s": float(env_steps_per_s),
-                "action_loss": subset_mean((total_action_loss_per_env / max(total_steps, 1)).astype(np.float32), monitor_mask),
-                "aux_object_pos_loss": subset_mean((total_aux_loss_per_env / max(total_steps, 1)).astype(np.float32), monitor_mask),
-                "beta": 0.0,
-                "reset_object_z_low": float(env.reset_reason_counts["object_z_low"]),
-                "reset_time_limit": float(env.reset_reason_counts["time_limit"]),
-                "reset_max_goals": float(env.reset_reason_counts["max_goals"]),
-                "reset_hand_far": float(env.reset_reason_counts["hand_far"]),
-                "reset_dropped_after_lift": float(env.reset_reason_counts["dropped_after_lift"]),
-            }
-        )
-        monitor_metrics["action_rmse"] = float(np.sqrt(max(monitor_metrics["action_loss"], 0.0)))
-        monitor_metrics["aux_object_pos_rmse_m"] = float(
-            np.sqrt(max(monitor_metrics["aux_object_pos_loss"], 0.0))
-        )
-    return metrics, monitor_metrics
+    return metrics
 
 
 def compute_distill_step(
@@ -1612,26 +1547,6 @@ def save_camera_debug_step(
         iio.imwrite(group_dir / f"{group_name}_{step_i:04d}.png", _make_grid(frames))
 
 
-def update_monitor_history(
-    monitor_history: dict[str, list[float]],
-    monitor_metrics: dict[str, float] | None,
-    window: int,
-) -> dict[str, float]:
-    if monitor_metrics is None:
-        return {}
-    rolling_metrics = {}
-    for key in ("goal_completion_ratio", "goal_idx", "kp_dist", "action_loss", "aux_object_pos_loss"):
-        history = monitor_history.setdefault(key, [])
-        history.append(float(monitor_metrics[key]))
-        recent = history[-window:]
-        rolling_metrics[f"{key}_window"] = float(np.mean(recent))
-    rolling_metrics["action_rmse_window"] = float(np.sqrt(max(rolling_metrics["action_loss_window"], 0.0)))
-    rolling_metrics["aux_object_pos_rmse_m_window"] = float(
-        np.sqrt(max(rolling_metrics["aux_object_pos_loss_window"], 0.0))
-    )
-    return rolling_metrics
-
-
 def main():
     args = _args
     app = _app
@@ -1683,6 +1598,7 @@ def main():
         object_rotation_noise_mode=settings.object_rotation_noise_mode,
         camera_pos_noise_xyz=settings.camera_pos_noise_xyz,
         camera_rot_noise_deg=settings.camera_rot_noise_deg,
+        force_manual_tiled_world_camera=settings.force_manual_tiled_world_camera,
         hole_pos_noise_xyz=settings.hole_pos_noise_xyz,
         hole_xy_sample_min=settings.hole_xy_sample_min,
         hole_xy_sample_max=settings.hole_xy_sample_max,
@@ -1710,7 +1626,6 @@ def main():
     if args.student_checkpoint and student is not None and optimizer is not None:
         load_student_checkpoint(resolve_repo_path(repo_root, args.student_checkpoint), student, optimizer)
     run_dir = ensure_run_dir(repo_root, args, settings)
-    beta_scheduler = BetaScheduler(settings)
     wandb_run = init_wandb(args, run_dir, settings)
 
     _log(f"Teacher checkpoint: {teacher_checkpoint}")
@@ -1762,90 +1677,36 @@ def main():
             wandb_run.finish()
         force_exit(0)
 
-    best_metric = -1.0
-    monitor_history: dict[str, list[float]] = {}
-    if args.mode == "train" and settings.num_envs < 2048:
-        teacher_metrics, _ = run_episode(
-            "teacher_eval",
-            env,
-            teacher,
-            student,
-            None,
-            settings,
-            beta_scheduler,
-            run_dir=None,
-            capture_frames=False,
-            capture_frame_stride=args.capture_frame_stride,
-        )
-        _log(
-            f"[teacher baseline] goal_completion_ratio={teacher_metrics['goal_completion_ratio']:.3f}, "
-            f"goal_idx={teacher_metrics['goal_idx']:.0f}, kp_dist={teacher_metrics['kp_dist']:.4f}"
-        )
-        record_metrics(
-            run_dir,
-            {"episode": -1, "mode": "teacher_eval_baseline", **teacher_metrics},
-            wandb_run=wandb_run,
-            step=0,
-        )
-    elif args.mode == "train":
-        _log("Skipping in-run teacher baseline for large batch training; use standalone teacher_eval reference instead")
-
-    for episode in range(settings.num_episodes if args.mode == "train" else 1):
-        metrics, monitor_metrics = run_episode(
-            args.mode,
-            env,
-            teacher,
-            student,
-            optimizer if args.mode == "train" else None,
-            settings,
-            beta_scheduler,
-            run_dir=run_dir,
-            capture_frames=args.capture_frames,
-            capture_frame_stride=args.capture_frame_stride,
-            capture_viewer=args.capture_viewer,
-            capture_viewer_len=args.capture_viewer_len,
-            capture_viewer_env_id=args.capture_viewer_env_id,
-            capture_viewer_video=args.capture_viewer_video,
-            wandb_run=wandb_run,
-            capture_viewer_wandb_key=args.capture_viewer_wandb_key,
-            capture_viewer_video_wandb_key=args.capture_viewer_video_wandb_key,
-            capture_viewer_video_fps=args.capture_viewer_video_fps,
-        )
-        _log(
-            f"[episode {episode}] mode={args.mode}, goal_completion_ratio={metrics['goal_completion_ratio']:.3f}, "
-            f"goal_idx={metrics['goal_idx']:.0f}, action_loss={metrics['action_loss']:.6f}, "
-            f"aux_object_pos_loss={metrics['aux_object_pos_loss']:.6f}, beta={metrics['beta']:.3f}"
-        )
-        record_metrics(
-            run_dir,
-            {"episode": episode, "mode": args.mode, **metrics},
-            wandb_run=wandb_run,
-            step=episode + 1,
-        )
-        if monitor_metrics is not None:
-            monitor_row = {"episode": episode, "mode": "student_monitor", **monitor_metrics}
-            monitor_row.update(update_monitor_history(monitor_history, monitor_metrics, settings.monitor_log_window))
-            _log(
-                f"[episode {episode}] mode=student_monitor, goal_completion_ratio={monitor_metrics['goal_completion_ratio']:.3f}, "
-                f"goal_idx={monitor_metrics['goal_idx']:.0f}, action_loss={monitor_metrics['action_loss']:.6f}, "
-                f"aux_object_pos_loss={monitor_metrics['aux_object_pos_loss']:.6f}, beta=0.000"
-            )
-            record_metrics(
-                run_dir,
-                monitor_row,
-                wandb_run=wandb_run,
-                step=episode + 1,
-            )
-        save_camera_debug(env, run_dir)
-        if args.mode == "train":
-            beta_scheduler.update(metrics["goal_completion_ratio"])
-            selection_metric = metrics["goal_completion_ratio"]
-            save_checkpoint(run_dir / "checkpoints" / "student_latest.pt", student, optimizer, episode, best_metric)
-            if selection_metric >= best_metric:
-                best_metric = selection_metric
-                save_checkpoint(run_dir / "checkpoints" / "student_best.pt", student, optimizer, episode, best_metric)
-            if (episode + 1) % settings.checkpoint_interval == 0:
-                save_checkpoint(run_dir / "checkpoints" / f"student_step_{episode + 1}.pt", student, optimizer, episode, best_metric)
+    metrics = run_episode(
+        args.mode,
+        env,
+        teacher,
+        student,
+        settings,
+        run_dir=run_dir,
+        capture_frames=args.capture_frames,
+        capture_frame_stride=args.capture_frame_stride,
+        capture_viewer=args.capture_viewer,
+        capture_viewer_len=args.capture_viewer_len,
+        capture_viewer_env_id=args.capture_viewer_env_id,
+        capture_viewer_video=args.capture_viewer_video,
+        wandb_run=wandb_run,
+        capture_viewer_wandb_key=args.capture_viewer_wandb_key,
+        capture_viewer_video_wandb_key=args.capture_viewer_video_wandb_key,
+        capture_viewer_video_fps=args.capture_viewer_video_fps,
+    )
+    _log(
+        f"[episode 0] mode={args.mode}, goal_completion_ratio={metrics['goal_completion_ratio']:.3f}, "
+        f"goal_idx={metrics['goal_idx']:.0f}, action_loss={metrics['action_loss']:.6f}, "
+        f"aux_object_pos_loss={metrics['aux_object_pos_loss']:.6f}, beta={metrics['beta']:.3f}"
+    )
+    record_metrics(
+        run_dir,
+        {"episode": 0, "mode": args.mode, **metrics},
+        wandb_run=wandb_run,
+        step=1,
+    )
+    save_camera_debug(env, run_dir)
 
     if wandb_run is not None:
         wandb_run.finish()

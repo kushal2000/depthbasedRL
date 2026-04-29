@@ -58,20 +58,8 @@ Teacher baseline that was observed with large-batch direct-sim evaluation:
 
 Important interpretation note:
 
-- Mixed-policy train metrics are **not** the same as pure student metrics.
-- Early train episodes can look good while pure `student_eval` still fails.
-
-### Known caveat
-
-`distill.py` currently contains an experimental in-process eval path driven by
-`eval_num_envs > 0`. That path creates a second env in the same app/stage and is
-not the recommended pattern for cluster runs.
-
-For long runs, prefer:
-
-- `eval_num_envs: 0`
-- checkpoint during training
-- separate `student_eval` jobs from saved checkpoints
+- `train_online/recent_reset_*` is the live student-only signal during online DAgger.
+- Use separate `student_eval` jobs from saved checkpoints for standalone eval.
 
 ## Known-Good Commands
 
@@ -107,7 +95,7 @@ For long runs, prefer:
 
 ```bash
 ./scripts/run_in_isaacsim_env.sh python isaacsim_conversion/distill.py \
-  --mode train \
+  --mode train_online \
   --headless \
   --student_input teacher_obs \
   --student_arch mlp_recurrent \
@@ -169,11 +157,8 @@ allocated node, it can be used later as an override.
 - GPU: `L40S`
 - account: `move`
 - training mode: `teacher_obs`
-- schedule:
-  - `beta_hold_episodes: 5`
-  - `beta_decay: 0.05`
-  - `num_episodes: 150`
-- checkpoint every `5` episodes
+- online DAgger with student actions for environment stepping
+- checkpoint every configured interval
 - external eval only
 
 ## Cluster Commands

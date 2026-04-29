@@ -6,17 +6,7 @@ hand_moving_average: 0.1
 arm_moving_average: 0.1
 dof_speed_scale: 1.5
 control_dt: 0.016666666666666666
-beta_mode: always_teacher
-beta_start: 1.0
-beta_end: 1.0
-beta_decay: 0.0
-beta_metric_threshold: 1.0
-beta_update_episodes: 1
-beta_hold_episodes: 0
 checkpoint_interval: 10
-eval_interval: 999
-eval_num_envs: 0
-eval_max_steps: 180
 image_height: 45
 image_width: 80
 learning_rate: 0.0001

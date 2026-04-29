@@ -17,7 +17,7 @@ The loop is continuous rather than episode-batched:
 5. Step the simulator with the student action only (`beta = 0`).
 6. Reset only envs that satisfy done/reset conditions.
 
-The older `--mode train` path remains available for fixed-decay and curriculum comparisons.
+The older episode-batched `--mode train` path has been removed; use `train_online` for DAgger/distillation.
 
 ## Reset Conditions
 

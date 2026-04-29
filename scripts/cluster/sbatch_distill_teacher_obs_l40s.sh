@@ -34,7 +34,7 @@ echo "Cache: $OMNI_KIT_CACHE_PATH"
 echo "Run config: $RUN_CONFIG"
 
 ./scripts/run_in_isaacsim_env.sh python isaacsim_conversion/distill.py \
-  --mode train \
+  --mode train_online \
   --headless \
   --student_input teacher_obs \
   --student_arch "$STUDENT_ARCH" \

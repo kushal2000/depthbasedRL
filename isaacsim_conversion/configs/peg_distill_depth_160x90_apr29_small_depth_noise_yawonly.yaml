@@ -16,8 +16,6 @@ object_start_mode: randomized
 object_pos_noise_xyz: [0.1, 0.1, 0.02]
 object_yaw_noise_deg: 180.0
 object_rotation_noise_mode: yaw
-camera_pos_noise_xyz: [0.03, 0.03, 0.03]
-camera_rot_noise_deg: [5.0, 5.0, 5.0]
 camera_backend: tiled
 depth_preprocess_mode: window_normalize
 depth_min_m: 0.55
@@ -26,8 +24,16 @@ image_robustness:
   enabled: true
   depth_aug:
     enabled: true
+    correlated_noise_std_px: 0.02
+    correlated_noise_std_depth: 0.001
+    normal_noise_std_m: 0.0005
+    pixel_dropout_prob: 0.0
+    random_blob_prob: 0.0
+    stick_prob: 0.0
+    max_stick_len_px: 18
+    max_stick_width_px: 3
 episode_length: 600
 reset_when_dropped: false
-online_num_iters: 350000
+online_num_iters: 3500000
 online_log_interval: 1000
 online_update_interval: 1

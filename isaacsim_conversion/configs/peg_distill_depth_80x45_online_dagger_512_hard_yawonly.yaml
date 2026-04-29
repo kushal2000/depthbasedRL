@@ -6,17 +6,7 @@ hand_moving_average: 0.1
 arm_moving_average: 0.1
 dof_speed_scale: 1.5
 control_dt: 0.016666666666666666
-beta_mode: always_student
-beta_start: 0.0
-beta_end: 0.0
-beta_decay: 0.0
-beta_metric_threshold: 0.8
-beta_update_episodes: 2
-beta_hold_episodes: 0
 checkpoint_interval: 10
-eval_interval: 999
-eval_num_envs: 0
-eval_max_steps: 700
 image_height: 45
 image_width: 80
 learning_rate: 0.0001
@@ -31,8 +21,6 @@ hole_xy_sample_min: [-0.15, -0.11]
 hole_xy_sample_max: [0.15, 0.11]
 camera_pos_noise_xyz: [0.03, 0.03, 0.03]
 camera_rot_noise_deg: [5.0, 5.0, 5.0]
-monitor_num_envs: 0
-monitor_log_window: 10
 camera_backend: tiled
 depth_preprocess_mode: window_normalize
 depth_min_m: 0.55

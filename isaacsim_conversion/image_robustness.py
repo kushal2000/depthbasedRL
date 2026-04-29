@@ -203,6 +203,10 @@ def preprocess_policy_images(
         depth = images["depth"].float()
         depth = _resize_image_exact(depth, out_height, out_width, preprocess_cfg.pad_to_size)
         processed["depth"] = depth
+    if "depth_metric" in images:
+        depth_metric = images["depth_metric"].float()
+        depth_metric = _resize_image_exact(depth_metric, out_height, out_width, preprocess_cfg.pad_to_size)
+        processed["depth_metric"] = depth_metric
 
     if modality == "depth":
         return processed["depth"], processed
@@ -214,13 +218,37 @@ def preprocess_policy_images(
 
 
 class TrainImageRobustifier:
-    def __init__(self, cfg: ImageRobustnessCfg, num_envs: int, device: torch.device):
+    def __init__(
+        self,
+        cfg: ImageRobustnessCfg,
+        num_envs: int,
+        device: torch.device,
+        depth_preprocess_mode: str = "window_normalize",
+        depth_min_m: float = 0.0,
+        depth_max_m: float = 1.0,
+    ):
         self.cfg = cfg
         self.num_envs = num_envs
         self.device = device
+        self.depth_preprocess_mode = depth_preprocess_mode
+        self.depth_min_m = float(depth_min_m)
+        self.depth_max_m = float(depth_max_m)
         self._background_images = self._load_background_images()
         self._delay_steps = torch.zeros(num_envs, dtype=torch.long, device=device)
         self._delay_queue: list[torch.Tensor] = []
+
+    def preprocess_depth_metric(self, depth_m: torch.Tensor) -> torch.Tensor:
+        depth_m = depth_m.float()
+        if self.depth_preprocess_mode == "window_normalize":
+            valid = (depth_m >= self.depth_min_m) & (depth_m <= self.depth_max_m)
+            normalized = (depth_m - self.depth_min_m) / max(self.depth_max_m - self.depth_min_m, 1e-6)
+            return torch.where(valid, normalized, torch.zeros_like(depth_m))
+        if self.depth_preprocess_mode == "clip_divide":
+            return torch.clamp(depth_m, self.depth_min_m, self.depth_max_m) / max(self.depth_max_m, 1e-6)
+        if self.depth_preprocess_mode == "metric":
+            valid = (depth_m >= self.depth_min_m) & (depth_m <= self.depth_max_m)
+            return torch.where(valid, depth_m, torch.zeros_like(depth_m))
+        raise ValueError(f"Unsupported depth_preprocess_mode={self.depth_preprocess_mode!r}")
 
     def _max_random_delay_frames(self) -> int:
         if self.cfg.image_delay.queue_length_frames is not None:
@@ -344,10 +372,10 @@ class TrainImageRobustifier:
             out[env_id] = torch.clamp(0.7 * blurred[0] + 0.3 * out[env_id], 0.0, 1.0)
         return out
 
-    def _apply_depth_aug(self, depth: torch.Tensor) -> torch.Tensor:
+    def _apply_depth_aug_metric(self, depth_m: torch.Tensor) -> torch.Tensor:
         if not self.cfg.depth_aug.enabled:
-            return depth
-        out = depth.clone()
+            return depth_m
+        out = depth_m.clone()
         cfg = self.cfg.depth_aug
         if cfg.correlated_noise_std_px > 0.0:
             small = F.interpolate(
@@ -418,8 +446,11 @@ class TrainImageRobustifier:
             images["rgb"] = self._apply_rgb_background(images["rgb"], mask)
             images["rgb"] = self._apply_rgb_color_jitter(images["rgb"])
             images["rgb"] = self._apply_rgb_motion_blur(images["rgb"])
-        if "depth" in images:
-            images["depth"] = self._apply_depth_aug(images["depth"])
+        if "depth_metric" in images:
+            images["depth_metric_noisy"] = self._apply_depth_aug_metric(images["depth_metric"])
+            images["depth"] = self.preprocess_depth_metric(images["depth_metric_noisy"])
+        elif "depth" in images:
+            images["depth"] = images["depth"].clone()
 
         if policy_image.shape[1] == 1 and "depth" in images:
             policy_image = images["depth"]

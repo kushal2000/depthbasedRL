@@ -7,40 +7,18 @@ cluster and how to test it without disturbing the working `L40S` setup.
 
 Two different issues showed up in the recent cluster batch:
 
-### 1. GroundPlane collision on some teacher-obs configs
+### 1. Historical GroundPlane collision on some teacher-obs configs
 
-This is **not** caused by the new monitor-env feature.
-
-The new monitor logic keeps a subset of the **existing** vectorized env batch
-student-only. It does **not** create a second simulator env or a second stage.
-
-The actual collision came from the older in-process eval path in
-`isaacsim_conversion/distill.py`, which still runs when:
-
-- `eval_interval` is active
-- and `eval_num_envs > 0`
-
-That path creates a second `IsaacSimDistillEnv` inside the same app/stage, which
-recreates:
+This was caused by an older in-process eval path in `isaacsim_conversion/distill.py`.
+That path created a second `IsaacSimDistillEnv` inside the same app/stage, which
+recreated:
 
 - `/World/GroundPlane`
 - and other scene content
 
-This is why configs like these are currently unsafe for long cluster jobs:
+That code path has been removed. The safe pattern is:
 
-- `hammer_distill_teacher_obs_4096_hold_then_decay.yaml`
-- `hammer_distill_teacher_obs_4096_mlp_hold.yaml`
-- `hammer_distill_teacher_obs_4096_always_student.yaml`
-
-because they still contain:
-
-- `eval_interval: 1`
-- `eval_num_envs: 128`
-
-The safe pattern is:
-
-- `eval_num_envs: 0`
-- use the new `student_monitor` rows during training
+- use `train_online/recent_reset_*` rows during training
 - run separate `student_eval` jobs from checkpoints when needed
 
 ### 2. RTX6000 CUDA kernel-image failure
@@ -159,8 +137,6 @@ alternate package versions.
 ## Current recommendation
 
 - Keep using `L40S` for productive runs.
-- Disable the old in-process eval path in configs used for cluster training:
-  - set `eval_num_envs: 0`
-- Use the new `student_monitor` rows as the live student-only signal.
+- Use `train_online/recent_reset_*` rows as the live student-only signal.
 - Treat `RTX6000` as a separate environment-debugging track with its own clone
   and env, not as a drop-in replacement for the working `L40S` setup.

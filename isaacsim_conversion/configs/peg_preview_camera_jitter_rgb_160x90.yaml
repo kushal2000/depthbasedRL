@@ -1,5 +1,5 @@
 num_episodes: 1
-max_steps: 700
+max_steps: 180
 action_loss_weight: 1.0
 aux_object_pos_weight: 1.0
 hand_moving_average: 0.1
@@ -7,20 +7,26 @@ arm_moving_average: 0.1
 dof_speed_scale: 1.5
 control_dt: 0.016666666666666666
 checkpoint_interval: 10
-image_height: 45
-image_width: 80
+image_height: 90
+image_width: 160
 learning_rate: 0.0001
-num_envs: 512
+num_envs: 4
 env_spacing: 4.0
+ground_plane_size: 500.0
 object_start_mode: fixed
 object_pos_noise_xyz: [0.0, 0.0, 0.0]
 object_yaw_noise_deg: 0.0
+object_rotation_noise_mode: yaw
+camera_pos_noise_xyz: [0.03, 0.03, 0.03]
+camera_rot_noise_deg: [5.0, 5.0, 5.0]
+hole_pos_noise_xyz: [0.0, 0.0, 0.0]
+hole_yaw_noise_deg: 0.0
 camera_backend: tiled
-depth_preprocess_mode: window_normalize
-depth_min_m: 0.55
-depth_max_m: 1.60
-episode_length: 600
+depth_preprocess_mode: metric
+depth_min_m: 0.0
+depth_max_m: 5.0
+episode_length: 180
 reset_when_dropped: false
-online_num_iters: 350000
-online_log_interval: 1000
+online_num_iters: 1000
+online_log_interval: 100
 online_update_interval: 1
