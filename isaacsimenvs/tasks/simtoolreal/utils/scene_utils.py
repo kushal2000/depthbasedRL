@@ -400,8 +400,8 @@ def _draw_depth_sticks(depth_nhw: torch.Tensor, *, cfg, stick_prob: float, max_s
     width_idx = torch.arange(max_width, device=device).view(1, 1, 1, max_width)
     xs = torch.round(x0[..., None, None] + line_idx * torch.cos(angles[..., None, None])).long()
     ys = torch.round(y0[..., None, None] + line_idx * torch.sin(angles[..., None, None])).long()
-    xs = xs.expand(-1, -1, -1, max_width).clamp_(0, width - 1)
-    ys = (ys + width_idx).clamp_(0, height - 1)
+    xs = xs.expand(-1, -1, -1, max_width).clamp(0, width - 1)
+    ys = (ys + width_idx).clamp(0, height - 1)
 
     valid = (
         active[..., None, None]
