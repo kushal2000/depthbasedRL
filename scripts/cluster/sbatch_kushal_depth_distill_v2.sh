@@ -91,10 +91,16 @@ if [[ "$STUDENT_INPUT" == "camera" ]]; then
   fi
   if [[ -n "$CAMERA_POS_NOISE_M" ]]; then
     read -r -a camera_pos_noise_args <<< "${CAMERA_POS_NOISE_M//,/ }"
+    if [[ "${#camera_pos_noise_args[@]}" -eq 1 ]]; then
+      camera_pos_noise_args=("${camera_pos_noise_args[0]}" "${camera_pos_noise_args[0]}" "${camera_pos_noise_args[0]}")
+    fi
     cmd+=(--camera_pos_noise_m "${camera_pos_noise_args[@]}")
   fi
   if [[ -n "$CAMERA_ROT_NOISE_DEG" ]]; then
     read -r -a camera_rot_noise_args <<< "${CAMERA_ROT_NOISE_DEG//,/ }"
+    if [[ "${#camera_rot_noise_args[@]}" -eq 1 ]]; then
+      camera_rot_noise_args=("${camera_rot_noise_args[0]}" "${camera_rot_noise_args[0]}" "${camera_rot_noise_args[0]}")
+    fi
     cmd+=(--camera_rot_noise_deg "${camera_rot_noise_args[@]}")
   fi
 fi
