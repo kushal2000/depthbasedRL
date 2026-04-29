@@ -252,6 +252,22 @@ def main() -> None:
         default=None,
     )
     parser.add_argument("--camera_pose_randomization_mode", choices=("startup", "reset"), default=None)
+    parser.add_argument(
+        "--camera_pos_noise_m",
+        type=float,
+        nargs=3,
+        default=None,
+        metavar=("X", "Y", "Z"),
+        help="Custom per-axis camera position noise half-widths in meters.",
+    )
+    parser.add_argument(
+        "--camera_rot_noise_deg",
+        type=float,
+        nargs=3,
+        default=None,
+        metavar=("ROLL", "PITCH", "YAW"),
+        help="Custom per-axis camera RPY noise half-widths in degrees.",
+    )
     parser.add_argument("--peg_object_init_orientation_mode", choices=("scene", "yaw_only", "full"), default=None)
     parser.add_argument("--peg_object_init_position_noise_xy", type=float, nargs=2, default=None)
     parser.add_argument("--peg_object_init_position_noise_z", type=float, default=None)
@@ -296,6 +312,10 @@ def main() -> None:
         env_cfg.student_obs.camera_pose_randomization_profile = args.camera_pose_randomization_profile
     if args.camera_pose_randomization_mode is not None:
         env_cfg.student_obs.camera_pose_randomization_mode = args.camera_pose_randomization_mode
+    if args.camera_pos_noise_m is not None:
+        env_cfg.student_obs.camera_pos_noise_m = tuple(args.camera_pos_noise_m)
+    if args.camera_rot_noise_deg is not None:
+        env_cfg.student_obs.camera_rot_noise_deg = tuple(args.camera_rot_noise_deg)
     if args.peg_object_init_orientation_mode is not None:
         env_cfg.peg_in_hole.object_init_orientation_mode = args.peg_object_init_orientation_mode
     if args.peg_object_init_position_noise_xy is not None:
