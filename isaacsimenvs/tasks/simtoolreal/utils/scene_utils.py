@@ -332,6 +332,13 @@ def apply_student_camera_pose_randomization(env, env_ids: torch.Tensor) -> None:
     quat = quat_mul(_rpy_noise_quat_wxyz(rot_noise_rad), base_quat)
     pos_w = env.scene.env_origins[env_ids] + base_pos + pos_noise
 
+    # Isaac Lab 5.1's XformPrimView writes world poses through Fabric when
+    # Fabric is enabled. The renderer reads USD-authored camera transforms, so
+    # mirror these writes back to USD for camera randomization to affect images.
+    view = getattr(camera, "_view", None)
+    if view is not None and hasattr(view, "_sync_usd_on_fabric_write"):
+        view._sync_usd_on_fabric_write = True
+
     camera.set_world_poses(
         positions=pos_w,
         orientations=quat,
