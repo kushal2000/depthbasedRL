@@ -38,6 +38,7 @@ def main() -> None:
     import isaacsimenvs  # noqa: F401  triggers gym.register side effect
     from isaaclab_tasks.utils.parse_cfg import load_cfg_from_registry
     from isaacsimenvs.tasks.cartpole.cartpole_env import CartpoleEnvCfg
+    from isaacsimenvs.utils.config_utils import apply_env_cfg_dict
 
     task_id = "Isaacsimenvs-Cartpole-Direct-v0"
 
@@ -80,13 +81,13 @@ def main() -> None:
     # Pick a known overlay key and confirm round-trip.
     pre = env_cfg.scene.num_envs
     overlay["scene"]["num_envs"] = 77  # sentinel value unlikely to match default
-    env_cfg.from_dict(overlay)
+    apply_env_cfg_dict(env_cfg, overlay)
     assert env_cfg.scene.num_envs == 77, f"overlay did not apply: got {env_cfg.scene.num_envs}"
     print(f"[test] overlay applied: scene.num_envs {pre} → {env_cfg.scene.num_envs}")
 
     # Confirm the new record_camera_* fields round-trip through from_dict.
     overlay["record_camera_eye"] = [-5.0, 1.0, 3.0]
-    env_cfg.from_dict(overlay)
+    apply_env_cfg_dict(env_cfg, overlay)
     assert tuple(env_cfg.record_camera_eye) == (-5.0, 1.0, 3.0), env_cfg.record_camera_eye
     print(f"[test] overlay applied: record_camera_eye → {env_cfg.record_camera_eye}")
 

@@ -35,6 +35,8 @@ from isaaclab.envs.utils.spaces import (
 from isaaclab.utils import replace_slices_with_strings, replace_strings_with_slices
 from isaaclab_tasks.utils.parse_cfg import load_cfg_from_registry
 
+from isaacsimenvs.utils.config_utils import apply_env_cfg_dict
+
 
 def hydra_task_config_with_yaml(
     task_name: str,
@@ -76,7 +78,7 @@ def hydra_task_config_with_yaml(
                 # typed configclass, recursing into nested configclasses — exactly
                 # what our hand-rolled `apply_task_overrides` walker does, but
                 # upstream-supported.
-                env_cfg.from_dict(overlay)
+                apply_env_cfg_dict(env_cfg, overlay)
 
             env_cfg = replace_env_cfg_spaces_with_strings(env_cfg)
             env_cfg_dict = env_cfg.to_dict()
@@ -96,7 +98,7 @@ def hydra_task_config_with_yaml(
             ):
                 resolved = OmegaConf.to_container(hydra_cfg, resolve=True)
                 resolved = replace_strings_with_slices(resolved)
-                env_cfg.from_dict(resolved["env"])
+                apply_env_cfg_dict(env_cfg, resolved["env"])
                 env_cfg_restored = replace_strings_with_env_cfg_spaces(env_cfg)
                 if isinstance(agent_cfg, dict) or agent_cfg is None:
                     merged_agent = resolved["agent"]

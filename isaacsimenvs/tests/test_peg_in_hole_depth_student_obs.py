@@ -43,12 +43,13 @@ def main() -> None:
 
     import isaacsimenvs  # noqa: F401  (registers gym envs)
     from isaaclab_tasks.utils.parse_cfg import load_cfg_from_registry
+    from isaacsimenvs.utils.config_utils import apply_env_cfg_dict
 
     task = "Isaacsimenvs-PegInHoleDepthStudent-Direct-v0"
     spec = gym.spec(task)
     cfg = load_cfg_from_registry(task, "env_cfg_entry_point")
     with Path(spec.kwargs["env_cfg_yaml_entry_point"]).open() as f:
-        cfg.from_dict(yaml.safe_load(f) or {})
+        apply_env_cfg_dict(cfg, yaml.safe_load(f) or {})
 
     cfg.scene.num_envs = args.num_envs
     cfg.peg_in_hole.force_scene_tol_combo = (0, 0)

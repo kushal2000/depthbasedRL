@@ -24,7 +24,12 @@ def _restore(agent, args):
         elif load_mode == 'weights':
             weights = _load_checkpoint_weights(agent, args['checkpoint'])
             agent.set_weights(weights)
-            if getattr(agent, 'has_central_value', False) and 'assymetric_vf_nets' in weights:
+            agent.loaded_checkpoint = args['checkpoint']
+            if (
+                getattr(agent, 'has_central_value', False)
+                and hasattr(agent, 'central_value_net')
+                and 'assymetric_vf_nets' in weights
+            ):
                 try:
                     agent.central_value_net.load_state_dict(weights['assymetric_vf_nets'])
                 except RuntimeError as exc:
