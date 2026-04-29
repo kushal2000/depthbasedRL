@@ -244,6 +244,17 @@ def main() -> None:
     parser.add_argument("--sim_device", default="cuda:0")
     parser.add_argument("--force_scene_tol_combo", default=None)
     parser.add_argument("--force_peg_idx", type=int, default=None)
+    parser.add_argument("--depth_noise_profile", choices=("off", "weak", "medium", "strong", "custom"), default=None)
+    parser.add_argument("--depth_noise_strength", type=float, default=None)
+    parser.add_argument(
+        "--camera_pose_randomization_profile",
+        choices=("off", "weak", "medium", "strong", "custom"),
+        default=None,
+    )
+    parser.add_argument("--camera_pose_randomization_mode", choices=("startup", "reset"), default=None)
+    parser.add_argument("--peg_object_init_orientation_mode", choices=("scene", "yaw_only", "full"), default=None)
+    parser.add_argument("--peg_object_init_position_noise_xy", type=float, nargs=2, default=None)
+    parser.add_argument("--peg_object_init_position_noise_z", type=float, default=None)
     parser.add_argument("--capture_viewer", action="store_true")
     parser.add_argument("--capture_viewer_len", type=int, default=600)
     parser.add_argument("--depth_debug_interval", type=int, default=0)
@@ -277,6 +288,20 @@ def main() -> None:
         env_cfg.peg_in_hole.force_scene_tol_combo = _parse_optional_pair(args.force_scene_tol_combo)
     if args.force_peg_idx is not None:
         env_cfg.peg_in_hole.force_peg_idx = args.force_peg_idx
+    if args.depth_noise_profile is not None:
+        env_cfg.student_obs.depth_noise_profile = args.depth_noise_profile
+    if args.depth_noise_strength is not None:
+        env_cfg.student_obs.depth_noise_strength = args.depth_noise_strength
+    if args.camera_pose_randomization_profile is not None:
+        env_cfg.student_obs.camera_pose_randomization_profile = args.camera_pose_randomization_profile
+    if args.camera_pose_randomization_mode is not None:
+        env_cfg.student_obs.camera_pose_randomization_mode = args.camera_pose_randomization_mode
+    if args.peg_object_init_orientation_mode is not None:
+        env_cfg.peg_in_hole.object_init_orientation_mode = args.peg_object_init_orientation_mode
+    if args.peg_object_init_position_noise_xy is not None:
+        env_cfg.peg_in_hole.object_init_position_noise_xy = tuple(args.peg_object_init_position_noise_xy)
+    if args.peg_object_init_position_noise_z is not None:
+        env_cfg.peg_in_hole.object_init_position_noise_z = args.peg_object_init_position_noise_z
 
     env = gym.make(args.task, cfg=env_cfg)
     inner = env.unwrapped
@@ -369,6 +394,7 @@ def main() -> None:
                 step=step,
                 env_ids=depth_debug_env_ids or [0],
                 raw_depth=raw_depth,
+                noisy_depth=getattr(inner, "_student_depth_noisy_m", None),
                 policy_depth=image,
                 near=float(env_cfg.student_obs.depth_min_m),
                 far=float(env_cfg.student_obs.depth_max_m),

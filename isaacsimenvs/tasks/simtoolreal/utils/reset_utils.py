@@ -4,13 +4,14 @@ from __future__ import annotations
 
 import torch
 
-from isaaclab.utils.math import random_orientation
+from isaaclab.utils.math import quat_from_angle_axis, random_orientation
 
 from .action_utils import sample_log_uniform
 from .goal_sampling import sample_absolute_goal_pose, sample_delta_goal_pose
 from .obs_utils import KEYPOINT_CORNERS, NUM_FINGERTIPS
 from .scene_utils import (
     ARM_JOINT_REGEX,
+    apply_student_camera_pose_randomization,
     FINGERTIP_BODY_REGEX,
     HAND_JOINT_REGEX,
     JOINT_NAMES_CANONICAL,
@@ -239,7 +240,22 @@ def _reset_object_pose(env, env_ids: torch.Tensor) -> None:
             ),
             dim=-1,
         )
-        quat = random_orientation(n, device=env.device)
+        orientation_mode = str(cfg.object_orientation_mode).lower()
+        if orientation_mode == "full":
+            quat = random_orientation(n, device=env.device)
+        elif orientation_mode == "yaw_only":
+            angle = torch.empty(n, device=env.device).uniform_(
+                -float(cfg.object_yaw_range_degrees),
+                float(cfg.object_yaw_range_degrees),
+            ) * (torch.pi / 180.0)
+            axis = torch.zeros(n, 3, device=env.device)
+            axis[:, 2] = 1.0
+            quat = quat_from_angle_axis(angle, axis)
+        else:
+            raise ValueError(
+                "cfg.reset.object_orientation_mode must be 'full' or "
+                f"'yaw_only', got {orientation_mode!r}."
+            )
 
     pose = torch.cat([pos_local + env_origins, quat], dim=-1)
     env.object.write_root_pose_to_sim(pose, env_ids=env_ids)
@@ -324,6 +340,11 @@ def reset_env_state(env, env_ids: torch.Tensor) -> None:
     for queue_name in ("_student_camera_queue", "_student_obs_queue"):
         if hasattr(env, queue_name):
             getattr(env, queue_name)[env_ids] = 0.0
+    if (
+        getattr(env, "student_camera", None) is not None
+        and str(env.cfg.student_obs.camera_pose_randomization_mode).lower() == "reset"
+    ):
+        apply_student_camera_pose_randomization(env, env_ids)
     env._object_forces[env_ids] = 0.0
     env._object_torques[env_ids] = 0.0
 

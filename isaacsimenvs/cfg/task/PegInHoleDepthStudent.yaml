@@ -55,6 +55,10 @@ peg_in_hole:
   force_tightest_tol_per_scene: false
   tightest_n_tol_slots_per_scene: -1
   force_peg_idx: null
+  object_init_position_noise_xy: [0.0, 0.0]
+  object_init_position_noise_z: 0.0
+  object_init_orientation_mode: "scene"
+  object_init_yaw_range_degrees: 180.0
 
 obs:
   state_list: [joint_pos, joint_vel, prev_action_targets, palm_pos, palm_rot, palm_vel,
@@ -86,6 +90,10 @@ student_obs:
   depth_min_m: 0.70
   depth_max_m: 1.10
   hide_goal_viz: true
+  depth_noise_profile: "off"
+  depth_noise_strength: 1.0
+  camera_pose_randomization_profile: "off"
+  camera_pose_randomization_mode: "startup"
   camera_backend: tiled
   camera_mount: world
   camera_convention: ros

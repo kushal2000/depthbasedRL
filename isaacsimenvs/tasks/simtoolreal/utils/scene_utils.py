@@ -8,10 +8,12 @@ import time
 from pathlib import Path
 
 import torch
+import torch.nn.functional as F
 
 import isaaclab.sim as sim_utils
 from isaaclab.actuators import ImplicitActuatorCfg
 from isaaclab.assets import Articulation, ArticulationCfg, RigidObject, RigidObjectCfg
+from isaaclab.utils.math import quat_from_angle_axis, quat_mul
 from isaaclab.sim.converters import UrdfConverter, UrdfConverterCfg
 from isaaclab.sim.spawners.from_files import GroundPlaneCfg, UsdFileCfg, spawn_ground_plane
 from isaaclab.sim.spawners.wrappers import MultiUsdFileCfg
@@ -196,6 +198,246 @@ def _student_camera_data_types(modality: str) -> list[str]:
     )
 
 
+_DEPTH_NOISE_PRESETS: dict[str, dict[str, float | int]] = {
+    "off": {
+        "gaussian_std_m": 0.0,
+        "correlated_std_m": 0.0,
+        "correlated_kernel_size": 1,
+        "dropout_prob": 0.0,
+        "randu_prob": 0.0,
+        "stick_prob": 0.0,
+        "max_sticks_per_image": 0,
+    },
+    "weak": {
+        "gaussian_std_m": 0.0002,
+        "correlated_std_m": 0.0003,
+        "correlated_kernel_size": 5,
+        "dropout_prob": 0.00005,
+        "randu_prob": 0.00005,
+        "stick_prob": 0.0,
+        "max_sticks_per_image": 0,
+    },
+    "medium": {
+        "gaussian_std_m": 0.002,
+        "correlated_std_m": 0.003,
+        "correlated_kernel_size": 5,
+        "dropout_prob": 0.003,
+        "randu_prob": 0.003,
+        "stick_prob": 0.00025,
+        "max_sticks_per_image": 8,
+    },
+    "strong": {
+        "gaussian_std_m": 0.015,
+        "correlated_std_m": 0.020,
+        "correlated_kernel_size": 9,
+        "dropout_prob": 0.020,
+        "randu_prob": 0.020,
+        "stick_prob": 0.002,
+        "max_sticks_per_image": 32,
+    },
+}
+
+
+_CAMERA_POSE_RANDOMIZATION_PRESETS: dict[str, tuple[tuple[float, float, float], tuple[float, float, float]]] = {
+    "off": ((0.0, 0.0, 0.0), (0.0, 0.0, 0.0)),
+    "weak": ((0.001, 0.001, 0.001), (0.1, 0.1, 0.1)),
+    "medium": ((0.01, 0.01, 0.01), (1.0, 1.0, 1.0)),
+    "strong": ((0.10, 0.10, 0.10), (20.0, 20.0, 20.0)),
+}
+
+
+def _student_depth_noise_params(cfg) -> dict[str, float | int]:
+    profile = str(cfg.depth_noise_profile).lower()
+    if profile in _DEPTH_NOISE_PRESETS:
+        params = dict(_DEPTH_NOISE_PRESETS[profile])
+    elif profile == "custom":
+        params = {
+            "gaussian_std_m": float(cfg.depth_noise_gaussian_std_m),
+            "correlated_std_m": float(cfg.depth_noise_correlated_std_m),
+            "correlated_kernel_size": int(cfg.depth_noise_correlated_kernel_size),
+            "dropout_prob": float(cfg.depth_noise_dropout_prob),
+            "randu_prob": float(cfg.depth_noise_randu_prob),
+            "stick_prob": float(cfg.depth_noise_stick_prob),
+            "max_sticks_per_image": int(cfg.depth_noise_max_sticks_per_image),
+        }
+    else:
+        raise ValueError(
+            "cfg.student_obs.depth_noise_profile must be one of "
+            f"{sorted([*_DEPTH_NOISE_PRESETS, 'custom'])}, got {profile!r}."
+        )
+
+    strength = float(cfg.depth_noise_strength)
+    for key in ("gaussian_std_m", "correlated_std_m", "dropout_prob", "randu_prob", "stick_prob"):
+        params[key] = float(params[key]) * strength
+    params["correlated_kernel_size"] = max(1, int(params["correlated_kernel_size"]))
+    params["max_sticks_per_image"] = max(0, int(params["max_sticks_per_image"]))
+    return params
+
+
+def _camera_pose_noise_ranges(cfg) -> tuple[torch.Tensor, torch.Tensor]:
+    profile = str(cfg.camera_pose_randomization_profile).lower()
+    if profile in _CAMERA_POSE_RANDOMIZATION_PRESETS:
+        pos_range, rot_range = _CAMERA_POSE_RANDOMIZATION_PRESETS[profile]
+    elif profile == "custom":
+        pos_range = tuple(float(x) for x in cfg.camera_pos_noise_m)
+        rot_range = tuple(float(x) for x in cfg.camera_rot_noise_deg)
+    else:
+        raise ValueError(
+            "cfg.student_obs.camera_pose_randomization_profile must be one of "
+            f"{sorted([*_CAMERA_POSE_RANDOMIZATION_PRESETS, 'custom'])}, got {profile!r}."
+        )
+    return (
+        torch.as_tensor(pos_range, dtype=torch.float32),
+        torch.as_tensor(rot_range, dtype=torch.float32),
+    )
+
+
+def _rpy_noise_quat_wxyz(roll_pitch_yaw_rad: torch.Tensor) -> torch.Tensor:
+    """Convert batched XYZ Euler perturbations to wxyz quaternions."""
+    n = roll_pitch_yaw_rad.shape[0]
+    device = roll_pitch_yaw_rad.device
+    axes = torch.eye(3, device=device, dtype=roll_pitch_yaw_rad.dtype)
+    qx = quat_from_angle_axis(roll_pitch_yaw_rad[:, 0], axes[0].expand(n, -1))
+    qy = quat_from_angle_axis(roll_pitch_yaw_rad[:, 1], axes[1].expand(n, -1))
+    qz = quat_from_angle_axis(roll_pitch_yaw_rad[:, 2], axes[2].expand(n, -1))
+    return quat_mul(qz, quat_mul(qy, qx))
+
+
+def apply_student_camera_pose_randomization(env, env_ids: torch.Tensor) -> None:
+    """Randomize student-camera world poses for selected envs."""
+    cfg = getattr(env.cfg, "student_obs", None)
+    camera = getattr(env, "student_camera", None)
+    if cfg is None or camera is None:
+        return
+    pos_range_cpu, rot_range_cpu = _camera_pose_noise_ranges(cfg)
+    if not torch.any(pos_range_cpu > 0.0) and not torch.any(rot_range_cpu > 0.0):
+        return
+
+    env_ids = torch.as_tensor(env_ids, device=env.device, dtype=torch.long)
+    n = env_ids.numel()
+    if n == 0:
+        return
+
+    pos_range = pos_range_cpu.to(env.device)
+    rot_range_deg = rot_range_cpu.to(env.device)
+    base_pos = env._student_camera_base_pos_local[env_ids]
+    base_quat = env._student_camera_base_quat_wxyz[env_ids]
+    pos_noise = (torch.rand(n, 3, device=env.device) * 2.0 - 1.0) * pos_range
+    rot_noise_rad = (
+        (torch.rand(n, 3, device=env.device) * 2.0 - 1.0)
+        * rot_range_deg
+        * torch.pi
+        / 180.0
+    )
+    quat = quat_mul(_rpy_noise_quat_wxyz(rot_noise_rad), base_quat)
+    pos_w = env.scene.env_origins[env_ids] + base_pos + pos_noise
+
+    camera.set_world_poses(
+        positions=pos_w,
+        orientations=quat,
+        env_ids=env_ids,
+        convention=str(cfg.camera_convention),
+    )
+    env._student_camera_current_pos_w[env_ids] = pos_w
+    env._student_camera_current_quat_wxyz[env_ids] = quat
+
+
+def _maybe_initialize_student_camera_pose(env) -> None:
+    cfg = getattr(env.cfg, "student_obs", None)
+    if cfg is None or getattr(env, "_student_camera_pose_randomized_once", True):
+        return
+    mode = str(cfg.camera_pose_randomization_mode).lower()
+    if mode == "startup":
+        env_ids = torch.arange(env.num_envs, device=env.device)
+        apply_student_camera_pose_randomization(env, env_ids)
+        env._student_camera_pose_randomized_once = True
+    elif mode == "reset":
+        return
+    else:
+        raise ValueError(
+            "cfg.student_obs.camera_pose_randomization_mode must be "
+            f"'startup' or 'reset', got {mode!r}."
+        )
+
+
+def _draw_depth_sticks(depth_nhw: torch.Tensor, *, cfg, stick_prob: float, max_sticks_per_image: int) -> None:
+    if stick_prob <= 0.0 or max_sticks_per_image <= 0:
+        return
+    batch, height, width = depth_nhw.shape
+    expected = max(0.0, stick_prob * float(height * width))
+    if expected <= 0.0:
+        return
+    counts = torch.poisson(torch.full((batch,), expected, device=depth_nhw.device))
+    counts = torch.clamp(counts.to(torch.long), max=max_sticks_per_image)
+    max_len = max(1, int(cfg.depth_noise_stick_max_len_px))
+    max_width = max(1, int(cfg.depth_noise_stick_max_width_px))
+    d_min = float(cfg.depth_noise_randu_min_m)
+    d_max = float(cfg.depth_noise_randu_max_m)
+
+    for batch_id in range(batch):
+        count = int(counts[batch_id].item())
+        for _ in range(count):
+            length = int(torch.randint(1, max_len + 1, (1,), device=depth_nhw.device).item())
+            stick_width = int(torch.randint(1, max_width + 1, (1,), device=depth_nhw.device).item())
+            angle = torch.rand((), device=depth_nhw.device) * (2.0 * torch.pi)
+            x0 = torch.randint(0, width, (1,), device=depth_nhw.device).float()
+            y0 = torch.randint(0, height, (1,), device=depth_nhw.device).float()
+            idx = torch.arange(length, device=depth_nhw.device, dtype=torch.float32)
+            xs = torch.round(x0 + idx * torch.cos(angle)).long().clamp(0, width - 1)
+            ys = torch.round(y0 + idx * torch.sin(angle)).long().clamp(0, height - 1)
+            value = torch.empty((), device=depth_nhw.device).uniform_(d_min, d_max)
+            for offset in range(stick_width):
+                depth_nhw[batch_id, (ys + offset).clamp(0, height - 1), xs] = value
+
+
+def _apply_student_depth_noise(env, depth: torch.Tensor) -> torch.Tensor:
+    cfg = env.cfg.student_obs
+    params = _student_depth_noise_params(cfg)
+    if str(cfg.depth_noise_profile).lower() == "off" or all(
+        float(params[key]) <= 0.0
+        for key in ("gaussian_std_m", "correlated_std_m", "dropout_prob", "randu_prob", "stick_prob")
+    ):
+        return depth
+
+    noisy = depth.clone()
+    finite = torch.isfinite(noisy)
+    gaussian_std = float(params["gaussian_std_m"])
+    if gaussian_std > 0.0:
+        noisy = torch.where(finite, noisy + torch.randn_like(noisy) * gaussian_std, noisy)
+
+    correlated_std = float(params["correlated_std_m"])
+    if correlated_std > 0.0:
+        kernel = int(params["correlated_kernel_size"])
+        if kernel % 2 == 0:
+            kernel += 1
+        corr = torch.randn_like(noisy) * correlated_std
+        corr = F.avg_pool2d(corr, kernel_size=kernel, stride=1, padding=kernel // 2)
+        noisy = torch.where(finite, noisy + corr, noisy)
+
+    dropout_prob = min(max(float(params["dropout_prob"]), 0.0), 1.0)
+    if dropout_prob > 0.0:
+        mask = torch.rand_like(noisy) < dropout_prob
+        noisy = torch.where(mask, torch.zeros_like(noisy), noisy)
+
+    randu_prob = min(max(float(params["randu_prob"]), 0.0), 1.0)
+    if randu_prob > 0.0:
+        d_min = float(cfg.depth_noise_randu_min_m)
+        d_max = float(cfg.depth_noise_randu_max_m)
+        mask = torch.rand_like(noisy) < randu_prob
+        values = torch.empty_like(noisy).uniform_(d_min, d_max)
+        noisy = torch.where(mask, values, noisy)
+
+    if noisy.shape[1] != 1:
+        raise RuntimeError(f"Depth noise expects NCHW with one channel, got {tuple(noisy.shape)}")
+    _draw_depth_sticks(
+        noisy[:, 0],
+        cfg=cfg,
+        stick_prob=float(params["stick_prob"]),
+        max_sticks_per_image=int(params["max_sticks_per_image"]),
+    )
+    return noisy
+
+
 def hide_goal_viz_for_student_camera(env) -> None:
     cfg = getattr(env.cfg, "student_obs", None)
     if cfg is None or not cfg.enabled or not cfg.hide_goal_viz:
@@ -268,6 +510,21 @@ def setup_student_camera(env) -> None:
     )
     env.student_camera = camera_cls(cfg=camera_cfg)
     env.scene.sensors["student_camera"] = env.student_camera
+    base_pos = torch.tensor(
+        tuple(float(x) for x in cfg.camera_pos),
+        device=env.device,
+        dtype=torch.float32,
+    )
+    base_quat = torch.tensor(
+        tuple(float(x) for x in cfg.camera_quat_wxyz),
+        device=env.device,
+        dtype=torch.float32,
+    )
+    env._student_camera_base_pos_local = base_pos.unsqueeze(0).expand(env.num_envs, -1).clone()
+    env._student_camera_base_quat_wxyz = base_quat.unsqueeze(0).expand(env.num_envs, -1).clone()
+    env._student_camera_current_pos_w = env.scene.env_origins + env._student_camera_base_pos_local
+    env._student_camera_current_quat_wxyz = env._student_camera_base_quat_wxyz.clone()
+    env._student_camera_pose_randomized_once = False
     _log_scene_step(
         t0,
         f"registered student camera backend={backend} "
@@ -357,6 +614,7 @@ def read_student_camera_image(env) -> torch.Tensor:
             "launch with cameras enabled."
         )
 
+    _maybe_initialize_student_camera_pose(env)
     env.sim.render()
     dt = float(getattr(env, "physics_dt", env.cfg.sim.dt))
     camera.update(dt, force_recompute=True)
@@ -389,12 +647,18 @@ def read_student_camera_image(env) -> torch.Tensor:
             depth = depth.unsqueeze(1)
         else:
             raise RuntimeError(f"Unsupported depth tensor shape: {tuple(depth.shape)}")
+        env._student_depth_raw_m = depth.detach()
+        depth = _apply_student_depth_noise(env, depth)
+        env._student_depth_noisy_m = depth.detach()
         depth = _preprocess_student_depth(env, depth)
+        env._student_depth_policy_full = depth.detach()
         image_parts.append(_crop_student_image(env, depth))
 
     if not image_parts:
         raise ValueError(f"Unsupported student image modality: {modality!r}")
-    return _validate_student_image_shape(env, torch.cat(image_parts, dim=1))
+    image = _validate_student_image_shape(env, torch.cat(image_parts, dim=1))
+    env._student_image_policy = image.detach()
+    return image
 
 
 def _set_usd_attr(prim, name: str, value, value_type) -> None:

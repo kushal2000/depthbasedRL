@@ -79,30 +79,57 @@ def save_depth_debug(
     policy_depth: torch.Tensor,
     near: float,
     far: float,
+    noisy_depth: torch.Tensor | None = None,
 ) -> None:
-    """Save raw metric depth, raw-window visualization, policy depth, and stats."""
+    """Save raw/noisy metric depth, window visualizations, policy depth, and stats."""
 
     output_dir.mkdir(parents=True, exist_ok=True)
     env_ids = list(env_ids)
     raw = depth_tensor_to_nchw(raw_depth).detach().float().cpu().numpy()[env_ids, 0]
+    noisy = None
+    if noisy_depth is not None:
+        noisy = depth_tensor_to_nchw(noisy_depth).detach().float().cpu().numpy()[env_ids, 0]
     policy = depth_tensor_to_nchw(policy_depth).detach().float().cpu().numpy()[env_ids, 0]
     raw_window = np.nan_to_num((raw - near) / max(far - near, 1e-6), nan=0.0, posinf=1.0, neginf=0.0)
     raw_window = np.clip(raw_window, 0.0, 1.0)
+    noisy_window = None
+    if noisy is not None:
+        noisy_window = np.nan_to_num(
+            (noisy - near) / max(far - near, 1e-6),
+            nan=0.0,
+            posinf=1.0,
+            neginf=0.0,
+        )
+        noisy_window = np.clip(noisy_window, 0.0, 1.0)
 
     prefix = output_dir / f"step_{step:08d}"
-    np.savez_compressed(
-        prefix.with_suffix(".npz"),
-        env_ids=np.asarray(env_ids, dtype=np.int32),
-        raw_depth_m=raw,
-        raw_depth_window=raw_window,
-        policy_depth=policy,
-    )
+    arrays = {
+        "env_ids": np.asarray(env_ids, dtype=np.int32),
+        "raw_depth_m": raw,
+        "raw_depth_window": raw_window,
+        "policy_depth": policy,
+    }
+    if noisy is not None and noisy_window is not None:
+        arrays["noisy_depth_m"] = noisy
+        arrays["noisy_depth_window"] = noisy_window
+        arrays["noisy_minus_raw_m"] = noisy - raw
+    np.savez_compressed(prefix.with_suffix(".npz"), **arrays)
     _save_png(prefix.with_name(prefix.name + "_raw_window.png"), raw_window)
+    if noisy_window is not None:
+        _save_png(prefix.with_name(prefix.name + "_noisy_window.png"), noisy_window)
     _save_png(prefix.with_name(prefix.name + "_policy_depth.png"), policy)
 
     stats = {
         str(env_id): {
             "raw_depth_m": _stats(raw[i], near=near, far=far),
+            **(
+                {
+                    "noisy_depth_m": _stats(noisy[i], near=near, far=far),
+                    "noisy_minus_raw_m": _stats(noisy[i] - raw[i], near=-0.01, far=0.01),
+                }
+                if noisy is not None
+                else {}
+            ),
             "policy_depth": _stats(policy[i], near=0.0, far=1.0),
             "policy_nonzero_frac": float((policy[i] > 0.0).mean()),
             "policy_sat_low_frac": float((policy[i] <= 1e-6).mean()),

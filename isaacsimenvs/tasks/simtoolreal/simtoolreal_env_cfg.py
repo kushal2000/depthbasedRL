@@ -174,6 +174,35 @@ class StudentObsCfg:
     depth_max_m: float = 1.25
     hide_goal_viz: bool = True
 
+    # Metric-depth augmentation, applied before clipping/window normalization.
+    # Profiles are resolved in scene_utils:
+    #   off     -> no noise
+    #   weak    -> barely visible sanity-check noise
+    #   medium  -> intended realistic training noise
+    #   strong  -> obviously visible debug noise
+    #   custom  -> use the explicit fields below
+    depth_noise_profile: str = "off"
+    depth_noise_strength: float = 1.0
+    depth_noise_gaussian_std_m: float = 0.002
+    depth_noise_correlated_std_m: float = 0.003
+    depth_noise_correlated_kernel_size: int = 5
+    depth_noise_dropout_prob: float = 0.003
+    depth_noise_randu_prob: float = 0.003
+    depth_noise_randu_min_m: float = 0.50
+    depth_noise_randu_max_m: float = 1.30
+    depth_noise_stick_prob: float = 0.00025
+    depth_noise_stick_max_len_px: int = 18
+    depth_noise_stick_max_width_px: int = 3
+    depth_noise_max_sticks_per_image: int = 8
+
+    # Per-env camera extrinsic randomization. With "startup", each env samples
+    # one fixed camera pose lazily before first image read. With "reset", envs
+    # resample on reset, matching DEXTRAH's TiledCamera.set_world_poses pattern.
+    camera_pose_randomization_profile: str = "off"  # off | weak | medium | strong | custom
+    camera_pose_randomization_mode: str = "startup"  # startup | reset
+    camera_pos_noise_m: tuple[float, float, float] = (0.01, 0.01, 0.01)
+    camera_rot_noise_deg: tuple[float, float, float] = (1.0, 1.0, 1.0)
+
     camera_backend: str = "tiled"  # "tiled" | "standard"
     camera_mount: str = "world"
     camera_convention: str = "ros"
@@ -242,6 +271,8 @@ class ResetCfg:
     reset_position_noise_y: float = 0.1
     reset_position_noise_z: float = 0.02
     fixed_start_pose: tuple[float, float, float, float, float, float, float] | None = None
+    object_orientation_mode: str = "full"  # full | yaw_only
+    object_yaw_range_degrees: float = 180.0
 
     # Joint state noise on reset
     reset_dof_pos_random_interval_arm: float = 0.1

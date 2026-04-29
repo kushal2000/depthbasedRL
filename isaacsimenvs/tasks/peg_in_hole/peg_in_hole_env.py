@@ -6,6 +6,7 @@ from pathlib import Path
 
 import numpy as np
 import torch
+from isaaclab.utils.math import quat_from_angle_axis, quat_mul, random_orientation
 
 from isaacsimenvs.tasks.simtoolreal.simtoolreal_env import SimToolRealEnv
 from isaacsimenvs.tasks.simtoolreal.utils.logging_utils import log_step_metrics
@@ -229,7 +230,35 @@ class PegInHoleEnv(SimToolRealEnv):
         pos_local[:, 2] = (
             self._table_z_per_env[env_ids] + self.cfg.reset.table_object_z_offset
         )
+        pos_noise_xy = torch.as_tensor(
+            pih_cfg.object_init_position_noise_xy,
+            device=self.device,
+            dtype=torch.float32,
+        )
+        if torch.any(pos_noise_xy > 0.0) or pih_cfg.object_init_position_noise_z > 0.0:
+            pos_noise = torch.empty(n, 3, device=self.device).uniform_(-1.0, 1.0)
+            pos_local[:, 0:2] += pos_noise[:, 0:2] * pos_noise_xy
+            pos_local[:, 2] += pos_noise[:, 2] * float(pih_cfg.object_init_position_noise_z)
+
         quat = _xyzw_to_wxyz(start[:, 3:7])
+        orientation_mode = str(pih_cfg.object_init_orientation_mode).lower()
+        if orientation_mode == "scene":
+            pass
+        elif orientation_mode == "yaw_only":
+            angle = torch.empty(n, device=self.device).uniform_(
+                -float(pih_cfg.object_init_yaw_range_degrees),
+                float(pih_cfg.object_init_yaw_range_degrees),
+            ) * (torch.pi / 180.0)
+            axis = torch.zeros(n, 3, device=self.device)
+            axis[:, 2] = 1.0
+            quat = quat_mul(quat_from_angle_axis(angle, axis), quat)
+        elif orientation_mode == "full":
+            quat = random_orientation(n, device=self.device)
+        else:
+            raise ValueError(
+                "cfg.peg_in_hole.object_init_orientation_mode must be one of "
+                f"('scene', 'yaw_only', 'full'), got {orientation_mode!r}."
+            )
         pose = torch.cat([pos_local + self.scene.env_origins[env_ids], quat], dim=-1)
         self.object.write_root_pose_to_sim(pose, env_ids=env_ids)
         self.object.write_root_velocity_to_sim(
