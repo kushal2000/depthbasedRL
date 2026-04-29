@@ -161,6 +161,13 @@ class SimToolReal(VecTask):
         self.lifting_bonus = self.cfg["env"]["liftingBonus"]
         self.lifting_bonus_threshold = self.cfg["env"]["liftingBonusThreshold"]
         self.keypoint_rew_scale = self.cfg["env"]["keypointRewScale"]
+        # Grasp-pretraining knob: when True, the keypoint reward + near_goal
+        # success criterion use ‖object_pos − goal_pos‖ instead of the
+        # rotation-dependent max-keypoint distance. Per-keypoint observation
+        # tensors (keypoints_rel_goal, etc.) are unaffected.
+        self.translation_only_reward = self.cfg["env"].get(
+            "useTranslationOnlyReward", False
+        )
         self.kuka_actions_penalty_scale = self.cfg["env"]["kukaActionsPenaltyScale"]
         self.hand_actions_penalty_scale = self.cfg["env"]["handActionsPenaltyScale"]
         self.object_lin_vel_penalty_scale = self.cfg["env"]["objectLinVelPenaltyScale"]
@@ -1195,6 +1202,13 @@ class SimToolReal(VecTask):
         self.lifting_bonus = self.cfg["env"]["liftingBonus"]
         self.lifting_bonus_threshold = self.cfg["env"]["liftingBonusThreshold"]
         self.keypoint_rew_scale = self.cfg["env"]["keypointRewScale"]
+        # Grasp-pretraining knob: when True, the keypoint reward + near_goal
+        # success criterion use ‖object_pos − goal_pos‖ instead of the
+        # rotation-dependent max-keypoint distance. Per-keypoint observation
+        # tensors (keypoints_rel_goal, etc.) are unaffected.
+        self.translation_only_reward = self.cfg["env"].get(
+            "useTranslationOnlyReward", False
+        )
         self.kuka_actions_penalty_scale = self.cfg["env"]["kukaActionsPenaltyScale"]
         self.hand_actions_penalty_scale = self.cfg["env"]["handActionsPenaltyScale"]
 
@@ -1553,6 +1567,7 @@ class SimToolReal(VecTask):
             self.initial_tolerance,
             self.target_tolerance,
             self.tolerance_curriculum_increment,
+            self.max_consecutive_successes,
         )
 
         if self.cfg["env"].get("finalGoalToleranceCurriculumEnabled", False):
@@ -3146,6 +3161,18 @@ class SimToolReal(VecTask):
         self.keypoints_max_dist_fixed_size = self.keypoint_distances_l2_fixed_size.max(
             dim=-1
         ).values
+
+        # Grasp-pretraining override: replace the rotation-aware max-keypoint
+        # distance used by the reward + near_goal success check with the
+        # purely translational object-vs-goal center distance. Per-keypoint
+        # observation tensors above are left unchanged, so policy obs is
+        # bit-identical to the flag-off path.
+        if self.translation_only_reward:
+            translation_dist = torch.norm(
+                self.object_pos - self.goal_pos, dim=-1
+            )
+            self.keypoints_max_dist = translation_dist
+            self.keypoints_max_dist_fixed_size = translation_dist
 
         # this is the closest the keypoint had been to the target in the current episode (for the furthest keypoint of all)
         # make sure we initialize this value before using it for obs or rewards
