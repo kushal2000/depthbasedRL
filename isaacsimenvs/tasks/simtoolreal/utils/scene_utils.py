@@ -380,21 +380,41 @@ def _draw_depth_sticks(depth_nhw: torch.Tensor, *, cfg, stick_prob: float, max_s
     max_width = max(1, int(cfg.depth_noise_stick_max_width_px))
     d_min = float(cfg.depth_noise_randu_min_m)
     d_max = float(cfg.depth_noise_randu_max_m)
+    slots = max_sticks_per_image
+    device = depth_nhw.device
+    dtype = depth_nhw.dtype
 
-    for batch_id in range(batch):
-        count = int(counts[batch_id].item())
-        for _ in range(count):
-            length = int(torch.randint(1, max_len + 1, (1,), device=depth_nhw.device).item())
-            stick_width = int(torch.randint(1, max_width + 1, (1,), device=depth_nhw.device).item())
-            angle = torch.rand((), device=depth_nhw.device) * (2.0 * torch.pi)
-            x0 = torch.randint(0, width, (1,), device=depth_nhw.device).float()
-            y0 = torch.randint(0, height, (1,), device=depth_nhw.device).float()
-            idx = torch.arange(length, device=depth_nhw.device, dtype=torch.float32)
-            xs = torch.round(x0 + idx * torch.cos(angle)).long().clamp(0, width - 1)
-            ys = torch.round(y0 + idx * torch.sin(angle)).long().clamp(0, height - 1)
-            value = torch.empty((), device=depth_nhw.device).uniform_(d_min, d_max)
-            for offset in range(stick_width):
-                depth_nhw[batch_id, (ys + offset).clamp(0, height - 1), xs] = value
+    slot_ids = torch.arange(slots, device=device).unsqueeze(0)
+    active = slot_ids < counts.unsqueeze(1)
+    if not active.any():
+        return
+
+    lengths = torch.randint(1, max_len + 1, (batch, slots), device=device)
+    stick_widths = torch.randint(1, max_width + 1, (batch, slots), device=device)
+    angles = torch.rand(batch, slots, device=device) * (2.0 * torch.pi)
+    x0 = torch.randint(0, width, (batch, slots), device=device).float()
+    y0 = torch.randint(0, height, (batch, slots), device=device).float()
+    values = torch.empty(batch, slots, device=device, dtype=dtype).uniform_(d_min, d_max)
+
+    line_idx = torch.arange(max_len, device=device, dtype=torch.float32).view(1, 1, max_len, 1)
+    width_idx = torch.arange(max_width, device=device).view(1, 1, 1, max_width)
+    xs = torch.round(x0[..., None, None] + line_idx * torch.cos(angles[..., None, None])).long()
+    ys = torch.round(y0[..., None, None] + line_idx * torch.sin(angles[..., None, None])).long()
+    xs = xs.expand(-1, -1, -1, max_width).clamp_(0, width - 1)
+    ys = (ys + width_idx).clamp_(0, height - 1)
+
+    valid = (
+        active[..., None, None]
+        & (line_idx.long() < lengths[..., None, None])
+        & (width_idx < stick_widths[..., None, None])
+    )
+    if not valid.any():
+        return
+
+    batch_idx = torch.arange(batch, device=device).view(batch, 1, 1, 1)
+    flat_idx = (batch_idx * height * width + ys * width + xs)[valid]
+    flat_values = values[..., None, None].expand(-1, -1, max_len, max_width)[valid]
+    depth_nhw.reshape(-1)[flat_idx] = flat_values
 
 
 def _apply_student_depth_noise(env, depth: torch.Tensor) -> torch.Tensor:

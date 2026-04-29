@@ -211,6 +211,8 @@ def _capture_viewer_if_needed(
     output_dir: Path,
     capture_len: int,
     step: int,
+    wandb_run=None,
+    wandb_key: str = "interactive_viewer",
 ) -> list:
     from isaacsimenvs.tasks.simtoolreal.pose_viewer import (
         build_pose_viewer_html,
@@ -234,7 +236,60 @@ def _capture_viewer_if_needed(
     path = output_dir / f"pose_viewer_step_{step:08d}.html"
     path.write_text(html, encoding="utf-8")
     print(f"[distill_depth] wrote viewer HTML: {path}", flush=True)
+    if wandb_run is not None:
+        import wandb
+
+        wandb_run.log({wandb_key: wandb.Html(path.read_text(encoding="utf-8"))}, step=step)
     return []
+
+
+def _log_depth_debug_media(
+    *,
+    paths: dict[str, Path],
+    wandb_run,
+    step: int,
+    frames: list,
+    max_frames: int,
+    fps: int,
+    log_video: bool,
+    key_prefix: str,
+) -> list:
+    if wandb_run is None:
+        return frames
+
+    import numpy as np
+    import wandb
+    from PIL import Image
+
+    media = {}
+    for name in (
+        "review_grid_png",
+        "raw_window_png",
+        "noisy_window_png",
+        "policy_full_depth_png",
+        "policy_depth_png",
+    ):
+        path = paths.get(name)
+        if path is not None and path.exists():
+            media[f"{key_prefix}/{name.removesuffix('_png')}"] = wandb.Image(str(path))
+
+    review_path = paths.get("review_grid_png")
+    if review_path is not None and review_path.exists() and max_frames > 0:
+        frame = np.asarray(Image.open(review_path).convert("RGB"))
+        frames.append(frame)
+        if len(frames) > max_frames:
+            frames = frames[-max_frames:]
+        if log_video and len(frames) >= 2:
+            video = np.stack(frames, axis=0).transpose(0, 3, 1, 2)
+            media[f"{key_prefix}/rolling_video"] = wandb.Video(
+                video,
+                fps=max(1, int(fps)),
+                format="mp4",
+            )
+
+    if media:
+        wandb_run.log(media, step=step)
+    return frames
 
 
 def main() -> None:
@@ -296,6 +351,12 @@ def main() -> None:
     parser.add_argument("--wandb_group", default="")
     parser.add_argument("--wandb_entity", default="")
     parser.add_argument("--wandb_name", default="")
+    parser.add_argument("--wandb_viewer_key", default="interactive_viewer")
+    parser.add_argument("--wandb_depth_media_key", default="student_depth_debug")
+    parser.add_argument("--wandb_log_depth_media", action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument("--wandb_depth_video_max_frames", type=int, default=30)
+    parser.add_argument("--wandb_depth_video_fps", type=int, default=4)
+    parser.add_argument("--wandb_depth_video_interval", type=int, default=5000)
 
     from isaaclab.app import AppLauncher
 
@@ -397,6 +458,7 @@ def main() -> None:
     ]
     depth_debug_env_ids = [idx for idx in depth_debug_env_ids if 0 <= idx < inner.num_envs]
     viewer_frames: list = []
+    depth_video_frames: list = []
     interval_action_loss = 0.0
     interval_aux_loss = 0.0
     interval_step_count = 0
@@ -453,6 +515,8 @@ def main() -> None:
                 output_dir=run_dir / "interactive_viewer",
                 capture_len=args.capture_viewer_len,
                 step=step,
+                wandb_run=wandb_run,
+                wandb_key=args.wandb_viewer_key,
             )
 
         if (
@@ -461,16 +525,28 @@ def main() -> None:
             and (step == 1 or step % args.depth_debug_interval == 0)
         ):
             raw_depth = inner.student_camera.data.output["distance_to_image_plane"]
-            save_depth_debug(
+            depth_paths = save_depth_debug(
                 output_dir=run_dir / "depth_debug",
                 step=step,
                 env_ids=depth_debug_env_ids or [0],
                 raw_depth=raw_depth,
                 noisy_depth=getattr(inner, "_student_depth_noisy_m", None),
+                policy_full_depth=getattr(inner, "_student_depth_policy_full", None),
                 policy_depth=image,
                 near=float(env_cfg.student_obs.depth_min_m),
                 far=float(env_cfg.student_obs.depth_max_m),
             )
+            if args.wandb_log_depth_media:
+                depth_video_frames = _log_depth_debug_media(
+                    paths=depth_paths,
+                    wandb_run=wandb_run,
+                    step=step,
+                    frames=depth_video_frames,
+                    max_frames=args.wandb_depth_video_max_frames,
+                    fps=args.wandb_depth_video_fps,
+                    log_video=step == 1 or step % max(1, args.wandb_depth_video_interval) == 0,
+                    key_prefix=args.wandb_depth_media_key,
+                )
 
         interval_action_loss += float(action_loss.mean().detach().cpu().item())
         interval_aux_loss += float(aux_loss.mean().detach().cpu().item())
@@ -530,6 +606,8 @@ def main() -> None:
             output_dir=run_dir / "interactive_viewer",
             capture_len=len(viewer_frames),
             step=start_step + args.num_iters,
+            wandb_run=wandb_run,
+            wandb_key=args.wandb_viewer_key,
         )
     if args.mode == "train_online":
         _save_checkpoint(run_dir / "checkpoints" / "student_latest.pt", student, optimizer, start_step + args.num_iters, best_metric)
