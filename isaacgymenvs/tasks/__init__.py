@@ -30,11 +30,13 @@ from .simtoolreal.env import SimToolReal
 from .fabrica_env import FabricaEnv
 from .peg_in_hole_env import PegInHoleEnv
 from .peg_in_hole_env_fixtured import PegInHoleEnvFixtured
+from .fmb_env import FMBEnv
 
 # Mappings from strings to environments
 isaacgym_task_map = {
     "SimToolReal": SimToolReal,
     "FabricaEnv": FabricaEnv,
+    "FMBEnv": FMBEnv,
     "PegInHoleEnv": PegInHoleEnv,
     "PegInHoleEnvFixtured": PegInHoleEnvFixtured,
 }

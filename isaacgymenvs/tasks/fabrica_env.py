@@ -53,6 +53,8 @@ VALID_GOAL_MODES = ("dense", "preInsertAndFinal", "finalGoalOnly")
 
 
 class FabricaEnv(SimToolReal):
+    ASSETS_SUBDIR = "fabrica"
+
     # ────────────────────────────────────────────────────────────────
     # __init__
     # ────────────────────────────────────────────────────────────────
@@ -196,7 +198,7 @@ class FabricaEnv(SimToolReal):
         assembly = cfg["env"]["assemblyName"]
         scenes_filename = cfg["env"].get("scenesFilename", "scenes.npz")
         scenes_path = os.path.join(
-            repo_root, "assets", "urdf", "fabrica", assembly, scenes_filename
+            repo_root, "assets", "urdf", self.ASSETS_SUBDIR, assembly, scenes_filename
         )
         assert os.path.exists(scenes_path), (
             f"{scenes_filename} not found at {scenes_path}. Run "
