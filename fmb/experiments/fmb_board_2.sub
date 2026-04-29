@@ -133,5 +133,6 @@ python -u -m isaacgymenvs.train \
     experiment="00_$EXPERIMENT_NAME" \
     hydra.run.dir="$HYDRA_RUN_DIR" \
     task.sim.physx.max_gpu_contact_pairs=16777216 \
+    train.params.config.central_value_config.minibatch_size=$MINIBATCH_SIZE \
     train.params.config.max_frames=100_000_000_000_000 \
     $CHECKPOINT_ARG

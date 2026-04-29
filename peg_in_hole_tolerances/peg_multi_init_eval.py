@@ -494,6 +494,7 @@ class PegToleranceMultiInitDemo:
     def _on_set_change(self):
         self._kill_subprocess()
         self.set_name = self._dd_set.value
+        print(f"[set_change] Switched to set={self.set_name}")
         self._set_dims_from_set(self.set_name)
         # Repopulate dropdowns whose option counts depend on the set.
         self._dd_scene.options = [str(i) for i in range(self.N)]
