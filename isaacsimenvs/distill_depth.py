@@ -171,6 +171,20 @@ def _object_pos_env_frame(env) -> torch.Tensor:
     return env.object.data.root_pos_w - env.scene.env_origins
 
 
+def _teacher_obs_tensor(obs) -> torch.Tensor:
+    """Extract the policy observation tensor passed through the rl_games wrapper."""
+    if isinstance(obs, torch.Tensor):
+        return obs.float()
+    if isinstance(obs, dict):
+        for key in ("obs", "policy", "observations"):
+            if key in obs:
+                return _teacher_obs_tensor(obs[key])
+    raise TypeError(
+        "Expected rl_games observation to be a tensor or dict containing an "
+        f"'obs' tensor, got {type(obs).__name__}."
+    )
+
+
 def _reset_hidden_for_done(hidden: torch.Tensor, dones: torch.Tensor) -> torch.Tensor:
     done = dones.reshape(-1).bool()
     if not done.any():
@@ -231,6 +245,8 @@ def main() -> None:
     parser.add_argument("--teacher_checkpoint", type=Path, default=DEFAULT_TEACHER_DIR / "model.pth")
     parser.add_argument("--teacher_config", type=Path, default=DEFAULT_TEACHER_DIR / "config.yaml")
     parser.add_argument("--student_checkpoint", type=Path, default=None)
+    parser.add_argument("--student_input", choices=("camera", "teacher_obs"), default="camera")
+    parser.add_argument("--student_arch", choices=("mono_transformer_recurrent", "mlp_recurrent"), default=None)
     parser.add_argument("--run_dir", type=Path, default=None)
     parser.add_argument("--num_envs", type=int, default=16)
     parser.add_argument("--num_iters", type=int, default=2000)
@@ -285,14 +301,16 @@ def main() -> None:
 
     AppLauncher.add_app_launcher_args(parser)
     args = parser.parse_args()
-    args.enable_cameras = True
+    # Camera jobs need Isaac Lab's camera pipeline enabled. Teacher-observation
+    # jobs do not, so keep them on the cheaper non-rendering path.
+    args.enable_cameras = args.student_input == "camera"
     app = AppLauncher(args).app
 
     import gymnasium as gym
 
     import isaacsimenvs  # noqa: F401
     from isaacsimenvs.distillation.depth_debug import save_depth_debug
-    from isaacsimenvs.distillation.student_policy import MonoTransformerRecurrentPolicy
+    from isaacsimenvs.distillation.student_policy import MLPRecurrentPolicy, MonoTransformerRecurrentPolicy
 
     run_dir = args.run_dir or REPO_ROOT / "distillation_runs" / f"kushal_depth_{int(time.time())}"
     run_dir.mkdir(parents=True, exist_ok=True)
@@ -300,6 +318,8 @@ def main() -> None:
     print(f"[distill_depth] run_dir={run_dir}", flush=True)
 
     env_cfg = _load_env_cfg(args.task, args.teacher_config, args.num_envs, args.sim_device)
+    if args.student_input == "teacher_obs":
+        env_cfg.student_obs.image_enabled = False
     if args.force_scene_tol_combo is not None:
         env_cfg.peg_in_hole.force_scene_tol_combo = _parse_optional_pair(args.force_scene_tol_combo)
     if args.force_peg_idx is not None:
@@ -334,15 +354,39 @@ def main() -> None:
     )
     obs = teacher.env_reset(wrapped)
 
-    student_obs = inner.get_student_obs()
-    image = student_obs["image"]
-    proprio = student_obs["proprio"]
-    student = MonoTransformerRecurrentPolicy(
-        image_channels=_student_image_channels(str(env_cfg.student_obs.image_modality).lower()),
-        proprio_dim=proprio.shape[-1],
-        action_dim=int(env_cfg.action_space),
-        aux_heads={"object_pos": 3},
-    ).to(inner.device)
+    if args.student_input == "teacher_obs":
+        arch = args.student_arch or "mlp_recurrent"
+        if arch != "mlp_recurrent":
+            raise ValueError("--student_input teacher_obs currently requires --student_arch mlp_recurrent")
+        teacher_obs = _teacher_obs_tensor(obs)
+        student = MLPRecurrentPolicy(
+            obs_dim=teacher_obs.shape[-1],
+            action_dim=int(env_cfg.action_space),
+            aux_heads={"object_pos": 3},
+        ).to(inner.device)
+        print(
+            f"[distill_depth] teacher_obs student obs_dim={teacher_obs.shape[-1]} "
+            f"action_dim={int(env_cfg.action_space)}",
+            flush=True,
+        )
+    else:
+        arch = args.student_arch or "mono_transformer_recurrent"
+        if arch != "mono_transformer_recurrent":
+            raise ValueError("--student_input camera currently requires --student_arch mono_transformer_recurrent")
+        student_obs = inner.get_student_obs()
+        image = student_obs["image"]
+        proprio = student_obs["proprio"]
+        student = MonoTransformerRecurrentPolicy(
+            image_channels=_student_image_channels(str(env_cfg.student_obs.image_modality).lower()),
+            proprio_dim=proprio.shape[-1],
+            action_dim=int(env_cfg.action_space),
+            aux_heads={"object_pos": 3},
+        ).to(inner.device)
+        print(
+            f"[distill_depth] camera student image_shape={tuple(image.shape)} "
+            f"proprio_dim={proprio.shape[-1]} action_dim={int(env_cfg.action_space)}",
+            flush=True,
+        )
     optimizer = torch.optim.Adam(student.parameters(), lr=args.learning_rate)
     start_step, best_metric = _load_student_checkpoint(args.student_checkpoint, student, optimizer)
     hidden = student.initial_state(inner.num_envs, inner.device)
@@ -366,10 +410,14 @@ def main() -> None:
         with torch.no_grad():
             teacher_action = teacher.get_action(obs, is_deterministic=args.deterministic_teacher)
 
-        student_obs = inner.get_student_obs()
-        image = student_obs["image"]
-        proprio = student_obs["proprio"]
-        student_out, next_hidden = student(image, proprio, hidden)
+        if args.student_input == "teacher_obs":
+            student_out, next_hidden = student(_teacher_obs_tensor(obs), hidden)
+            image = None
+        else:
+            student_obs = inner.get_student_obs()
+            image = student_obs["image"]
+            proprio = student_obs["proprio"]
+            student_out, next_hidden = student(image, proprio, hidden)
         student_action = student_out.action
         action_loss = F.mse_loss(student_action, teacher_action, reduction="none").mean(dim=1)
         aux_pred = student_out.aux["object_pos"]
@@ -407,7 +455,11 @@ def main() -> None:
                 step=step,
             )
 
-        if args.depth_debug_interval > 0 and (step == 1 or step % args.depth_debug_interval == 0):
+        if (
+            args.student_input == "camera"
+            and args.depth_debug_interval > 0
+            and (step == 1 or step % args.depth_debug_interval == 0)
+        ):
             raw_depth = inner.student_camera.data.output["distance_to_image_plane"]
             save_depth_debug(
                 output_dir=run_dir / "depth_debug",
