@@ -1,0 +1,33 @@
+<?xml version="1.0"?>
+<robot name="fmb_board_1_board_1_2_coacd">
+  <material name="color_0"><color rgba="0.9 0.2 0.2 1.0"/></material>
+  <link name="base_link">
+    <inertial>
+      <density value="1250.0"/>
+    </inertial>
+  </link>
+  <link name="hull_0">
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry>
+        <mesh filename="decomp_0.obj" scale="1 1 1"/>
+      </geometry>
+      <material name="color_0"/>
+    </visual>
+    <collision>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry>
+        <mesh filename="decomp_0.obj" scale="1 1 1"/>
+      </geometry>
+    </collision>
+    <inertial>
+      <mass value="0.001"/>
+      <inertia ixx="1e-6" ixy="0" ixz="0" iyy="1e-6" iyz="0" izz="1e-6"/>
+    </inertial>
+  </link>
+  <joint name="hull_joint_0" type="fixed">
+    <parent link="base_link"/>
+    <child link="hull_0"/>
+    <origin xyz="0 0 0" rpy="0 0 0"/>
+  </joint>
+</robot>

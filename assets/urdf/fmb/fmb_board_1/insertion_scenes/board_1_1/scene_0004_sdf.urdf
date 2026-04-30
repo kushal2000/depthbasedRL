@@ -1,0 +1,53 @@
+<?xml version="1.0"?>
+<robot name="table_fmb_board_1_board_1_1_scene_0004">
+  <link name="box">
+    <visual>
+      <material name="wood"><color rgba="0.82 0.56 0.35 1.0"/></material>
+      <origin xyz="0 0 0"/>
+      <geometry><box size="0.475 0.4 0.3"/></geometry>
+    </visual>
+    <collision>
+      <origin xyz="0 0 0"/>
+      <geometry><box size="0.475 0.4 0.3"/></geometry>
+    </collision>
+    <inertial>
+      <mass value="500"/>
+      <friction value="1.0"/>
+      <inertia ixx="1000.0" ixy="0.0" ixz="0.0" iyy="1000.0" iyz="0.0" izz="1000.0"/>
+    </inertial>
+  </link>
+  <link name="part_board_1_0_sdf">
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry><mesh filename="../../board_1_0/board_1_0_canonical.obj" scale="1 1 1"/></geometry>
+      <material name="placed_0"><color rgba="0.6 0.6 0.6 1.0"/></material>
+    </visual>
+    <collision>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry><mesh filename="../../board_1_0/board_1_0_canonical.obj" scale="1 1 1"/></geometry>
+      <sdf resolution="512"/>
+    </collision>
+  </link>
+  <joint name="part_board_1_0_sdf_joint" type="fixed">
+    <parent link="box"/>
+    <child link="part_board_1_0_sdf"/>
+    <origin xyz="-0.008253 0.054241 0.175000" rpy="3.141593 0.000000 1.570796"/>
+  </joint>
+  <link name="part_board_1_4_sdf">
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry><mesh filename="../../board_1_4/board_1_4_canonical.obj" scale="1 1 1"/></geometry>
+      <material name="placed_1"><color rgba="0.6 0.6 0.6 1.0"/></material>
+    </visual>
+    <collision>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry><mesh filename="../../board_1_4/board_1_4_canonical.obj" scale="1 1 1"/></geometry>
+      <sdf resolution="512"/>
+    </collision>
+  </link>
+  <joint name="part_board_1_4_sdf_joint" type="fixed">
+    <parent link="box"/>
+    <child link="part_board_1_4_sdf"/>
+    <origin xyz="0.059747 0.054241 0.205000" rpy="0.000000 -1.570796 0.000000"/>
+  </joint>
+</robot>

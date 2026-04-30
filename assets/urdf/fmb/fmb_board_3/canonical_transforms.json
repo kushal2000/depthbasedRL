@@ -1,0 +1,92 @@
+{
+  "board_3_0": {
+    "assembled_to_canonical_wxyz": [
+      0.0,
+      0.7071067811865475,
+      0.7071067811865475,
+      0.0
+    ],
+    "original_centroid": [
+      0.0,
+      0.0,
+      0.025
+    ],
+    "canonical_extents": [
+      0.23,
+      0.23,
+      0.05
+    ]
+  },
+  "board_3_1": {
+    "assembled_to_canonical_wxyz": [
+      0.5,
+      -0.5,
+      0.5,
+      0.5
+    ],
+    "original_centroid": [
+      -0.0365,
+      0.0,
+      0.058499999999999996
+    ],
+    "canonical_extents": [
+      0.2,
+      0.037000000000000005,
+      0.037000000000000005
+    ]
+  },
+  "board_3_2": {
+    "assembled_to_canonical_wxyz": [
+      0.5,
+      -0.5,
+      0.5,
+      0.5
+    ],
+    "original_centroid": [
+      0.0365,
+      0.0,
+      0.058499999999999996
+    ],
+    "canonical_extents": [
+      0.2,
+      0.037000000000000005,
+      0.037000000000000005
+    ]
+  },
+  "board_3_3": {
+    "assembled_to_canonical_wxyz": [
+      0.7071067811865475,
+      -0.7071067811865475,
+      -0.0,
+      -0.0
+    ],
+    "original_centroid": [
+      0.0,
+      -0.051500000000000004,
+      0.075
+    ],
+    "canonical_extents": [
+      0.156,
+      0.1,
+      0.03
+    ]
+  },
+  "board_3_4": {
+    "assembled_to_canonical_wxyz": [
+      0.7071067811865475,
+      -0.7071067811865475,
+      -0.0,
+      -0.0
+    ],
+    "original_centroid": [
+      0.0,
+      0.051500000000000004,
+      0.075
+    ],
+    "canonical_extents": [
+      0.156,
+      0.1,
+      0.03
+    ]
+  }
+}
