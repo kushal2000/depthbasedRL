@@ -145,7 +145,7 @@ def _fixture_urdf_header(assembly, p, n):
         '  </link>\n'
     )
 
-def _urdf_fixed_link(link_name, mesh_rel, xyz, rpy, mat_idx):
+def _urdf_fixed_link(link_name, mesh_rel, xyz, rpy, mat_idx, sdf_tag=""):
     x, y, z = xyz
     rr, rp, ry = rpy
     return (
@@ -158,6 +158,7 @@ def _urdf_fixed_link(link_name, mesh_rel, xyz, rpy, mat_idx):
         f'    <collision>\n'
         f'      <origin xyz="0 0 0" rpy="0 0 0"/>\n'
         f'      <geometry><mesh filename="{mesh_rel}" scale="1 1 1"/></geometry>\n'
+        f'{sdf_tag}'
         f'    </collision>\n'
         f'  </link>\n'
         f'  <joint name="{link_name}_joint" type="fixed">\n'
@@ -196,6 +197,23 @@ def write_fixture_urdf(assembly, p, n, table_offset_world, fixture_pids, transfo
 
     lines.append("</robot>\n")
     dst.write_text("".join(lines))
+
+    # Also write SDF variant: single canonical mesh per part with SDF tag.
+    dst_sdf = dst_dir / f"scene_{n:04d}_sdf.urdf"
+    sdf_lines = [_fixture_urdf_header(assembly, p, n)]
+    sdf_mat_idx = 0
+    sdf_tag = '      <sdf resolution="512"/>\n'
+    for pid in fixture_pids:
+        world_pos, world_quat = world_assembled_pose(transforms[pid], table_offset_world)
+        origin_xyz = (world_pos[0], world_pos[1], world_pos[2] - TABLE_Z)
+        origin_rpy = _wxyz_to_rpy(world_quat)
+        mesh_rel = f"../../{pid}/{pid}_canonical.obj"
+        sdf_lines.append(_urdf_fixed_link(
+            f"part_{pid}_sdf", mesh_rel, origin_xyz, origin_rpy, sdf_mat_idx, sdf_tag=sdf_tag))
+        sdf_mat_idx += 1
+    sdf_lines.append("</robot>\n")
+    dst_sdf.write_text("".join(sdf_lines))
+
     return str(dst.relative_to(REPO_ROOT / "assets"))
 
 
