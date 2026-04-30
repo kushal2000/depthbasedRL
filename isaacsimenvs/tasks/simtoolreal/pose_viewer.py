@@ -160,7 +160,7 @@ def table_urdf_text_for_env(env, env_id: int) -> str:
     return TABLE_URDF_PATH.read_text(encoding="utf-8")
 
 
-def capture_pose_viewer_frame(env, env_id: int) -> dict[str, Any]:
+def capture_pose_viewer_frame(env, env_id: int, *, predicted_object_pose_wxyz=None) -> dict[str, Any]:
     """Capture one env-local frame from a live SimToolRealEnv."""
 
     if env_id < 0 or env_id >= env.num_envs:
@@ -180,7 +180,7 @@ def capture_pose_viewer_frame(env, env_id: int) -> dict[str, Any]:
     goal_pos = env.goal_viz.data.root_pos_w[env_id] - origin
     table_pos = env.table.data.root_pos_w[env_id] - origin
 
-    return {
+    frame = {
         "env_id": int(env_id),
         "robot_joint_names": joint_names,
         "robot_joint_pos": _to_numpy(joint_pos),
@@ -189,6 +189,10 @@ def capture_pose_viewer_frame(env, env_id: int) -> dict[str, Any]:
         "goal_pose": _pose_xyzw(goal_pos, env.goal_viz.data.root_quat_w[env_id]),
         "table_pose": _pose_xyzw(table_pos, env.table.data.root_quat_w[env_id]),
     }
+    if predicted_object_pose_wxyz is not None:
+        pred = predicted_object_pose_wxyz[env_id]
+        frame["object_pred_pose"] = _pose_xyzw(pred[:3], pred[3:7])
+    return frame
 
 
 def build_pose_viewer_html(
@@ -223,16 +227,29 @@ def build_pose_viewer_html(
             color_override=(0.20, 0.72, 0.31),
         ),
     ]
+    has_predicted_object = all("object_pred_pose" in frame for frame in frames)
+    if has_predicted_object:
+        robots.append(
+            make_embedded_robot(
+                name="object_pred",
+                urdf_text=object_urdf_text,
+                color_override=(0.05, 0.28, 1.00),
+            )
+        )
+
+    object_poses = {
+        "table": np.stack([frame["table_pose"] for frame in frames]),
+        "object": np.stack([frame["object_pose"] for frame in frames]),
+        "goal": np.stack([frame["goal_pose"] for frame in frames]),
+    }
+    if has_predicted_object:
+        object_poses["object_pred"] = np.stack([frame["object_pred_pose"] for frame in frames])
 
     return create_html(
         joint_names=frames[0]["robot_joint_names"],
         robot_joint_positions=np.stack([frame["robot_joint_pos"] for frame in frames]),
         robots=robots,
-        object_poses={
-            "table": np.stack([frame["table_pose"] for frame in frames]),
-            "object": np.stack([frame["object_pose"] for frame in frames]),
-            "goal": np.stack([frame["goal_pose"] for frame in frames]),
-        },
+        object_poses=object_poses,
         robot_base_poses=np.stack([frame["robot_base_pose"] for frame in frames]),
         timestamps=timestamps,
     )

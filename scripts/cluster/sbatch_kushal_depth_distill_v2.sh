@@ -37,6 +37,15 @@ CAMERA_POS_NOISE_M="${CAMERA_POS_NOISE_M:-}"
 CAMERA_ROT_NOISE_DEG="${CAMERA_ROT_NOISE_DEG:-}"
 DEPTH_DEBUG_INTERVAL="${DEPTH_DEBUG_INTERVAL:-1000}"
 CAPTURE_VIEWER_LEN="${CAPTURE_VIEWER_LEN:-600}"
+DEPTH_ROLLOUT_VIDEO_LEN="${DEPTH_ROLLOUT_VIDEO_LEN:-600}"
+DEPTH_ROLLOUT_VIDEO_FPS="${DEPTH_ROLLOUT_VIDEO_FPS:-60}"
+DEPTH_ROLLOUT_VIDEO_INTERVAL="${DEPTH_ROLLOUT_VIDEO_INTERVAL:-600}"
+DEPTH_ROLLOUT_VIDEO_ENV_IDS="${DEPTH_ROLLOUT_VIDEO_ENV_IDS:-0}"
+AUX_POSE_MODE="${AUX_POSE_MODE:-position}"
+AUX_OBJECT_POS_WEIGHT="${AUX_OBJECT_POS_WEIGHT:-1.0}"
+AUX_OBJECT_KEYPOINT_WEIGHT="${AUX_OBJECT_KEYPOINT_WEIGHT:-1.0}"
+STUDENT_CHECKPOINT="${STUDENT_CHECKPOINT:-}"
+STUDENT_CHECKPOINT_STRICT="${STUDENT_CHECKPOINT_STRICT:-true}"
 
 cd "$REPO_DIR"
 mkdir -p slurm_logs "$(dirname "$RUN_DIR")"
@@ -70,6 +79,9 @@ cmd=(
   --log_interval "$LOG_INTERVAL"
   --save_interval "$SAVE_INTERVAL"
   --run_dir "$RUN_DIR"
+  --aux_pose_mode "$AUX_POSE_MODE"
+  --aux_object_pos_weight "$AUX_OBJECT_POS_WEIGHT"
+  --aux_object_keypoint_weight "$AUX_OBJECT_KEYPOINT_WEIGHT"
   --wandb
   --wandb_project "$WANDB_PROJECT"
   --wandb_group "$WANDB_GROUP"
@@ -79,12 +91,23 @@ cmd=(
   --headless
 )
 
+if [[ -n "$STUDENT_CHECKPOINT" ]]; then
+  cmd+=(--student_checkpoint "$STUDENT_CHECKPOINT")
+  if [[ "$STUDENT_CHECKPOINT_STRICT" == "false" || "$STUDENT_CHECKPOINT_STRICT" == "0" ]]; then
+    cmd+=(--no-student_checkpoint_strict)
+  fi
+fi
+
 if [[ "$STUDENT_INPUT" == "camera" ]]; then
   cmd+=(
     --depth_noise_profile "$DEPTH_NOISE_PROFILE"
     --camera_pose_randomization_profile "$CAMERA_POSE_PROFILE"
     --camera_pose_randomization_mode "$CAMERA_POSE_MODE"
     --depth_debug_interval "$DEPTH_DEBUG_INTERVAL"
+    --wandb_depth_rollout_video_len "$DEPTH_ROLLOUT_VIDEO_LEN"
+    --wandb_depth_rollout_video_fps "$DEPTH_ROLLOUT_VIDEO_FPS"
+    --wandb_depth_rollout_video_interval "$DEPTH_ROLLOUT_VIDEO_INTERVAL"
+    --wandb_depth_rollout_video_env_ids "$DEPTH_ROLLOUT_VIDEO_ENV_IDS"
   )
   if [[ -n "$DEPTH_NOISE_STRENGTH" ]]; then
     cmd+=(--depth_noise_strength "$DEPTH_NOISE_STRENGTH")
@@ -113,6 +136,7 @@ echo "commit=$(git rev-parse HEAD)"
 echo "python=$PYTHON_BIN"
 echo "run_name=$RUN_NAME"
 echo "wandb_group=$WANDB_GROUP"
+echo "aux_pose_mode=$AUX_POSE_MODE"
 echo "cache=$OMNI_KIT_CACHE_PATH"
 nvidia-smi || true
 printf 'command:'
