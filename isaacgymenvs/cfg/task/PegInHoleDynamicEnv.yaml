@@ -1,0 +1,50 @@
+defaults:
+  - SimToolReal
+  - _self_
+
+name: PegInHoleDynamicEnv
+
+env:
+  objectName: "peg"
+  useFixedGoalStates: True
+  useFixedInitObjectPose: True
+  asset:
+    table: "urdf/table_narrow.urdf"
+
+  # Hole asset (loaded as a separate actor, repositioned per episode)
+  holeUrdf: "urdf/peg_in_hole/holes/hole_tol0p5mm/hole_tol0p5mm.urdf"
+
+  # Hole position sampling range (relative to table center XY)
+  holeXRange: [-0.1875, 0.1875]
+  holeYRange: [-0.1, 0.2]
+
+  # Goal computation
+  # Peg pose when fully inserted, relative to hole origin (on table surface).
+  # [x, y, z, qx, qy, qz, qw] — xyzw quaternion.
+  # Default: peg handle center 0.136m above hole base, body +X pointing down.
+  insertPoseRelHole: [0.0, 0.0, 0.136, 0.0, -0.70710678, 0.0, 0.70710678]
+  # Approach direction (unit vector). Pre-insert pose backs off along -direction.
+  insertionDirection: [0.0, 0.0, -1.0]  # top-down insertion
+  preInsertOffset: 0.05  # meters to back off along -insertionDirection
+
+  # Goal mode: "preInsertAndFinal" (2 subgoals) or "finalGoalOnly" (1 subgoal).
+  # "dense" is NOT supported.
+  goalMode: "preInsertAndFinal"
+
+  # Co-training: random goal fraction
+  randomGoalFraction: 0.0
+  randomGoalMaxSuccesses: 50
+
+  # Retract phase
+  enableRetract: True
+  retractRewardScale: 1.0
+  retractDistanceThreshold: 0.1
+  retractSuccessBonus: 1000.0
+  retractSuccessTolerance: 0.005
+
+  # Random-goal workspace (match SimToolReal defaults)
+  targetVolumeMins: [-0.35, -0.1, 0.6]
+  targetVolumeMaxs: [0.35, 0.2, 0.95]
+
+  # Goal observation noise (per-episode XY offset on actor obs only)
+  goalXyObsNoise: 0.002
