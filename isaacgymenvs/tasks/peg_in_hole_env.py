@@ -69,6 +69,10 @@ class PegInHoleEnv(SimToolReal):
         self.retract_success_bonus = cfg["env"].get("retractSuccessBonus", 1000.0)
         self.retract_success_tolerance = cfg["env"].get("retractSuccessTolerance", 0.005)
 
+        # Co-training: random-goal fraction
+        self.random_goal_fraction = cfg["env"].get("randomGoalFraction", 0.0)
+        self.random_goal_max_successes = cfg["env"].get("randomGoalMaxSuccesses", 50)
+
         self.goal_mode = cfg["env"].get("goalMode", "dense")
         assert self.goal_mode in VALID_GOAL_MODES, (
             f"goalMode must be one of {VALID_GOAL_MODES}, got {self.goal_mode!r}"
@@ -131,6 +135,10 @@ class PegInHoleEnv(SimToolReal):
         # Per-env retract state (copied from FabricaEnv lines 128-130).
         self.retract_phase = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
         self.retract_succeeded = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
+
+        # Co-training: per-env mode flag (True = random-goal episode).
+        self.is_random_goal_env = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
+        self.prev_episode_is_random_goal = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
 
         # Register retract_rew in the episode reward tracker (mirrors FabricaEnv:132).
         self.rewards_episode["retract_rew"] = torch.zeros(
@@ -679,7 +687,12 @@ class PegInHoleEnv(SimToolReal):
 
         # max_consecutive_successes defined by goal_mode / goals tensor shape.
         # (Parent's reward loop reads self.max_consecutive_successes.)
-        self.max_consecutive_successes = self._pih_max_traj_len
+        # When co-training, raise the ceiling so successes.clamp_() doesn't
+        # block random-goal envs from reaching randomGoalMaxSuccesses.
+        if self.random_goal_fraction > 0:
+            self.max_consecutive_successes = max(self._pih_max_traj_len, self.random_goal_max_successes)
+        else:
+            self.max_consecutive_successes = self._pih_max_traj_len
 
         self._after_envs_created()
 
@@ -696,8 +709,9 @@ class PegInHoleEnv(SimToolReal):
         """Per reset-env: draw peg_idx ~ U[0, M) (or forced by config),
         load the corresponding start pose + trajectory length from scenes.npz."""
         if tensor_reset and len(env_ids) > 0 and reset_buf_idxs is None:
-            # Snapshot prior episode's env_max_goals before overwriting (for logging).
+            # Snapshot prior episode's env_max_goals and mode before overwriting.
             self.prev_episode_env_max_goals[env_ids] = self.env_max_goals[env_ids]
+            self.prev_episode_is_random_goal[env_ids] = self.is_random_goal_env[env_ids]
 
             # Optional override: ``forcePegIdx = int`` pins peg_idx to a
             # specific value for all resets. Used by the multi-init eval GUI.
@@ -726,41 +740,79 @@ class PegInHoleEnv(SimToolReal):
             self.object_init_state[env_ids, 0:2] = poses[:, 0:2]
             self.object_init_state[env_ids, 3:7] = poses[:, 3:7]
 
-            # Per-episode XY jitter on the goal position (observed by actor
-            # only). When goalXyObsNoise=0, torch_rand_float(-0, +0, ...)
-            # returns zero, so no gate is needed.
-            self.goal_pos_obs_noise[env_ids, 0:2] = torch_rand_float(
-                -self.cfg["env"]["goalXyObsNoise"],
-                self.cfg["env"]["goalXyObsNoise"],
-                (len(env_ids), 2), device=self.device,
-            )
-            # Z stays 0 (buffer is zero-init'd, never written on this axis).
+            # ── Co-training coin flip ──
+            if self.random_goal_fraction > 0:
+                coin = torch.rand(len(env_ids), device=self.device)
+                is_rg = coin < self.random_goal_fraction
+                self.is_random_goal_env[env_ids] = is_rg
+                rg_ids = env_ids[is_rg]
+
+                if len(rg_ids) > 0:
+                    self.env_max_goals[rg_ids] = self.random_goal_max_successes
+
+                    # Randomize start XY within target volume
+                    tv_min = self.target_volume_origin + self.target_volume_extent[:, 0]
+                    tv_max = self.target_volume_origin + self.target_volume_extent[:, 1]
+                    rand_xy = torch_rand_float(0.0, 1.0, (len(rg_ids), 2), device=self.device)
+                    self.object_init_state[rg_ids, 0] = tv_min[0] + rand_xy[:, 0] * (tv_max[0] - tv_min[0])
+                    self.object_init_state[rg_ids, 1] = tv_min[1] + rand_xy[:, 1] * (tv_max[1] - tv_min[1])
+                    self.object_init_state[rg_ids, 3:7] = self.get_random_quat(rg_ids)
+                    self.goal_pos_obs_noise[rg_ids] = 0.0
+
+                # Goal obs noise only for insertion envs
+                ins_ids = env_ids[~is_rg]
+                if len(ins_ids) > 0:
+                    self.goal_pos_obs_noise[ins_ids, 0:2] = torch_rand_float(
+                        -self.cfg["env"]["goalXyObsNoise"],
+                        self.cfg["env"]["goalXyObsNoise"],
+                        (len(ins_ids), 2), device=self.device,
+                    )
+            else:
+                self.is_random_goal_env[env_ids] = False
+                self.goal_pos_obs_noise[env_ids, 0:2] = torch_rand_float(
+                    -self.cfg["env"]["goalXyObsNoise"],
+                    self.cfg["env"]["goalXyObsNoise"],
+                    (len(env_ids), 2), device=self.device,
+                )
 
         super().reset_object_pose(env_ids, reset_buf_idxs, tensor_reset)
 
     def _reset_target(self, env_ids, reset_buf_idxs=None, tensor_reset=True, is_first_goal=True):
-        """Per reset-env: set goal_states to the current subgoal of the
-        env's (scene_idx, peg_idx) trajectory. Mirrors FabricaEnv's
-        multi_init_states path (lines 908-958) but without multi-part."""
+        """Per reset-env: set goal_states to the current subgoal.
+
+        Insertion envs get the next waypoint from the scene trajectory.
+        Random-goal envs get a randomly sampled workspace pose (absolute
+        for the first goal, then delta/coin_flip/absolute per config).
+        """
         if len(env_ids) > 0 and reset_buf_idxs is None and tensor_reset:
             USE_FIXED_GOAL_STATES = self.cfg["env"]["useFixedGoalStates"]
-            if USE_FIXED_GOAL_STATES:
-                current_subgoal_idx = (
-                    self.successes[env_ids] % self.env_max_goals[env_ids]
-                ).long()
-                scene_ids = self._pih_env_scene_idx_t[env_ids]
-                peg_ids = self.env_peg_idx[env_ids]
-                goals = self._pih_goals_t[scene_ids, peg_ids, current_subgoal_idx]  # (len, 7)
-
-                self.goal_states[env_ids, 0:7] = goals
-                # Table z randomization delta (inherited from SimToolReal).
-                table_base_z = self.cfg["env"]["tableResetZ"]
-                delta_z = self.table_init_state[env_ids, 2:3] - table_base_z
-                self.goal_states[env_ids, 2:3] += delta_z
-            else:
+            if not USE_FIXED_GOAL_STATES:
                 super()._reset_target(env_ids, reset_buf_idxs, tensor_reset, is_first_goal)
                 return
 
+            # Split env_ids by mode
+            is_rg = self.is_random_goal_env[env_ids]
+            ins_ids = env_ids[~is_rg]
+            rg_ids = env_ids[is_rg]
+
+            # ── Insertion envs: trajectory goal ──
+            if len(ins_ids) > 0:
+                current_subgoal_idx = (
+                    self.successes[ins_ids] % self.env_max_goals[ins_ids]
+                ).long()
+                scene_ids = self._pih_env_scene_idx_t[ins_ids]
+                peg_ids = self.env_peg_idx[ins_ids]
+                goals = self._pih_goals_t[scene_ids, peg_ids, current_subgoal_idx]
+                self.goal_states[ins_ids, 0:7] = goals
+                table_base_z = self.cfg["env"]["tableResetZ"]
+                delta_z = self.table_init_state[ins_ids, 2:3] - table_base_z
+                self.goal_states[ins_ids, 2:3] += delta_z
+
+            # ── Random-goal envs: workspace sampling ──
+            if len(rg_ids) > 0:
+                self._sample_random_goal(rg_ids, is_first_goal)
+
+            # Update goal object visuals for all env_ids
             self.root_state_tensor[self.goal_object_indices[env_ids], 0:7] = (
                 self.goal_states[env_ids, 0:7]
             )
@@ -777,6 +829,42 @@ class PegInHoleEnv(SimToolReal):
             self.root_state_tensor[self.goal_object_indices[env_ids], :] = (
                 self.root_state_resets[env_ids, rs_ofs:]
             )
+
+    def _sample_random_goal(self, rg_ids, is_first_goal):
+        """Sample a random goal pose for random-goal envs."""
+        if is_first_goal:
+            tv_min = self.target_volume_origin + self.target_volume_extent[:, 0]
+            tv_max = self.target_volume_origin + self.target_volume_extent[:, 1]
+            tv_size = tv_max - tv_min
+            rand_pos = torch_rand_float(0.0, 1.0, (len(rg_ids), 3), device=self.device)
+            self.goal_states[rg_ids, 0:3] = tv_min + rand_pos * tv_size
+            self.goal_states[rg_ids, 3:7] = self.get_random_quat(rg_ids)
+            self._clip_goal_z(rg_ids)
+        elif self.goal_sampling_type == "delta":
+            self.goal_states[rg_ids, 0:7] = self._sample_delta_goal(
+                self.goal_states[rg_ids, 0:7],
+                self.delta_goal_distance,
+                self.delta_rotation_degrees,
+            )
+        elif self.goal_sampling_type == "coin_flip":
+            coin_flips = torch_rand_float(0.0, 1.0, (len(rg_ids), 1), device=self.device)
+            trans_goals = self._sample_delta_goal(
+                self.goal_states[rg_ids, 0:7], self.delta_goal_distance, 0.0
+            )
+            rot_goals = self._sample_delta_goal(
+                self.goal_states[rg_ids, 0:7], 0.0, self.delta_rotation_degrees
+            )
+            self.goal_states[rg_ids, 0:7] = torch.where(
+                coin_flips < 0.5, trans_goals, rot_goals,
+            )
+        else:
+            tv_min = self.target_volume_origin + self.target_volume_extent[:, 0]
+            tv_max = self.target_volume_origin + self.target_volume_extent[:, 1]
+            tv_size = tv_max - tv_min
+            rand_pos = torch_rand_float(0.0, 1.0, (len(rg_ids), 3), device=self.device)
+            self.goal_states[rg_ids, 0:3] = tv_min + rand_pos * tv_size
+            self.goal_states[rg_ids, 3:7] = self.get_random_quat(rg_ids)
+            self._clip_goal_z(rg_ids)
 
     # ────────────────────────────────────────────────────────────────
     # Retract reward + reset logic — verbatim copy from FabricaEnv
@@ -799,6 +887,10 @@ class PegInHoleEnv(SimToolReal):
             max_consecutive_successes_reached = torch.where(
                 self.retract_succeeded, ones, zeros,
             )
+            # Random-goal envs: terminate when all subgoals reached (no retract)
+            if self.random_goal_fraction > 0:
+                random_goals_done = (self.successes >= self.env_max_goals) & self.is_random_goal_env
+                max_consecutive_successes_reached = max_consecutive_successes_reached | random_goals_done
         else:
             max_consecutive_successes_reached = zeros
 
@@ -866,7 +958,7 @@ class PegInHoleEnv(SimToolReal):
         else:
             final_tol = self.cfg["env"].get("finalGoalSuccessTolerance", None)
         if final_tol is not None and self.cfg["env"]["useFixedGoalStates"]:
-            is_final_goal = (self.successes == (self.env_max_goals - 1)) | self.retract_phase
+            is_final_goal = ((self.successes == (self.env_max_goals - 1)) & ~self.is_random_goal_env) | self.retract_phase
             base_tol = self.success_tolerance * self.keypoint_scale
             tight_tol = final_tol * self.keypoint_scale
             keypoint_success_tolerance = torch.where(is_final_goal, tight_tol, base_tol)
@@ -887,7 +979,7 @@ class PegInHoleEnv(SimToolReal):
         goal_resets = is_success.clone()
         self.successes += is_success
 
-        just_entered_retract = (self.successes >= self.env_max_goals) & ~self.retract_phase
+        just_entered_retract = (self.successes >= self.env_max_goals) & ~self.retract_phase & ~self.is_random_goal_env
         self.retract_phase |= just_entered_retract
         self.successes.clamp_(max=self.max_consecutive_successes)
 
@@ -974,6 +1066,25 @@ class PegInHoleEnv(SimToolReal):
         self.extras["final_goal_tolerance"] = self.final_goal_success_tolerance
         self.true_objective = self._true_objective()
         self.extras["true_objective"] = self.true_objective
+
+        if self.random_goal_fraction > 0:
+            ins_mask = ~self.prev_episode_is_random_goal
+            rg_mask = self.prev_episode_is_random_goal
+            prev_s = self.prev_episode_successes
+            prev_mg = self.prev_episode_env_max_goals.float()
+            if ins_mask.any():
+                self.extras["insertion_success_ratio"] = (prev_s[ins_mask] / prev_mg[ins_mask]).mean().item()
+                self.extras["insertion_all_goals_hit_ratio"] = (prev_s[ins_mask] >= self.prev_episode_env_max_goals[ins_mask]).float().mean().item()
+            else:
+                self.extras["insertion_success_ratio"] = 0.0
+                self.extras["insertion_all_goals_hit_ratio"] = 0.0
+            if rg_mask.any():
+                self.extras["random_goal_success_ratio"] = (prev_s[rg_mask] / prev_mg[rg_mask]).mean().item()
+                self.extras["random_goal_all_goals_hit_ratio"] = (prev_s[rg_mask] >= self.prev_episode_env_max_goals[rg_mask]).float().mean().item()
+            else:
+                self.extras["random_goal_success_ratio"] = 0.0
+                self.extras["random_goal_all_goals_hit_ratio"] = 0.0
+            self.extras["random_goal_frac"] = self.is_random_goal_env.float().mean().item()
 
         rewards = [
             (fingertip_delta_rew, "fingertip_delta_rew"),
