@@ -52,6 +52,10 @@ GOAL_MODES = ["preInsertAndFinal", "finalGoalOnly"]
 
 HOLE_SCENE_Z = 0.15  # hole base Z in scene-local frame (= table top)
 
+# Target volume for random-goal sampling (matches PegInHoleDynamicEnv.yaml)
+TARGET_VOLUME_MINS = [-0.35, -0.1, 0.6]
+TARGET_VOLUME_MAXS = [0.35, 0.2, 0.95]
+
 BASE_OVERRIDES = {
     "task.env.resetPositionNoiseX": 0.0,
     "task.env.resetPositionNoiseY": 0.0,
@@ -98,25 +102,59 @@ def quat_xyzw_to_wxyz(q):
     return (q[3], q[0], q[1], q[2])
 
 
-def _build_hole_mesh_from_urdf(urdf_path: Path) -> trimesh.Trimesh:
-    """Parse a hole URDF and build a trimesh from its collision box primitives."""
+def _load_mesh_for_viz(asset_path: Path) -> trimesh.Trimesh:
+    """Load a mesh for viser visualization. Handles URDF (box + mesh geometry)
+    and plain mesh files (OBJ, STL)."""
+    if asset_path.suffix in (".obj", ".stl", ".ply"):
+        return trimesh.load(str(asset_path), force="mesh")
+
+    # Parse URDF: extract boxes and mesh references from collision geometry
     import xml.etree.ElementTree as ET
-    tree = ET.parse(str(urdf_path))
+    tree = ET.parse(str(asset_path))
     meshes = []
     for col in tree.iter("collision"):
         origin = col.find("origin")
         xyz = [0.0, 0.0, 0.0]
-        if origin is not None and origin.get("xyz"):
-            xyz = [float(v) for v in origin.get("xyz").split()]
+        rpy = [0.0, 0.0, 0.0]
+        if origin is not None:
+            if origin.get("xyz"):
+                xyz = [float(v) for v in origin.get("xyz").split()]
+            if origin.get("rpy"):
+                rpy = [float(v) for v in origin.get("rpy").split()]
         geom = col.find("geometry")
         if geom is None:
             continue
         box = geom.find("box")
+        mesh_elem = geom.find("mesh")
         if box is not None:
             size = [float(v) for v in box.get("size").split()]
             m = trimesh.creation.box(extents=size)
-            m.apply_translation(xyz)
-            meshes.append(m)
+        elif mesh_elem is not None:
+            mesh_file = asset_path.parent / mesh_elem.get("filename")
+            if not mesh_file.exists():
+                continue
+            m = trimesh.load(str(mesh_file), force="mesh")
+        else:
+            continue
+        # Apply origin transform
+        T = np.eye(4)
+        T[:3, 3] = xyz
+        if any(v != 0 for v in rpy):
+            from scipy.spatial.transform import Rotation
+            T[:3, :3] = Rotation.from_euler("xyz", rpy).as_matrix()
+        m.apply_transform(T)
+        meshes.append(m)
+    if not meshes:
+        # Fallback: try loading the URDF's visual meshes
+        for vis in tree.iter("visual"):
+            geom = vis.find("geometry")
+            if geom is None:
+                continue
+            mesh_elem = geom.find("mesh")
+            if mesh_elem is not None:
+                mesh_file = asset_path.parent / mesh_elem.get("filename")
+                if mesh_file.exists():
+                    meshes.append(trimesh.load(str(mesh_file), force="mesh"))
     if not meshes:
         return trimesh.creation.box(extents=(0.08, 0.08, 0.01))
     return trimesh.util.concatenate(meshes)
@@ -150,7 +188,10 @@ def _create_env(config_path, headless, device, overrides):
         "holeUrdf": "urdf/peg_in_hole/holes/hole_tol0p5mm/hole_tol0p5mm.urdf",
         "holeXRange": [-0.1875, 0.1875],
         "holeYRange": [-0.1, 0.2],
-        "preInsertZOffset": 0.05,
+        "holeZOffset": 0.0,
+        "insertPoseRelHole": [0.0, 0.0, 0.136, 0.0, -0.70710678, 0.0, 0.70710678],
+        "insertionDirection": [0.0, 0.0, -1.0],
+        "preInsertOffset": 0.05,
         "goalMode": "preInsertAndFinal",
         "randomGoalFraction": 0.0,
         "randomGoalMaxSuccesses": 50,
@@ -269,6 +310,14 @@ def sim_worker(conn, config_path, checkpoint_path, goal_mode,
         env = _create_env(config_path=str(config_path), headless=headless,
                           device=device, overrides=overrides)
 
+        # Debug: print keypoint offsets
+        print(f"[diag] object_scales[0]: {env.object_scales[0].cpu().tolist()}", flush=True)
+        print(f"[diag] object_keypoint_offsets[0]: {env.object_keypoint_offsets[0].cpu().tolist()}", flush=True)
+        print(f"[diag] object_keypoint_offsets_fixed_size[0]: {env.object_keypoint_offsets_fixed_size[0].cpu().tolist()}", flush=True)
+        print(f"[diag] fixedSize config: {env.cfg['env'].get('fixedSize')}", flush=True)
+        print(f"[diag] keypointScale: {env.keypoint_scale}", flush=True)
+        print(f"[diag] objectBaseSize: {env.object_base_size}", flush=True)
+
         joint_lower = env.arm_hand_dof_lower_limits[:N_ACT].cpu().numpy()
         joint_upper = env.arm_hand_dof_upper_limits[:N_ACT].cpu().numpy()
         env.set_env_state(torch.load(checkpoint_path, map_location=device)[0]["env_state"])
@@ -338,7 +387,9 @@ class PegDynamicDemo:
         self._obj_keypoints = []
         self._goal_keypoints = []
 
-        self._hole_mesh = _build_hole_mesh_from_urdf(self._hole_urdf_abs)
+        self._hole_mesh = _load_mesh_for_viz(self._hole_urdf_abs)
+        self._object_mesh = _load_mesh_for_viz(self._object_urdf_abs)
+        self._target_vol_box = None
 
         self._build_gui()
         self._setup_static_scene()
@@ -376,6 +427,8 @@ class PegDynamicDemo:
         with self.server.gui.add_folder("Display", expand_by_default=True):
             self._cb_keypoints = self.server.gui.add_checkbox("Show keypoints", initial_value=True)
             self._cb_keypoints.on_update(lambda _: self._apply_keypoint_visibility())
+            self._cb_target_vol = self.server.gui.add_checkbox("Show target volume", initial_value=False)
+            self._cb_target_vol.on_update(lambda _: self._toggle_target_volume())
 
         with self.server.gui.add_folder("Status", expand_by_default=True):
             self._md_task = self.server.gui.add_markdown("**Task:** --")
@@ -424,24 +477,37 @@ class PegDynamicDemo:
         self._obj_keypoints.clear()
         self._goal_keypoints.clear()
 
+    def _add_object_viz(self, node_name: str, color, opacity=1.0):
+        """Add object mesh to scene. Uses ViserUrdf for URDFs, mesh_simple for OBJ/STL."""
+        if self._object_urdf_abs.suffix == ".urdf":
+            try:
+                ViserUrdf(self.server, self._object_urdf_abs,
+                          root_node_name=node_name, mesh_color_override=color)
+                return
+            except Exception:
+                pass
+        verts = np.array(self._object_mesh.vertices, dtype=np.float32)
+        faces = np.array(self._object_mesh.faces, dtype=np.uint32)
+        rgb = color[:3] if len(color) >= 3 else color
+        self._dyn.append(self.server.scene.add_mesh_simple(
+            f"{node_name}/mesh", vertices=verts, faces=faces,
+            color=rgb, opacity=opacity,
+        ))
+
     def _setup_scene_objects(self):
         self._clear_dynamic()
 
-        obj_urdf = self._object_urdf_abs
-
         self._obj_frame = self.server.scene.add_frame(
-            "/object", show_axes=True, axes_length=0.1, axes_radius=0.001,
+            "/object", show_axes=True, axes_length=0.05, axes_radius=0.001,
         )
         self._dyn.append(self._obj_frame)
-        ViserUrdf(self.server, obj_urdf, root_node_name="/object",
-                  mesh_color_override=(204, 40, 40))
+        self._add_object_viz("/object", (204, 40, 40))
 
         self._goal_frame = self.server.scene.add_frame(
-            "/goal", show_axes=True, axes_length=0.1, axes_radius=0.001,
+            "/goal", show_axes=True, axes_length=0.05, axes_radius=0.001,
         )
         self._dyn.append(self._goal_frame)
-        ViserUrdf(self.server, obj_urdf, root_node_name="/goal",
-                  mesh_color_override=(0, 255, 0, 0.5))
+        self._add_object_viz("/goal", (0, 255, 0), opacity=0.5)
 
         self._hole_frame = self.server.scene.add_frame(
             "/hole", position=(0, 0, TABLE_Z + HOLE_SCENE_Z),
@@ -487,6 +553,24 @@ class PegDynamicDemo:
         for kp in self._obj_keypoints + self._goal_keypoints:
             kp.visible = visible
 
+    def _toggle_target_volume(self):
+        show = self._cb_target_vol.value
+        if show and self._target_vol_box is None:
+            tv_min = np.array(TARGET_VOLUME_MINS)
+            tv_max = np.array(TARGET_VOLUME_MAXS)
+            center = (tv_min + tv_max) / 2
+            dims = tv_max - tv_min
+            self._target_vol_box = self.server.scene.add_box(
+                "/target_volume",
+                color=(100, 255, 100),
+                dimensions=tuple(dims.tolist()),
+                position=tuple(center.tolist()),
+                side="double",
+                opacity=0.08,
+            )
+        if self._target_vol_box is not None:
+            self._target_vol_box.visible = show
+
     # ── Subprocess management ────────────────────────────────────
 
     def _kill_subprocess(self):
@@ -530,8 +614,8 @@ class PegDynamicDemo:
         # Merge asset overrides into extra_overrides for the subprocess
         sim_overrides = dict(self.extra_overrides)
         sim_overrides["task.env.holeUrdf"] = self._hole_urdf_rel
-        # objectName is resolved by dextoolbench.objects; for custom objects
-        # the user should register them and pass the name via --override.
+        sim_overrides["task.env.targetVolumeMins"] = TARGET_VOLUME_MINS
+        sim_overrides["task.env.targetVolumeMaxs"] = TARGET_VOLUME_MAXS
 
         ctx = multiprocessing.get_context("spawn")
         parent_conn, child_conn = ctx.Pipe()
@@ -753,16 +837,21 @@ if __name__ == "__main__":
 
     extra_overrides = {}
     for key, val in args.override:
-        for cast in (int, float):
-            try:
-                val = cast(val)
-                break
-            except ValueError:
-                continue
-        if val == "True":
-            val = True
-        elif val == "False":
-            val = False
+        # Try parsing as JSON first (handles lists like [-0.005,0.1,0.2])
+        import json
+        try:
+            val = json.loads(val)
+        except (json.JSONDecodeError, ValueError):
+            for cast in (int, float):
+                try:
+                    val = cast(val)
+                    break
+                except ValueError:
+                    continue
+            if val == "True":
+                val = True
+            elif val == "False":
+                val = False
         extra_overrides[key] = val
 
     policies: Dict[str, Tuple[str, str]] = {}

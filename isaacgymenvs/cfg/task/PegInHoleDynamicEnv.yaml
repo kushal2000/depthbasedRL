@@ -17,6 +17,10 @@ env:
   # Hole position sampling range (relative to table center XY)
   holeXRange: [-0.1875, 0.1875]
   holeYRange: [-0.1, 0.2]
+  # Z offset for hole placement above table surface. Use this when the hole
+  # mesh origin is at its bbox center (e.g. centered FMB boards need half-height
+  # offset). 0.0 = origin sits on table surface (correct for box-primitive holes).
+  holeZOffset: 0.0
 
   # Goal computation
   # Peg pose when fully inserted, relative to hole origin (on table surface).

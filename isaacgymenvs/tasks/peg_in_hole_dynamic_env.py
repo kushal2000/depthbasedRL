@@ -73,9 +73,9 @@ class PegInHoleDynamicEnv(SimToolReal):
         hole_y_range = cfg["env"].get("holeYRange", [-0.1, 0.2])
         self.hole_x_min, self.hole_x_max = float(hole_x_range[0]), float(hole_x_range[1])
         self.hole_y_min, self.hole_y_max = float(hole_y_range[0]), float(hole_y_range[1])
+        self.hole_z_offset = float(cfg["env"].get("holeZOffset", 0.0))
 
-        # Parent init placeholders
-        cfg["env"]["objectName"] = "peg"
+        # Parent init placeholders (don't override objectName — respect config/CLI)
         cfg["env"]["useFixedGoalStates"] = True
         cfg["env"]["useFixedInitObjectPose"] = True
 
@@ -264,11 +264,11 @@ class PegInHoleDynamicEnv(SimToolReal):
         table_pose.p.y = robot_pose.p.y + table_pose_dy
         table_pose.p.z = robot_pose.p.z + table_pose_dz
 
-        # Initial hole pose: centered on table surface
+        # Initial hole pose: on table surface (+ optional Z offset for centered meshes)
         hole_pose = gymapi.Transform()
         hole_pose.p = gymapi.Vec3(
             table_pose.p.x, table_pose.p.y,
-            table_pose.p.z + TABLE_HALF_HEIGHT,
+            table_pose.p.z + TABLE_HALF_HEIGHT + self.hole_z_offset,
         )
         hole_pose.r = gymapi.Quat(0, 0, 0, 1)
 
@@ -553,7 +553,7 @@ class PegInHoleDynamicEnv(SimToolReal):
             ).squeeze(-1)
             self.hole_pos[env_ids, 0] = hole_x
             self.hole_pos[env_ids, 1] = hole_y
-            self.hole_pos[env_ids, 2] = table_top_z
+            self.hole_pos[env_ids, 2] = table_top_z + self.hole_z_offset
 
             # For random-goal envs: move hole out of workspace
             rg_mask = self.is_random_goal_env[env_ids]
