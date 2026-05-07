@@ -44,6 +44,7 @@ N_ACTIONS = 29
 N_ARM = 7
 DEPTH_NEAR_M = 0.70
 DEPTH_FAR_M = 1.10
+DEPTH_INVALID_M = 100.0
 RESIZED_WIDTH = 160
 RESIZED_HEIGHT = 90
 CROP_X0 = 90
@@ -803,7 +804,9 @@ class DepthPreprocessor:
             depth_m = depth.copy()
         else:
             raise ValueError(f"depth_units must be auto, m, or mm; got {self.depth_units!r}")
-        depth_m[(depth_m < 0.001) | (~np.isfinite(depth_m))] = 0.0
+        finite_depth = np.isfinite(depth_m)
+        depth_m[finite_depth & (depth_m < 0.001)] = 0.0
+        depth_m[~finite_depth] = DEPTH_INVALID_M
 
         sample_m = self._sample_for_stats(depth_m)
         valid_sample = np.isfinite(sample_m) & (sample_m > 0.0)
