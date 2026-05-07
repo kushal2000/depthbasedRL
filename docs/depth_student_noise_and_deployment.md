@@ -178,6 +178,26 @@ Useful variants:
 - `--zed_depth_mode PERFORMANCE` or `--zed_depth_mode NEURAL_LIGHT` compares cheaper depth modes against the default `NEURAL`.
 - `--save_dir /tmp/zed_nonblocking_debug` saves raw depth arrays plus window/crop PNGs for visual inspection.
 
+If the threaded diagnostic shows `tick_period_med` near the camera period
+instead of the requested consumer period, run the multiprocess/shared-memory
+diagnostic:
+
+```bash
+python deployment/test_zed_multiprocess.py \
+  --duration_s 30 \
+  --consumer_hz 60 \
+  --producer_preprocess none
+```
+
+or the equivalent numbered script:
+
+```bash
+bash_scripts/09_zed_multiprocess_60hz_no_preprocess.sh
+```
+
+This isolates the consumer loop from PyZED's Python thread scheduling by moving
+all ZED SDK calls into a child process.
+
 ## Relationship To `deployment/rl_policy_node.py`
 
 The old real-world `rl_policy_node.py` uses a reliable deployment sequence that the student node now mirrors:
