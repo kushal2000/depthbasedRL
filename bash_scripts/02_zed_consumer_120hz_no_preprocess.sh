@@ -3,7 +3,7 @@ set -euo pipefail
 
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
 
-.venv-isaacsim-py311/bin/python deployment/test_zed_nonblocking.py \
+python deployment/test_zed_nonblocking.py \
   --duration_s 30 \
   --consumer_hz 120 \
   --producer_preprocess none \

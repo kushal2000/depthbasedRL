@@ -162,7 +162,7 @@ For a DEXTRAH-matched policy candidate, prefer a checkpoint trained with `medium
 Use the standalone diagnostic before blaming the policy node:
 
 ```bash
-.venv-isaacsim-py311/bin/python deployment/test_zed_nonblocking.py \
+python deployment/test_zed_nonblocking.py \
   --duration_s 30 \
   --consumer_hz 60 \
   --producer_preprocess none \
