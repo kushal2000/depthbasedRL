@@ -335,6 +335,11 @@ class ZedDepthCamera:
         self.camera_upsidedown = bool(args.zed_camera_upsidedown)
         self.nonblocking = bool(args.zed_nonblocking)
         self.max_cached_depth_age_s = float(args.zed_max_cached_depth_age_s)
+        retrieve_width = int(args.zed_retrieve_width)
+        retrieve_height = int(args.zed_retrieve_height)
+        self.retrieve_resolution = None
+        if retrieve_width > 0 and retrieve_height > 0:
+            self.retrieve_resolution = sl.Resolution(retrieve_width, retrieve_height)
         self._camera_lock = threading.Lock()
         self._latest_lock = threading.Lock()
         self._latest_frame: DepthFrame | None = None
@@ -346,6 +351,8 @@ class ZedDepthCamera:
             f"serial={args.zed_serial_number or '<default>'} resolution={args.zed_resolution} "
             f"depth_mode={args.zed_depth_mode} units=millimeters"
         )
+        if self.retrieve_resolution is not None:
+            info(f"ZED retrieve resolution: {retrieve_width}x{retrieve_height}")
         if self.nonblocking:
             self._reader_thread = threading.Thread(target=self._reader_loop, name="zed_depth_reader", daemon=True)
             self._reader_thread.start()
@@ -376,7 +383,23 @@ class ZedDepthCamera:
             if err != self.sl.ERROR_CODE.SUCCESS:
                 warn_every(f"ZED grab failed: {err}", 1.0, key="zed_grab_failed")
                 return None
-            self.camera.retrieve_measure(self.depth_mat, self.sl.MEASURE.DEPTH)
+            if self.retrieve_resolution is None:
+                self.camera.retrieve_measure(self.depth_mat, self.sl.MEASURE.DEPTH)
+            else:
+                try:
+                    self.camera.retrieve_measure(
+                        self.depth_mat,
+                        self.sl.MEASURE.DEPTH,
+                        self.sl.MEM.CPU,
+                        self.retrieve_resolution,
+                    )
+                except TypeError:
+                    warn_every(
+                        "ZED Python API did not accept low-resolution retrieve_measure; falling back to full frame.",
+                        5.0,
+                        key="zed_retrieve_resolution_unsupported",
+                    )
+                    self.camera.retrieve_measure(self.depth_mat, self.sl.MEASURE.DEPTH)
             depth_mm = np.array(self.depth_mat.get_data(), copy=True)
         if self.camera_upsidedown:
             import cv2
@@ -432,21 +455,29 @@ class DepthPreprocessor:
             raise ValueError(f"far_m must be greater than near_m, got {near_m}, {far_m}")
         self._resize_interpolation = resize_interpolation
 
+    @staticmethod
+    def _sample_for_stats(depth: np.ndarray) -> np.ndarray:
+        if depth.ndim != 2:
+            return depth.reshape(-1)
+        stride_y = max(1, depth.shape[0] // 120)
+        stride_x = max(1, depth.shape[1] // 160)
+        return depth[::stride_y, ::stride_x].reshape(-1)
+
     def _convert_units(self, depth: np.ndarray, encoding: str) -> np.ndarray:
         depth = np.asarray(depth)
         if depth.ndim == 3:
             depth = depth[..., 0]
         raw_dtype = depth.dtype
         depth = depth.astype(np.float32, copy=False)
-        finite = np.isfinite(depth)
-        median_raw = float(np.median(depth[finite])) if finite.any() else float("nan")
+        sample = self._sample_for_stats(depth)
+        finite_sample = np.isfinite(sample)
         units = self.depth_units
         if units == "auto":
             if (
                 np.issubdtype(raw_dtype, np.integer)
                 or "16U" in encoding
                 or "mm" in encoding.lower()
-                or (finite.any() and median_raw > 10.0)
+                or (finite_sample.any() and float(np.median(sample[finite_sample])) > 10.0)
             ):
                 units = "mm"
             else:
@@ -458,10 +489,12 @@ class DepthPreprocessor:
         else:
             raise ValueError(f"depth_units must be auto, m, or mm; got {self.depth_units!r}")
 
-        finite_m = np.isfinite(depth_m)
+        sample_m = self._sample_for_stats(depth_m)
+        finite_m = np.isfinite(sample_m)
         if finite_m.any():
-            median_m = float(np.median(depth_m[finite_m]))
-            p95_m = float(np.quantile(depth_m[finite_m], 0.95))
+            sample_finite_m = sample_m[finite_m]
+            median_m = float(np.median(sample_finite_m))
+            p95_m = float(np.quantile(sample_finite_m, 0.95))
             if median_m > 5.0 or p95_m > 10.0:
                 warn_every(
                     f"Depth median/p95 after unit conversion is suspicious: median={median_m:.3f}m p95={p95_m:.3f}m. "
@@ -491,6 +524,8 @@ class DepthPreprocessor:
                 f"resize_interpolation must be one of {sorted(interp_map)}, "
                 f"got {self._resize_interpolation!r}"
             )
+        if depth_m.shape == (RESIZED_HEIGHT, RESIZED_WIDTH):
+            return depth_m.astype(np.float32, copy=False)
         return cv2.resize(
             depth_m,
             (RESIZED_WIDTH, RESIZED_HEIGHT),
@@ -673,6 +708,7 @@ class StudentDepthPolicyNode:
         self.last_status_time = time.time()
         self.last_depth_age_s: float | None = None
         self.last_step_timing_ms: dict[str, float] = {}
+        self.last_depth_timing_ms: dict[str, float] = {}
         self._warmup_completed = False
 
         if args.depth_source == "ros_topic":
@@ -807,11 +843,20 @@ class StudentDepthPolicyNode:
         raise ValueError(f"Unsupported --depth_source {self.args.depth_source!r}")
 
     def _image_tensor(self, *, save_debug: bool = True) -> tuple[torch.Tensor, DepthPipelineOutput, rospy.Time]:
+        t_read_start = time.time()
         frame = self._read_depth_frame()
+        t_read_done = time.time()
         pipeline = self.preprocessor(frame.depth, encoding=frame.encoding)
+        t_preprocess_done = time.time()
         if save_debug:
             self.debug_saver.maybe_save(pipeline)
+        t_debug_done = time.time()
         self.last_depth_age_s = max(0.0, (rospy.Time.now() - frame.stamp).to_sec())
+        self.last_depth_timing_ms = {
+            "read": 1000.0 * (t_read_done - t_read_start),
+            "preprocess": 1000.0 * (t_preprocess_done - t_read_done),
+            "debug": 1000.0 * (t_debug_done - t_preprocess_done),
+        }
         image = torch.from_numpy(pipeline.policy_crop).to(self.device).float().view(1, 1, POLICY_HEIGHT, POLICY_WIDTH)
         return image, pipeline, frame.stamp
 
@@ -964,6 +1009,12 @@ class StudentDepthPolicyNode:
                 f" depth_ms={self.last_step_timing_ms.get('depth', 0.0):.1f}"
                 f" policy_ms={self.last_step_timing_ms.get('policy', 0.0):.1f}"
                 f" total_ms={self.last_step_timing_ms.get('total', 0.0):.1f}"
+            )
+        if self.last_depth_timing_ms:
+            timing_text += (
+                f" depth_read_ms={self.last_depth_timing_ms.get('read', 0.0):.1f}"
+                f" depth_pre_ms={self.last_depth_timing_ms.get('preprocess', 0.0):.1f}"
+                f" depth_debug_ms={self.last_depth_timing_ms.get('debug', 0.0):.1f}"
             )
         info(
             f"[student_depth_policy_node] step={self.loop_count} "
@@ -1141,6 +1192,18 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--zed_depth_mode", default="NEURAL")
     parser.add_argument("--zed_camera_fps", type=int, default=30)
     parser.add_argument("--zed_camera_upsidedown", action="store_true")
+    parser.add_argument(
+        "--zed_retrieve_width",
+        type=int,
+        default=RESIZED_WIDTH,
+        help="Ask the ZED SDK to retrieve depth at this width. Use <=0 with --zed_retrieve_height <=0 for full frame.",
+    )
+    parser.add_argument(
+        "--zed_retrieve_height",
+        type=int,
+        default=RESIZED_HEIGHT,
+        help="Ask the ZED SDK to retrieve depth at this height. Use <=0 with --zed_retrieve_width <=0 for full frame.",
+    )
     parser.add_argument(
         "--zed_nonblocking",
         action=argparse.BooleanOptionalAction,
