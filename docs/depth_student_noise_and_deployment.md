@@ -91,10 +91,16 @@ The ZED SDK settings are intentionally aligned with
 `NEURAL` depth, millimeter coordinate units, `svo_real_time_mode=True`, manual
 exposure `25`, manual gain `40`, optional upside-down image/depth flipping, and
 nearest-neighbor depth resizing. The student node additionally defaults to
-retrieving depth directly at `160 x 90` for policy-loop speed; set
-`--zed_retrieve_width 0 --zed_retrieve_height 0` to retrieve full-resolution
-depth and resize in Python for a closer FoundationPose-style path, at higher
-latency.
+retrieving depth directly at `160 x 90` for policy-loop speed. The non-blocking
+ZED reader is rate-capped at `30 Hz`, matching the camera FPS; this should be a
+no-op when `grab()` blocks normally, but it prevents accidental over-polling if
+the SDK returns quickly. The ZED reader also caches the depth frame at
+`160 x 90` before the policy loop sees it, so if a particular ZED Python binding
+falls back to full-frame retrieval, the resize is kept in the camera reader path
+instead of repeatedly hitting the control loop.
+Set `--zed_retrieve_width 0 --zed_retrieve_height 0` to retrieve
+full-resolution depth and resize in Python for a closer FoundationPose-style
+path, at higher latency.
 
 The policy proprio input matches the current Isaac Lab distillation setup:
 
@@ -109,12 +115,13 @@ Deployment safety/default behavior:
 - Joint command publishing is off by default.
 - The node waits for the first depth, iiwa joint state, and Sharpa joint state messages before starting.
 - The policy runs `--warmup_steps 30` forward passes by default to warm GPU kernels, then resets the recurrent hidden state before the real run.
+- After warmup, the node runs a cached-frame startup policy benchmark. This prints median/p95 pure policy latency against the requested control-rate budget, so a slow ZED path is not confused with a slow model/GPU path.
 - Warmup does not publish policy outputs. If needed, `--warmup_publish_current_targets` publishes current sensed joint positions as hold targets during warmup only.
 - If joint publishing is disabled or a duration window has elapsed, `prev_action_targets` defaults to the current sensed joints. Use `--prev_targets_when_not_publishing computed` only if you explicitly want a dry-run rollout of the policy's hypothetical command history.
-- Joint target publishing has a fixed arm safety guard: targets are clipped to full URDF joint limits, and publishes are blocked if any arm target is more than 10 degrees from the current arm joint.
+- Joint targets are clipped to full URDF joint limits. The extra arm-delta publish guard is off by default; pass `--max_arm_target_delta_deg <degrees>` if you want to block unexpectedly large arm target jumps during a cautious test.
 - Joint-position proprioception is normalized with the full URDF joint limits, matching Isaac Sim training.
 - Action smoothing uses the fixed training values: hand moving average `0.1`, arm moving average `0.1`, and arm velocity-delta scale `1.5`.
-- In non-blocking ZED mode at 60 Hz control and 30 Hz camera FPS, repeated depth frames are expected. Status logs include `depth_reused=True/False`; proprio is still updated every control step.
+- In non-blocking ZED mode at 60 Hz control and 30 Hz camera FPS, repeated depth frames are expected. Status logs include `depth_frame_id` and `depth_reused=True/False`; proprio is still updated every control step. Reused depth frames reuse the cached preprocessed policy tensor, so the control loop does not repeat depth resizing/windowing/debug saving when the camera frame has not changed. Timing logs break out ZED grab time/period, depth read, depth preprocessing, debug saving, policy submit time, action GPU sync time, target computation, and pose publishing.
 
 ## Deployment Command
 
@@ -149,6 +156,27 @@ For a hardware hold-style warmup similar to `deployment/rl_policy_node.py`, add:
 This still never publishes policy actions during warmup; it only republishes the current sensed joint positions as hold targets.
 
 For a DEXTRAH-matched policy candidate, prefer a checkpoint trained with `medium` depth noise and about `30mm/3deg` camera pose randomization. The existing `20mm/2deg` checkpoints are conservative; the `50mm/5deg` checkpoints are stress-test robust.
+
+## ZED Non-Blocking Diagnostic
+
+Use the standalone diagnostic before blaming the policy node:
+
+```bash
+.venv-isaacsim-py311/bin/python deployment/test_zed_nonblocking.py \
+  --duration_s 30 \
+  --consumer_hz 60 \
+  --producer_preprocess none \
+  --consumer_preprocess none
+```
+
+Useful variants:
+
+- `--consumer_hz 120` checks whether the consumer loop can reuse cached frames at a higher rate.
+- `--producer_preprocess policy` checks the intended deployment design: the ZED thread does policy-style resize/window/crop once per camera frame.
+- `--consumer_preprocess policy` simulates the bad design where the consumer repeats preprocessing every control tick.
+- `--zed_grab_hz 0` removes the producer rate cap so you can see whether over-polling the ZED SDK hurts timing.
+- `--zed_depth_mode PERFORMANCE` or `--zed_depth_mode NEURAL_LIGHT` compares cheaper depth modes against the default `NEURAL`.
+- `--save_dir /tmp/zed_nonblocking_debug` saves raw depth arrays plus window/crop PNGs for visual inspection.
 
 ## Relationship To `deployment/rl_policy_node.py`
 

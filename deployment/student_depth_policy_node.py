@@ -51,6 +51,7 @@ CROP_Y1 = 70
 POLICY_WIDTH = CROP_X1 - CROP_X0
 POLICY_HEIGHT = CROP_Y1 - CROP_Y0
 DEFAULT_CONTROL_HZ = 60.0
+STARTUP_POLICY_BENCHMARK_STEPS = 30
 # distill_depth.py trains object_pos in the env-local/world frame. The real
 # robot ROS topics use robot_frame, whose origin is translated +0.8 m in sim.
 SIM_WORLD_T_ROBOT_POS_M = np.array([0.0, 0.8, 0.0], dtype=np.float64)
@@ -64,9 +65,10 @@ ZED_SERIAL_NUMBER = "15107"
 ZED_RESOLUTION = "HD1080"
 ZED_DEPTH_MODE = "NEURAL"
 ZED_CAMERA_FPS = 30
+ZED_GRAB_HZ = 30.0
 ZED_EXPOSURE = 25
 ZED_GAIN = 40
-MAX_ARM_TARGET_DELTA_DEG = 10.0
+MAX_ARM_TARGET_DELTA_DEG = 0.0
 HAND_MOVING_AVERAGE = 0.1
 ARM_MOVING_AVERAGE = 0.1
 DOF_SPEED_SCALE = 1.5
@@ -150,10 +152,8 @@ Q_UPPER_LIMITS_np = np.array(
     ],
     dtype=np.float32,
 )
-Q_LOWER_LIMITS_COMMAND_np = Q_LOWER_LIMITS_np.copy()
-Q_UPPER_LIMITS_COMMAND_np = Q_UPPER_LIMITS_np.copy()
-assert Q_LOWER_LIMITS_COMMAND_np.shape == (N_ACTIONS,)
-assert Q_UPPER_LIMITS_COMMAND_np.shape == (N_ACTIONS,)
+assert Q_LOWER_LIMITS_np.shape == (N_ACTIONS,)
+assert Q_UPPER_LIMITS_np.shape == (N_ACTIONS,)
 
 
 def load_student_policy_class():
@@ -288,8 +288,8 @@ def compute_joint_pos_targets(
         raise RuntimeError(f"Expected actions shape (N, 29), got {actions.shape}")
     if prev_targets.shape != actions.shape:
         raise RuntimeError(f"prev_targets shape {prev_targets.shape} does not match actions {actions.shape}")
-    lower = Q_LOWER_LIMITS_COMMAND_np.astype(np.float32)
-    upper = Q_UPPER_LIMITS_COMMAND_np.astype(np.float32)
+    lower = Q_LOWER_LIMITS_np.astype(np.float32)
+    upper = Q_UPPER_LIMITS_np.astype(np.float32)
     targets = prev_targets.astype(np.float32, copy=True)
 
     arm_raw = prev_targets[:, :N_ARM] + dof_speed_scale * dt * actions[:, :N_ARM]
@@ -322,6 +322,9 @@ class DepthFrame:
     depth: np.ndarray
     encoding: str
     stamp: rospy.Time
+    frame_id: int = -1
+    grab_ms: float | None = None
+    inter_frame_ms: float | None = None
 
 
 class ZedDepthCamera:
@@ -361,6 +364,8 @@ class ZedDepthCamera:
         self.camera_upsidedown = bool(args.zed_camera_upsidedown)
         self.nonblocking = bool(args.zed_nonblocking)
         self.max_cached_depth_age_s = float(args.zed_max_cached_depth_age_s)
+        grab_hz = float(args.zed_grab_hz)
+        self.grab_period_s = 1.0 / grab_hz if grab_hz > 0.0 else 0.0
         retrieve_width = int(args.zed_retrieve_width)
         retrieve_height = int(args.zed_retrieve_height)
         self.retrieve_resolution = None
@@ -369,6 +374,8 @@ class ZedDepthCamera:
         self._camera_lock = threading.Lock()
         self._latest_lock = threading.Lock()
         self._latest_frame: DepthFrame | None = None
+        self._frame_id = 0
+        self._last_frame_wall_time: float | None = None
         self._stop_event = threading.Event()
         self._reader_thread: threading.Thread | None = None
         atexit.register(self.close)
@@ -378,8 +385,11 @@ class ZedDepthCamera:
             f"depth_mode={args.zed_depth_mode} units=millimeters "
             f"exposure={args.zed_exposure} gain={args.zed_gain}"
         )
+        if self.nonblocking and self.grab_period_s > 0.0:
+            info(f"ZED reader rate cap: {1.0 / self.grab_period_s:.1f} Hz")
         if self.retrieve_resolution is not None:
             info(f"ZED retrieve resolution: {retrieve_width}x{retrieve_height}")
+        info(f"ZED cached depth frame shape for policy preprocessing: {RESIZED_WIDTH}x{RESIZED_HEIGHT}")
         if self.nonblocking:
             self._reader_thread = threading.Thread(target=self._reader_loop, name="zed_depth_reader", daemon=True)
             self._reader_thread.start()
@@ -393,6 +403,21 @@ class ZedDepthCamera:
             valid = [item for item in dir(enum_cls) if item.isupper()]
             raise ValueError(f"Invalid ZED enum value {name!r}; valid values include {valid}") from exc
 
+    @staticmethod
+    def _resize_for_policy_cache(depth_mm: np.ndarray) -> np.ndarray:
+        if depth_mm.ndim == 3:
+            depth_mm = depth_mm[..., 0]
+        depth_mm = np.asarray(depth_mm, dtype=np.float32)
+        if depth_mm.shape == (RESIZED_HEIGHT, RESIZED_WIDTH):
+            return depth_mm
+        import cv2
+
+        return cv2.resize(
+            depth_mm,
+            (RESIZED_WIDTH, RESIZED_HEIGHT),
+            interpolation=cv2.INTER_NEAREST,
+        ).astype(np.float32, copy=False)
+
     def close(self) -> None:
         self._stop_event.set()
         if self._reader_thread is not None and self._reader_thread.is_alive():
@@ -403,6 +428,7 @@ class ZedDepthCamera:
                 self.camera = None
 
     def _grab_once(self) -> DepthFrame | None:
+        t0 = time.time()
         with self._camera_lock:
             if self.camera is None:
                 return None
@@ -432,19 +458,35 @@ class ZedDepthCamera:
             import cv2
 
             depth_mm = cv2.flip(depth_mm, -1)
+        depth_mm = self._resize_for_policy_cache(depth_mm)
+        now = time.time()
+        grab_ms = 1000.0 * (now - t0)
+        inter_frame_ms = None
+        if self._last_frame_wall_time is not None:
+            inter_frame_ms = 1000.0 * (now - self._last_frame_wall_time)
+        self._last_frame_wall_time = now
+        frame_id = self._frame_id
+        self._frame_id += 1
         return DepthFrame(
             depth=depth_mm,
             encoding="zed_sdk_mm",
             stamp=rospy.Time.now(),
+            frame_id=frame_id,
+            grab_ms=grab_ms,
+            inter_frame_ms=inter_frame_ms,
         )
 
     def _reader_loop(self) -> None:
         while not self._stop_event.is_set():
+            t0 = time.time()
             frame = self._grab_once()
             if frame is not None:
                 with self._latest_lock:
                     self._latest_frame = frame
-            else:
+            elapsed_s = time.time() - t0
+            if self.grab_period_s > elapsed_s:
+                self._stop_event.wait(self.grab_period_s - elapsed_s)
+            elif frame is None:
                 self._stop_event.wait(0.001)
 
     def read(self) -> DepthFrame | None:
@@ -709,6 +751,14 @@ class StudentDepthPolicyNode:
         rospy.init_node("student_depth_policy_node")
         self.args = args
         self.device = torch.device(args.device)
+        if self.device.type == "cuda":
+            torch.backends.cuda.matmul.allow_tf32 = True
+            torch.backends.cudnn.allow_tf32 = True
+            try:
+                torch.set_float32_matmul_precision("high")
+            except AttributeError:
+                pass
+            info(f"CUDA policy device: {torch.cuda.get_device_name(self.device)}")
         self.policy, self.aux_heads, step, best_metric = load_student_policy(args.checkpoint_path, self.device)
         self.hidden = self.policy.initial_state(1, self.device)
         self.preprocessor = DepthPreprocessor(
@@ -738,7 +788,14 @@ class StudentDepthPolicyNode:
         self.last_step_timing_ms: dict[str, float] = {}
         self.last_depth_timing_ms: dict[str, float] = {}
         self.last_depth_stamp: rospy.Time | None = None
+        self.last_depth_frame_id: int = -1
+        self.last_zed_grab_ms: float | None = None
+        self.last_zed_inter_frame_ms: float | None = None
         self.depth_frame_reused = False
+        self.cached_depth_stamp: rospy.Time | None = None
+        self.cached_depth_frame_id: int = -1
+        self.cached_depth_pipeline: DepthPipelineOutput | None = None
+        self.cached_depth_image: torch.Tensor | None = None
         self._warmup_completed = False
 
         if args.depth_source == "ros_topic":
@@ -779,15 +836,22 @@ class StudentDepthPolicyNode:
             info(f"Depth debug PNG/NPZ output enabled: {args.debug_depth_dir}")
         if args.debug_depth_video_path is not None:
             info(f"Depth debug mp4 output enabled: {args.debug_depth_video_path}")
+            warn(
+                "Depth debug mp4 writing can add control-loop jitter. "
+                "Disable --debug_depth_video_path for timing-critical joint publishing."
+            )
         if not args.publish_joint_commands:
             warn("Joint command publishing is disabled. Use --publish_joint_commands to send targets.")
         elif args.publish_joint_commands_duration_s >= 0.0:
             warn(f"Joint commands will publish only for {args.publish_joint_commands_duration_s:.2f}s.")
         if args.publish_joint_commands:
-            info(
-                "Joint safety: targets clipped to full URDF limits; "
-                f"publishes blocked if any arm target is >{args.max_arm_target_delta_deg:.1f} deg from current joint."
-            )
+            if args.max_arm_target_delta_deg > 0.0:
+                info(
+                    "Joint safety: targets clipped to full URDF limits; "
+                    f"publishes blocked if any arm target is >{args.max_arm_target_delta_deg:.1f} deg from current joint."
+                )
+            else:
+                info("Joint safety: targets clipped to full URDF limits; arm delta guard is disabled.")
         if "object_rot6d" in self.aux_heads:
             info(f"Object pose publishing mode: full pose from object_pos + object_rot6d to {args.object_pose_topic}")
         elif "object_pos" in self.aux_heads:
@@ -843,8 +907,8 @@ class StudentDepthPolicyNode:
         return np.concatenate([iiwa_pos, sharpa_pos]), np.concatenate([iiwa_vel, sharpa_vel])
 
     def _proprio_tensor(self, q: np.ndarray, qd: np.ndarray) -> torch.Tensor:
-        # Training normalizes joint_pos with the URDF joint limits. The 10 deg
-        # deployment command-safety clamps.
+        # Training normalizes joint_pos with the full URDF joint limits.
+        # Deployment command safety is handled separately before publishing.
         lower = Q_LOWER_LIMITS_np.astype(np.float32)
         upper = Q_UPPER_LIMITS_np.astype(np.float32)
         q_norm = 2.0 * (q - lower) / (upper - lower) - 1.0
@@ -870,7 +934,14 @@ class StudentDepthPolicyNode:
             stamp = msg.header.stamp if msg.header.stamp != rospy.Time(0) else (
                 self.latest_depth_receive_time or rospy.Time.now()
             )
-            return DepthFrame(depth=depth, encoding=msg.encoding, stamp=stamp)
+            return DepthFrame(
+                depth=depth,
+                encoding=msg.encoding,
+                stamp=stamp,
+                # ROS Header.seq is not reliable across all publishers. Use
+                # stamps only for cache invalidation on the ROS-topic fallback.
+                frame_id=-1,
+            )
         if self.args.depth_source == "zed_sdk":
             assert self.zed_camera is not None
             frame = self.zed_camera.read()
@@ -883,20 +954,42 @@ class StudentDepthPolicyNode:
         t_read_start = time.time()
         frame = self._read_depth_frame()
         t_read_done = time.time()
-        pipeline = self.preprocessor(frame.depth, encoding=frame.encoding)
+        same_frame_id = frame.frame_id >= 0 and self.cached_depth_frame_id == frame.frame_id
+        same_stamp = self.cached_depth_stamp == frame.stamp
+        cache_hit = (
+            (same_frame_id or same_stamp)
+            and self.cached_depth_pipeline is not None
+            and self.cached_depth_image is not None
+        )
+        if cache_hit:
+            pipeline = self.cached_depth_pipeline
+            image = self.cached_depth_image
+        else:
+            pipeline = self.preprocessor(frame.depth, encoding=frame.encoding)
+            image = torch.from_numpy(pipeline.policy_crop).to(self.device).float().view(
+                1, 1, POLICY_HEIGHT, POLICY_WIDTH
+            )
+            self.cached_depth_stamp = frame.stamp
+            self.cached_depth_frame_id = frame.frame_id
+            self.cached_depth_pipeline = pipeline
+            self.cached_depth_image = image
         t_preprocess_done = time.time()
-        if save_debug:
+        if save_debug and not cache_hit:
             self.debug_saver.maybe_save(pipeline)
         t_debug_done = time.time()
         self.last_depth_age_s = max(0.0, (rospy.Time.now() - frame.stamp).to_sec())
-        self.depth_frame_reused = self.last_depth_stamp == frame.stamp
+        self.depth_frame_reused = cache_hit or self.last_depth_stamp == frame.stamp or (
+            frame.frame_id >= 0 and self.last_depth_frame_id == frame.frame_id
+        )
         self.last_depth_stamp = frame.stamp
+        self.last_depth_frame_id = frame.frame_id
+        self.last_zed_grab_ms = frame.grab_ms
+        self.last_zed_inter_frame_ms = frame.inter_frame_ms
         self.last_depth_timing_ms = {
             "read": 1000.0 * (t_read_done - t_read_start),
             "preprocess": 1000.0 * (t_preprocess_done - t_read_done),
             "debug": 1000.0 * (t_debug_done - t_preprocess_done),
         }
-        image = torch.from_numpy(pipeline.policy_crop).to(self.device).float().view(1, 1, POLICY_HEIGHT, POLICY_WIDTH)
         return image, pipeline, frame.stamp
 
     def _predicted_pose(self, aux: dict[str, torch.Tensor]) -> tuple[np.ndarray, np.ndarray] | None:
@@ -1042,11 +1135,20 @@ class StudentDepthPolicyNode:
         depth_age_text = ""
         if self.last_depth_age_s is not None:
             depth_age_text = f" depth_age_ms={1000.0 * self.last_depth_age_s:.1f}"
+        zed_timing_text = ""
+        if self.last_zed_grab_ms is not None:
+            zed_timing_text += f" zed_grab_ms={self.last_zed_grab_ms:.1f}"
+        if self.last_zed_inter_frame_ms is not None:
+            zed_timing_text += f" zed_period_ms={self.last_zed_inter_frame_ms:.1f}"
         timing_text = ""
         if self.last_step_timing_ms:
             timing_text = (
                 f" depth_ms={self.last_step_timing_ms.get('depth', 0.0):.1f}"
                 f" policy_ms={self.last_step_timing_ms.get('policy', 0.0):.1f}"
+                f" policy_submit_ms={self.last_step_timing_ms.get('policy_submit', 0.0):.1f}"
+                f" action_sync_ms={self.last_step_timing_ms.get('action_sync', 0.0):.1f}"
+                f" target_ms={self.last_step_timing_ms.get('targets', 0.0):.1f}"
+                f" pose_ms={self.last_step_timing_ms.get('pose', 0.0):.1f}"
                 f" total_ms={self.last_step_timing_ms.get('total', 0.0):.1f}"
             )
         if self.last_depth_timing_ms:
@@ -1062,8 +1164,10 @@ class StudentDepthPolicyNode:
             f"action_abs_max={np.abs(action).max():.3f} "
             f"target_delta_abs_max={np.abs(q_targets - prev_targets).max():.3f} "
             f"published={published}"
+            f" depth_frame_id={self.last_depth_frame_id}"
             f"{depth_age_text}"
             f"{depth_reuse_text}"
+            f"{zed_timing_text}"
             f"{timing_text}"
         )
 
@@ -1120,12 +1224,12 @@ class StudentDepthPolicyNode:
             self.prev_targets = q.copy()
             image, _, _ = self._image_tensor(save_debug=self.args.debug_depth_during_warmup)
             proprio = self._proprio_tensor(q, qd)
-            with torch.no_grad():
+            with torch.inference_mode():
                 _, _ = self.policy(image, proprio, self.hidden)
             if self.device.type == "cuda":
                 torch.cuda.synchronize(self.device)
             if self.args.warmup_publish_current_targets:
-                self._publish_joint_targets(np.clip(q, Q_LOWER_LIMITS_COMMAND_np, Q_UPPER_LIMITS_COMMAND_np))
+                self._publish_joint_targets(np.clip(q, Q_LOWER_LIMITS_np, Q_UPPER_LIMITS_np))
             if step_idx == 0 or (step_idx + 1) % 10 == 0 or step_idx + 1 == num_steps:
                 info(f"Warmup step {step_idx + 1}/{num_steps}")
             rate.sleep()
@@ -1138,6 +1242,39 @@ class StudentDepthPolicyNode:
         info("=" * 100)
         info("Warmup complete; recurrent hidden state reset for real run.")
         info("=" * 100)
+
+    def _benchmark_policy_latency(self) -> None:
+        num_steps = int(self.args.startup_policy_benchmark_steps)
+        if num_steps <= 0:
+            return
+        if self.device.type != "cuda":
+            warn("Startup policy benchmark is most useful on CUDA; running on CPU.")
+        q, qd = self._joint_arrays()
+        image, _, _ = self._image_tensor(save_debug=False)
+        proprio = self._proprio_tensor(q, qd)
+        hidden = self.policy.initial_state(1, self.device)
+        timings_ms = []
+        with torch.inference_mode():
+            for _ in range(num_steps):
+                t0 = time.time()
+                output, hidden = self.policy(image, proprio, hidden)
+                _ = output.action.detach().cpu().numpy()
+                if self.device.type == "cuda":
+                    torch.cuda.synchronize(self.device)
+                timings_ms.append(1000.0 * (time.time() - t0))
+        median_ms = float(np.median(timings_ms))
+        p95_ms = float(np.quantile(timings_ms, 0.95))
+        budget_ms = 1000.0 / float(self.args.control_hz)
+        message = (
+            f"Startup policy latency benchmark over {num_steps} cached-frame steps: "
+            f"median={median_ms:.1f}ms p95={p95_ms:.1f}ms budget={budget_ms:.1f}ms "
+            f"for {self.args.control_hz:.1f}Hz."
+        )
+        if p95_ms > budget_ms:
+            warn(message + " Pure policy inference is too slow for the requested control rate on this setup.")
+        else:
+            info(message)
+        self.hidden = self.policy.initial_state(1, self.device)
 
     def _active_run_elapsed_s(self) -> float:
         if self.active_loop_start_time is None:
@@ -1158,12 +1295,14 @@ class StudentDepthPolicyNode:
         t_depth_done = time.time()
         proprio = self._proprio_tensor(q, qd)
         t_policy_start = time.time()
-        with torch.no_grad():
+        with torch.inference_mode():
             output, self.hidden = self.policy(image, proprio, self.hidden)
+        t_policy_submit_done = time.time()
         action = output.action.detach().cpu().numpy()
         t_policy_done = time.time()
         if action.shape != (1, N_ACTIONS):
             raise RuntimeError(f"Expected action shape (1, 29), got {action.shape}")
+        t_targets_start = time.time()
         prev_targets = self.prev_targets.copy()
         q_targets = compute_joint_pos_targets(
             actions=action,
@@ -1178,11 +1317,17 @@ class StudentDepthPolicyNode:
             self._publish_joint_targets(q_targets)
             published = True
         self._set_prev_targets_after_step(q=q, q_targets=q_targets, published=published)
+        t_targets_done = time.time()
         self._publish_predicted_pose(output.aux, stamp)
+        t_pose_done = time.time()
         t_step_done = time.time()
         self.last_step_timing_ms = {
             "depth": 1000.0 * (t_depth_done - t_depth_start),
             "policy": 1000.0 * (t_policy_done - t_policy_start),
+            "policy_submit": 1000.0 * (t_policy_submit_done - t_policy_start),
+            "action_sync": 1000.0 * (t_policy_done - t_policy_submit_done),
+            "targets": 1000.0 * (t_targets_done - t_targets_start),
+            "pose": 1000.0 * (t_pose_done - t_targets_done),
             "total": 1000.0 * (t_step_done - t_step_start),
         }
         self._print_status(pipeline, action[0], q_targets, prev_targets, published)
@@ -1191,6 +1336,7 @@ class StudentDepthPolicyNode:
     def run(self) -> None:
         self._wait_for_first_inputs()
         self._warmup_policy()
+        self._benchmark_policy_latency()
         self.active_loop_start_time = rospy.Time.now()
         self.command_start_time = None
         rate = rospy.Rate(self.args.control_hz)
@@ -1204,8 +1350,18 @@ class StudentDepthPolicyNode:
                     raise
             elapsed = time.time() - t0
             if elapsed > 1.0 / self.args.control_hz:
+                breakdown = ""
+                if self.last_step_timing_ms:
+                    breakdown = (
+                        " breakdown="
+                        f"depth:{self.last_step_timing_ms.get('depth', 0.0):.1f}ms,"
+                        f"policy:{self.last_step_timing_ms.get('policy', 0.0):.1f}ms,"
+                        f"target:{self.last_step_timing_ms.get('targets', 0.0):.1f}ms,"
+                        f"pose:{self.last_step_timing_ms.get('pose', 0.0):.1f}ms"
+                    )
                 warn_every(
-                    f"Policy loop cannot keep up: step took {1000.0 * elapsed:.1f} ms for {self.args.control_hz:.1f} Hz.",
+                    f"Policy loop cannot keep up: step took {1000.0 * elapsed:.1f} ms for "
+                    f"{self.args.control_hz:.1f} Hz.{breakdown}",
                     1.0,
                     key="loop_slow",
                 )
@@ -1237,6 +1393,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--zed_resolution", default=ZED_RESOLUTION, help=argparse.SUPPRESS)
     parser.add_argument("--zed_depth_mode", default=ZED_DEPTH_MODE, help=argparse.SUPPRESS)
     parser.add_argument("--zed_camera_fps", type=int, default=ZED_CAMERA_FPS, help=argparse.SUPPRESS)
+    parser.add_argument("--zed_grab_hz", type=float, default=ZED_GRAB_HZ, help=argparse.SUPPRESS)
     parser.add_argument("--zed_camera_upsidedown", action="store_true")
     parser.add_argument(
         "--zed_exposure",
@@ -1293,6 +1450,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--raise_on_large_target_delta", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--warmup_steps", type=int, default=30)
     parser.add_argument(
+        "--startup_policy_benchmark_steps",
+        type=int,
+        default=STARTUP_POLICY_BENCHMARK_STEPS,
+        help="Run this many cached-frame policy forwards after warmup to verify the requested control rate is feasible.",
+    )
+    parser.add_argument(
         "--warmup_publish_current_targets",
         action="store_true",
         help="During warmup only, publish current sensed joint positions as hold targets instead of policy targets.",
@@ -1318,7 +1481,6 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--hand_moving_average", type=float, default=HAND_MOVING_AVERAGE, help=argparse.SUPPRESS)
     parser.add_argument("--arm_moving_average", type=float, default=ARM_MOVING_AVERAGE, help=argparse.SUPPRESS)
     parser.add_argument("--dof_speed_scale", type=float, default=DOF_SPEED_SCALE, help=argparse.SUPPRESS)
-    parser.add_argument("--hand_dof_speed_scale", dest="dof_speed_scale", type=float, default=argparse.SUPPRESS, help=argparse.SUPPRESS)
     parser.add_argument("--debug_depth_dir", type=Path, default=None)
     parser.add_argument("--debug_depth_every_n", type=int, default=30)
     parser.add_argument("--debug_depth_video_path", type=Path, default=None)
