@@ -53,8 +53,8 @@ The deployment node should therefore process the ZED depth image as:
 ```text
 ZED SDK depth frame
   -> convert units to meters
-  -> resize to 160 x 90
-  -> replace NaN/+Inf/-Inf like training
+  -> set invalid depths and depths < 1 mm to 0, matching FoundationPose ZED handling
+  -> resize to 160 x 90 with nearest-neighbor interpolation when resizing is needed
   -> window normalize: clip((depth_m - 0.70) / (1.10 - 0.70), 0, 1)
   -> crop [y=0:70, x=90:160]
   -> tensor shape (1, 1, 70, 70), float32
@@ -86,13 +86,23 @@ node defaults to `--depth_units auto`, which treats integer/`16U` depth, encodin
 containing `mm`, or raw median depth above `10` as millimeters and divides by
 `1000`.
 
+The ZED SDK settings are intentionally aligned with
+`/juno/u/kedia/FoundationPose/live_tracking_with_ros_reset.py`: `HD1080`,
+`NEURAL` depth, millimeter coordinate units, `svo_real_time_mode=True`, manual
+exposure `25`, manual gain `40`, optional upside-down image/depth flipping, and
+nearest-neighbor depth resizing. The student node additionally defaults to
+retrieving depth directly at `160 x 90` for policy-loop speed; set
+`--zed_retrieve_width 0 --zed_retrieve_height 0` to retrieve full-resolution
+depth and resize in Python for a closer FoundationPose-style path, at higher
+latency.
+
 The policy proprio input matches the current Isaac Lab distillation setup:
 
-- normalized restricted-limit joint positions, shape `29`
+- normalized full-URDF-limit joint positions, shape `29`
 - raw joint velocities, shape `29`
 - previous joint position targets, shape `29`
 
-Total proprio shape is `87`. The deployment action post-processing also uses the restricted Kuka-Sharpa joint limits, matching the Isaac Sim student training path.
+Total proprio shape is `87`. Deployment action post-processing clips commands to the same full URDF joint limits.
 
 Deployment safety/default behavior:
 
@@ -101,7 +111,10 @@ Deployment safety/default behavior:
 - The policy runs `--warmup_steps 30` forward passes by default to warm GPU kernels, then resets the recurrent hidden state before the real run.
 - Warmup does not publish policy outputs. If needed, `--warmup_publish_current_targets` publishes current sensed joint positions as hold targets during warmup only.
 - If joint publishing is disabled or a duration window has elapsed, `prev_action_targets` defaults to the current sensed joints. Use `--prev_targets_when_not_publishing computed` only if you explicitly want a dry-run rollout of the policy's hypothetical command history.
-- Joint target publishing has an arm safety guard: `--max_arm_target_delta_deg 10` blocks targets more than 10 degrees from current arm joints unless changed.
+- Joint target publishing has a fixed arm safety guard: targets are clipped to full URDF joint limits, and publishes are blocked if any arm target is more than 10 degrees from the current arm joint.
+- Joint-position proprioception is normalized with the full URDF joint limits, matching Isaac Sim training.
+- Action smoothing uses the fixed training values: hand moving average `0.1`, arm moving average `0.1`, and arm velocity-delta scale `1.5`.
+- In non-blocking ZED mode at 60 Hz control and 30 Hz camera FPS, repeated depth frames are expected. Status logs include `depth_reused=True/False`; proprio is still updated every control step.
 
 ## Deployment Command
 
@@ -109,14 +122,11 @@ Example dry-run command with no joint command publishing:
 
 ```bash
 PYTHONPATH=/home/tylerlum/github_repos/depthbasedRL:$PYTHONPATH \
-python deployment/student_depth_policy_node.py \
+python deployment/student_depth_policy_node_nonblocking.py \
   --checkpoint_path distillation_runs/09ctd_rot6d_medium_noise_camrand50mm5deg/checkpoints/student_latest.pt \
-  --depth_source zed_sdk \
-  --zed_serial_number 15107 \
   --debug_depth_dir /tmp/depth_student_debug \
   --debug_depth_every_n 30 \
   --debug_depth_video_path /tmp/depth_student_debug/depth_debug.mp4 \
-  --publish_object_pose \
   --no-publish_joint_commands
 ```
 
@@ -124,14 +134,10 @@ To publish joint targets for only the first second:
 
 ```bash
 PYTHONPATH=/home/tylerlum/github_repos/depthbasedRL:$PYTHONPATH \
-python deployment/student_depth_policy_node.py \
+python deployment/student_depth_policy_node_nonblocking.py \
   --checkpoint_path distillation_runs/09ctd_rot6d_medium_noise_camrand50mm5deg/checkpoints/student_latest.pt \
-  --depth_source zed_sdk \
-  --zed_serial_number 15107 \
-  --publish_object_pose \
   --publish_joint_commands \
-  --publish_joint_commands_duration_s 1.0 \
-  --max_arm_target_delta_deg 10
+  --publish_joint_commands_duration_s 1.0
 ```
 
 For a hardware hold-style warmup similar to `deployment/rl_policy_node.py`, add:

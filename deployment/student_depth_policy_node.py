@@ -55,6 +55,29 @@ DEFAULT_CONTROL_HZ = 60.0
 # robot ROS topics use robot_frame, whose origin is translated +0.8 m in sim.
 SIM_WORLD_T_ROBOT_POS_M = np.array([0.0, 0.8, 0.0], dtype=np.float64)
 
+# Fixed real-robot deployment defaults. Keep routine run commands focused on
+# operational choices rather than wiring details.
+DEPTH_TOPIC = "/zed/zed_node/depth/depth_registered"
+DEPTH_UNITS = "auto"
+RESIZE_INTERPOLATION = "nearest"
+ZED_SERIAL_NUMBER = "15107"
+ZED_RESOLUTION = "HD1080"
+ZED_DEPTH_MODE = "NEURAL"
+ZED_CAMERA_FPS = 30
+ZED_EXPOSURE = 25
+ZED_GAIN = 40
+MAX_ARM_TARGET_DELTA_DEG = 10.0
+HAND_MOVING_AVERAGE = 0.1
+ARM_MOVING_AVERAGE = 0.1
+DOF_SPEED_SCALE = 1.5
+IIWA_JOINT_STATE_TOPIC = "/iiwa/joint_states"
+SHARPA_JOINT_STATE_TOPIC = "/sharpa/joint_states"
+IIWA_JOINT_CMD_TOPIC = "/iiwa/joint_cmd"
+SHARPA_JOINT_CMD_TOPIC = "/sharpa/joint_cmd"
+OBJECT_POSE_TOPIC = "/robot_frame/current_object_pose"
+OBJECT_POSE_FRAME_ID = "robot_frame"
+PREDICTED_POSE_MODEL_FRAME = "env"
+
 # Keep these in sync with
 # isaacgymenvs/utils/observation_action_utils_sharpa.py. The deployment node
 # defines them locally to avoid importing IsaacGym/Hydra/IsaacLab packages in a
@@ -127,12 +150,10 @@ Q_UPPER_LIMITS_np = np.array(
     ],
     dtype=np.float32,
 )
-Q_LOWER_LIMITS_restricted_np = Q_LOWER_LIMITS_np.copy()
-Q_LOWER_LIMITS_restricted_np[:N_ARM] += np.float32(np.deg2rad(10.0))
-Q_UPPER_LIMITS_restricted_np = Q_UPPER_LIMITS_np.copy()
-Q_UPPER_LIMITS_restricted_np[:N_ARM] -= np.float32(np.deg2rad(10.0))
-assert Q_LOWER_LIMITS_restricted_np.shape == (N_ACTIONS,)
-assert Q_UPPER_LIMITS_restricted_np.shape == (N_ACTIONS,)
+Q_LOWER_LIMITS_COMMAND_np = Q_LOWER_LIMITS_np.copy()
+Q_UPPER_LIMITS_COMMAND_np = Q_UPPER_LIMITS_np.copy()
+assert Q_LOWER_LIMITS_COMMAND_np.shape == (N_ACTIONS,)
+assert Q_UPPER_LIMITS_COMMAND_np.shape == (N_ACTIONS,)
 
 
 def load_student_policy_class():
@@ -252,7 +273,7 @@ def load_student_policy(checkpoint_path: Path, device: torch.device):
     return policy, aux_heads, int(checkpoint.get("step", 0)), float(checkpoint.get("best_metric", -1.0))
 
 
-def compute_restricted_joint_pos_targets(
+def compute_joint_pos_targets(
     *,
     actions: np.ndarray,
     prev_targets: np.ndarray,
@@ -261,14 +282,14 @@ def compute_restricted_joint_pos_targets(
     dof_speed_scale: float,
     dt: float,
 ) -> np.ndarray:
-    """Match Isaac Lab's current action pipeline with restricted robot limits."""
+    """Match Isaac Lab's current action pipeline with full URDF joint limits."""
 
     if actions.ndim != 2 or actions.shape[1] != N_ACTIONS:
         raise RuntimeError(f"Expected actions shape (N, 29), got {actions.shape}")
     if prev_targets.shape != actions.shape:
         raise RuntimeError(f"prev_targets shape {prev_targets.shape} does not match actions {actions.shape}")
-    lower = Q_LOWER_LIMITS_restricted_np.astype(np.float32)
-    upper = Q_UPPER_LIMITS_restricted_np.astype(np.float32)
+    lower = Q_LOWER_LIMITS_COMMAND_np.astype(np.float32)
+    upper = Q_UPPER_LIMITS_COMMAND_np.astype(np.float32)
     targets = prev_targets.astype(np.float32, copy=True)
 
     arm_raw = prev_targets[:, :N_ARM] + dof_speed_scale * dt * actions[:, :N_ARM]
@@ -317,7 +338,8 @@ class ZedDepthCamera:
 
         self.sl = sl
         self.camera = sl.Camera()
-        init_params = sl.InitParameters()
+        init_params = sl.InitParameters(input_t=sl.InputType())
+        init_params.svo_real_time_mode = True
         init_params.camera_resolution = self._enum_value(sl.RESOLUTION, args.zed_resolution)
         init_params.depth_mode = self._enum_value(sl.DEPTH_MODE, args.zed_depth_mode)
         init_params.coordinate_units = sl.UNIT.MILLIMETER
@@ -329,6 +351,10 @@ class ZedDepthCamera:
         err = self.camera.open(init_params)
         if err != sl.ERROR_CODE.SUCCESS:
             raise RuntimeError(f"Failed to open ZED camera serial={args.zed_serial_number!r}: {err}")
+        if int(args.zed_exposure) >= 0:
+            self.camera.set_camera_settings(sl.VIDEO_SETTINGS.EXPOSURE, int(args.zed_exposure))
+        if int(args.zed_gain) >= 0:
+            self.camera.set_camera_settings(sl.VIDEO_SETTINGS.GAIN, int(args.zed_gain))
 
         self.runtime_parameters = sl.RuntimeParameters()
         self.depth_mat = sl.Mat()
@@ -349,7 +375,8 @@ class ZedDepthCamera:
         info(
             "Opened ZED SDK depth camera "
             f"serial={args.zed_serial_number or '<default>'} resolution={args.zed_resolution} "
-            f"depth_mode={args.zed_depth_mode} units=millimeters"
+            f"depth_mode={args.zed_depth_mode} units=millimeters "
+            f"exposure={args.zed_exposure} gain={args.zed_gain}"
         )
         if self.retrieve_resolution is not None:
             info(f"ZED retrieve resolution: {retrieve_width}x{retrieve_height}")
@@ -488,11 +515,12 @@ class DepthPreprocessor:
             depth_m = depth.copy()
         else:
             raise ValueError(f"depth_units must be auto, m, or mm; got {self.depth_units!r}")
+        depth_m[(depth_m < 0.001) | (~np.isfinite(depth_m))] = 0.0
 
         sample_m = self._sample_for_stats(depth_m)
-        finite_m = np.isfinite(sample_m)
-        if finite_m.any():
-            sample_finite_m = sample_m[finite_m]
+        valid_sample = np.isfinite(sample_m) & (sample_m > 0.0)
+        if valid_sample.any():
+            sample_finite_m = sample_m[valid_sample]
             median_m = float(np.median(sample_finite_m))
             p95_m = float(np.quantile(sample_finite_m, 0.95))
             if median_m > 5.0 or p95_m > 10.0:
@@ -709,6 +737,8 @@ class StudentDepthPolicyNode:
         self.last_depth_age_s: float | None = None
         self.last_step_timing_ms: dict[str, float] = {}
         self.last_depth_timing_ms: dict[str, float] = {}
+        self.last_depth_stamp: rospy.Time | None = None
+        self.depth_frame_reused = False
         self._warmup_completed = False
 
         if args.depth_source == "ros_topic":
@@ -753,6 +783,11 @@ class StudentDepthPolicyNode:
             warn("Joint command publishing is disabled. Use --publish_joint_commands to send targets.")
         elif args.publish_joint_commands_duration_s >= 0.0:
             warn(f"Joint commands will publish only for {args.publish_joint_commands_duration_s:.2f}s.")
+        if args.publish_joint_commands:
+            info(
+                "Joint safety: targets clipped to full URDF limits; "
+                f"publishes blocked if any arm target is >{args.max_arm_target_delta_deg:.1f} deg from current joint."
+            )
         if "object_rot6d" in self.aux_heads:
             info(f"Object pose publishing mode: full pose from object_pos + object_rot6d to {args.object_pose_topic}")
         elif "object_pos" in self.aux_heads:
@@ -808,8 +843,10 @@ class StudentDepthPolicyNode:
         return np.concatenate([iiwa_pos, sharpa_pos]), np.concatenate([iiwa_vel, sharpa_vel])
 
     def _proprio_tensor(self, q: np.ndarray, qd: np.ndarray) -> torch.Tensor:
-        lower = Q_LOWER_LIMITS_restricted_np.astype(np.float32)
-        upper = Q_UPPER_LIMITS_restricted_np.astype(np.float32)
+        # Training normalizes joint_pos with the URDF joint limits. The 10 deg
+        # deployment command-safety clamps.
+        lower = Q_LOWER_LIMITS_np.astype(np.float32)
+        upper = Q_UPPER_LIMITS_np.astype(np.float32)
         q_norm = 2.0 * (q - lower) / (upper - lower) - 1.0
         if self.prev_targets is None:
             self.prev_targets = q.copy()
@@ -852,6 +889,8 @@ class StudentDepthPolicyNode:
             self.debug_saver.maybe_save(pipeline)
         t_debug_done = time.time()
         self.last_depth_age_s = max(0.0, (rospy.Time.now() - frame.stamp).to_sec())
+        self.depth_frame_reused = self.last_depth_stamp == frame.stamp
+        self.last_depth_stamp = frame.stamp
         self.last_depth_timing_ms = {
             "read": 1000.0 * (t_read_done - t_read_start),
             "preprocess": 1000.0 * (t_preprocess_done - t_read_done),
@@ -1016,6 +1055,7 @@ class StudentDepthPolicyNode:
                 f" depth_pre_ms={self.last_depth_timing_ms.get('preprocess', 0.0):.1f}"
                 f" depth_debug_ms={self.last_depth_timing_ms.get('debug', 0.0):.1f}"
             )
+        depth_reuse_text = f" depth_reused={self.depth_frame_reused}"
         info(
             f"[student_depth_policy_node] step={self.loop_count} "
             f"crop_median={crop_med:.3f}m crop_in_window={100.0 * crop_in:.1f}% "
@@ -1023,6 +1063,7 @@ class StudentDepthPolicyNode:
             f"target_delta_abs_max={np.abs(q_targets - prev_targets).max():.3f} "
             f"published={published}"
             f"{depth_age_text}"
+            f"{depth_reuse_text}"
             f"{timing_text}"
         )
 
@@ -1084,7 +1125,7 @@ class StudentDepthPolicyNode:
             if self.device.type == "cuda":
                 torch.cuda.synchronize(self.device)
             if self.args.warmup_publish_current_targets:
-                self._publish_joint_targets(np.clip(q, Q_LOWER_LIMITS_restricted_np, Q_UPPER_LIMITS_restricted_np))
+                self._publish_joint_targets(np.clip(q, Q_LOWER_LIMITS_COMMAND_np, Q_UPPER_LIMITS_COMMAND_np))
             if step_idx == 0 or (step_idx + 1) % 10 == 0 or step_idx + 1 == num_steps:
                 info(f"Warmup step {step_idx + 1}/{num_steps}")
             rate.sleep()
@@ -1124,12 +1165,12 @@ class StudentDepthPolicyNode:
         if action.shape != (1, N_ACTIONS):
             raise RuntimeError(f"Expected action shape (1, 29), got {action.shape}")
         prev_targets = self.prev_targets.copy()
-        q_targets = compute_restricted_joint_pos_targets(
+        q_targets = compute_joint_pos_targets(
             actions=action,
             prev_targets=prev_targets[None],
             hand_moving_average=self.args.hand_moving_average,
             arm_moving_average=self.args.arm_moving_average,
-            dof_speed_scale=self.args.hand_dof_speed_scale,
+            dof_speed_scale=self.args.dof_speed_scale,
             dt=1.0 / self.args.control_hz,
         )[0].astype(np.float32)
         published = False
@@ -1184,14 +1225,31 @@ def parse_args() -> argparse.Namespace:
         default="zed_sdk",
         help="Use direct ZED SDK capture by default to avoid streaming depth images over ROS.",
     )
-    parser.add_argument("--depth_topic", default="/zed/zed_node/depth/depth_registered")
-    parser.add_argument("--depth_units", choices=("auto", "m", "mm"), default="auto")
-    parser.add_argument("--resize_interpolation", choices=("area", "nearest", "linear"), default="area")
-    parser.add_argument("--zed_serial_number", default="15107")
-    parser.add_argument("--zed_resolution", default="HD1080")
-    parser.add_argument("--zed_depth_mode", default="NEURAL")
-    parser.add_argument("--zed_camera_fps", type=int, default=30)
+    parser.add_argument("--depth_topic", default=DEPTH_TOPIC, help=argparse.SUPPRESS)
+    parser.add_argument("--depth_units", choices=("auto", "m", "mm"), default=DEPTH_UNITS, help=argparse.SUPPRESS)
+    parser.add_argument(
+        "--resize_interpolation",
+        choices=("area", "nearest", "linear"),
+        default=RESIZE_INTERPOLATION,
+        help=argparse.SUPPRESS,
+    )
+    parser.add_argument("--zed_serial_number", default=ZED_SERIAL_NUMBER, help=argparse.SUPPRESS)
+    parser.add_argument("--zed_resolution", default=ZED_RESOLUTION, help=argparse.SUPPRESS)
+    parser.add_argument("--zed_depth_mode", default=ZED_DEPTH_MODE, help=argparse.SUPPRESS)
+    parser.add_argument("--zed_camera_fps", type=int, default=ZED_CAMERA_FPS, help=argparse.SUPPRESS)
     parser.add_argument("--zed_camera_upsidedown", action="store_true")
+    parser.add_argument(
+        "--zed_exposure",
+        type=int,
+        default=ZED_EXPOSURE,
+        help=argparse.SUPPRESS,
+    )
+    parser.add_argument(
+        "--zed_gain",
+        type=int,
+        default=ZED_GAIN,
+        help=argparse.SUPPRESS,
+    )
     parser.add_argument(
         "--zed_retrieve_width",
         type=int,
@@ -1216,10 +1274,10 @@ def parse_args() -> argparse.Namespace:
         default=0.20,
         help="Warn if non-blocking cached ZED depth is older than this. Set <=0 to disable stale-frame warnings.",
     )
-    parser.add_argument("--iiwa_joint_state_topic", default="/iiwa/joint_states")
-    parser.add_argument("--sharpa_joint_state_topic", default="/sharpa/joint_states")
-    parser.add_argument("--iiwa_joint_cmd_topic", default="/iiwa/joint_cmd")
-    parser.add_argument("--sharpa_joint_cmd_topic", default="/sharpa/joint_cmd")
+    parser.add_argument("--iiwa_joint_state_topic", default=IIWA_JOINT_STATE_TOPIC, help=argparse.SUPPRESS)
+    parser.add_argument("--sharpa_joint_state_topic", default=SHARPA_JOINT_STATE_TOPIC, help=argparse.SUPPRESS)
+    parser.add_argument("--iiwa_joint_cmd_topic", default=IIWA_JOINT_CMD_TOPIC, help=argparse.SUPPRESS)
+    parser.add_argument("--sharpa_joint_cmd_topic", default=SHARPA_JOINT_CMD_TOPIC, help=argparse.SUPPRESS)
     parser.add_argument("--publish_joint_commands", action=argparse.BooleanOptionalAction, default=False)
     parser.add_argument("--publish_joint_commands_duration_s", type=float, default=-1.0)
     parser.add_argument(
@@ -1231,8 +1289,8 @@ def parse_args() -> argparse.Namespace:
             "'current' is safest for dry-runs; 'computed' simulates the command history the policy would have sent."
         ),
     )
-    parser.add_argument("--max_arm_target_delta_deg", type=float, default=10.0)
-    parser.add_argument("--raise_on_large_target_delta", action="store_true")
+    parser.add_argument("--max_arm_target_delta_deg", type=float, default=MAX_ARM_TARGET_DELTA_DEG, help=argparse.SUPPRESS)
+    parser.add_argument("--raise_on_large_target_delta", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--warmup_steps", type=int, default=30)
     parser.add_argument(
         "--warmup_publish_current_targets",
@@ -1247,19 +1305,20 @@ def parse_args() -> argparse.Namespace:
         help="If non-negative, stop the policy loop after this many seconds after warmup.",
     )
     parser.add_argument("--publish_object_pose", action=argparse.BooleanOptionalAction, default=True)
-    parser.add_argument("--object_pose_topic", default="/robot_frame/current_object_pose")
-    parser.add_argument("--object_pose_frame_id", default="robot_frame")
+    parser.add_argument("--object_pose_topic", default=OBJECT_POSE_TOPIC, help=argparse.SUPPRESS)
+    parser.add_argument("--object_pose_frame_id", default=OBJECT_POSE_FRAME_ID, help=argparse.SUPPRESS)
     parser.add_argument(
         "--predicted_pose_model_frame",
         choices=("env", "robot_frame"),
-        default="env",
-        help="Frame used by the checkpoint's aux object_pos head. distill_depth.py trains env-local positions.",
+        default=PREDICTED_POSE_MODEL_FRAME,
+        help=argparse.SUPPRESS,
     )
     parser.add_argument("--position_only_quat_xyzw", type=float, nargs=4, default=(0.0, 0.0, 0.0, 1.0))
     parser.add_argument("--control_hz", type=float, default=DEFAULT_CONTROL_HZ)
-    parser.add_argument("--hand_moving_average", type=float, default=0.1)
-    parser.add_argument("--arm_moving_average", type=float, default=0.1)
-    parser.add_argument("--hand_dof_speed_scale", type=float, default=1.5)
+    parser.add_argument("--hand_moving_average", type=float, default=HAND_MOVING_AVERAGE, help=argparse.SUPPRESS)
+    parser.add_argument("--arm_moving_average", type=float, default=ARM_MOVING_AVERAGE, help=argparse.SUPPRESS)
+    parser.add_argument("--dof_speed_scale", type=float, default=DOF_SPEED_SCALE, help=argparse.SUPPRESS)
+    parser.add_argument("--hand_dof_speed_scale", dest="dof_speed_scale", type=float, default=argparse.SUPPRESS, help=argparse.SUPPRESS)
     parser.add_argument("--debug_depth_dir", type=Path, default=None)
     parser.add_argument("--debug_depth_every_n", type=int, default=30)
     parser.add_argument("--debug_depth_video_path", type=Path, default=None)
