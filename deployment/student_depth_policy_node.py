@@ -13,6 +13,7 @@ import argparse
 import atexit
 import importlib.util
 import sys
+import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -332,12 +333,23 @@ class ZedDepthCamera:
         self.runtime_parameters = sl.RuntimeParameters()
         self.depth_mat = sl.Mat()
         self.camera_upsidedown = bool(args.zed_camera_upsidedown)
+        self.nonblocking = bool(args.zed_nonblocking)
+        self.max_cached_depth_age_s = float(args.zed_max_cached_depth_age_s)
+        self._camera_lock = threading.Lock()
+        self._latest_lock = threading.Lock()
+        self._latest_frame: DepthFrame | None = None
+        self._stop_event = threading.Event()
+        self._reader_thread: threading.Thread | None = None
         atexit.register(self.close)
         info(
             "Opened ZED SDK depth camera "
             f"serial={args.zed_serial_number or '<default>'} resolution={args.zed_resolution} "
             f"depth_mode={args.zed_depth_mode} units=millimeters"
         )
+        if self.nonblocking:
+            self._reader_thread = threading.Thread(target=self._reader_loop, name="zed_depth_reader", daemon=True)
+            self._reader_thread.start()
+            info("ZED non-blocking mode enabled: policy loop reuses latest cached depth frame.")
 
     @staticmethod
     def _enum_value(enum_cls, name: str):
@@ -348,19 +360,24 @@ class ZedDepthCamera:
             raise ValueError(f"Invalid ZED enum value {name!r}; valid values include {valid}") from exc
 
     def close(self) -> None:
-        if self.camera is not None:
-            self.camera.close()
-            self.camera = None
+        self._stop_event.set()
+        if self._reader_thread is not None and self._reader_thread.is_alive():
+            self._reader_thread.join(timeout=1.0)
+        with self._camera_lock:
+            if self.camera is not None:
+                self.camera.close()
+                self.camera = None
 
-    def read(self) -> DepthFrame | None:
-        if self.camera is None:
-            return None
-        err = self.camera.grab(self.runtime_parameters)
-        if err != self.sl.ERROR_CODE.SUCCESS:
-            warn_every(f"ZED grab failed: {err}", 1.0, key="zed_grab_failed")
-            return None
-        self.camera.retrieve_measure(self.depth_mat, self.sl.MEASURE.DEPTH)
-        depth_mm = np.asarray(self.depth_mat.get_data())
+    def _grab_once(self) -> DepthFrame | None:
+        with self._camera_lock:
+            if self.camera is None:
+                return None
+            err = self.camera.grab(self.runtime_parameters)
+            if err != self.sl.ERROR_CODE.SUCCESS:
+                warn_every(f"ZED grab failed: {err}", 1.0, key="zed_grab_failed")
+                return None
+            self.camera.retrieve_measure(self.depth_mat, self.sl.MEASURE.DEPTH)
+            depth_mm = np.array(self.depth_mat.get_data(), copy=True)
         if self.camera_upsidedown:
             import cv2
 
@@ -370,6 +387,33 @@ class ZedDepthCamera:
             encoding="zed_sdk_mm",
             stamp=rospy.Time.now(),
         )
+
+    def _reader_loop(self) -> None:
+        while not self._stop_event.is_set():
+            frame = self._grab_once()
+            if frame is not None:
+                with self._latest_lock:
+                    self._latest_frame = frame
+            else:
+                self._stop_event.wait(0.001)
+
+    def read(self) -> DepthFrame | None:
+        if not self.nonblocking:
+            return self._grab_once()
+        with self._latest_lock:
+            frame = self._latest_frame
+        if frame is None:
+            warn_every("Waiting for first cached ZED depth frame.", 1.0, key="zed_waiting_cached_frame")
+            return None
+        age_s = max(0.0, (rospy.Time.now() - frame.stamp).to_sec())
+        if self.max_cached_depth_age_s > 0.0 and age_s > self.max_cached_depth_age_s:
+            warn_every(
+                f"Cached ZED depth frame is stale: age={1000.0 * age_s:.1f} ms "
+                f"> {1000.0 * self.max_cached_depth_age_s:.1f} ms.",
+                1.0,
+                key="zed_cached_frame_stale",
+            )
+        return frame
 
 
 class DepthPreprocessor:
@@ -627,6 +671,8 @@ class StudentDepthPolicyNode:
         self.active_loop_start_time: Optional[rospy.Time] = None
         self.command_start_time: Optional[rospy.Time] = None
         self.last_status_time = time.time()
+        self.last_depth_age_s: float | None = None
+        self.last_step_timing_ms: dict[str, float] = {}
         self._warmup_completed = False
 
         if args.depth_source == "ros_topic":
@@ -656,6 +702,11 @@ class StudentDepthPolicyNode:
         )
         if args.depth_source == "zed_sdk":
             info("Depth source: direct ZED SDK capture. No ROS depth image topic is subscribed.")
+            if args.zed_nonblocking:
+                info(
+                    "ZED timing: non-blocking cached capture enabled. "
+                    "Policy loop may reuse a 30 Hz depth frame while running faster than camera FPS."
+                )
         else:
             warn(f"Depth source: ROS image topic {args.depth_topic}. This can add network/load overhead.")
         if args.debug_depth_dir is not None:
@@ -760,6 +811,7 @@ class StudentDepthPolicyNode:
         pipeline = self.preprocessor(frame.depth, encoding=frame.encoding)
         if save_debug:
             self.debug_saver.maybe_save(pipeline)
+        self.last_depth_age_s = max(0.0, (rospy.Time.now() - frame.stamp).to_sec())
         image = torch.from_numpy(pipeline.policy_crop).to(self.device).float().view(1, 1, POLICY_HEIGHT, POLICY_WIDTH)
         return image, pipeline, frame.stamp
 
@@ -903,12 +955,24 @@ class StudentDepthPolicyNode:
         else:
             crop_med = float("nan")
             crop_in = 0.0
+        depth_age_text = ""
+        if self.last_depth_age_s is not None:
+            depth_age_text = f" depth_age_ms={1000.0 * self.last_depth_age_s:.1f}"
+        timing_text = ""
+        if self.last_step_timing_ms:
+            timing_text = (
+                f" depth_ms={self.last_step_timing_ms.get('depth', 0.0):.1f}"
+                f" policy_ms={self.last_step_timing_ms.get('policy', 0.0):.1f}"
+                f" total_ms={self.last_step_timing_ms.get('total', 0.0):.1f}"
+            )
         info(
             f"[student_depth_policy_node] step={self.loop_count} "
             f"crop_median={crop_med:.3f}m crop_in_window={100.0 * crop_in:.1f}% "
             f"action_abs_max={np.abs(action).max():.3f} "
             f"target_delta_abs_max={np.abs(q_targets - prev_targets).max():.3f} "
             f"published={published}"
+            f"{depth_age_text}"
+            f"{timing_text}"
         )
 
     def _wait_for_first_inputs(self) -> None:
@@ -919,8 +983,9 @@ class StudentDepthPolicyNode:
             if self._ready():
                 q, _ = self._joint_arrays()
                 try:
-                    # For direct ZED capture, force one grab here so startup only
-                    # completes after the camera is actually producing depth.
+                    # For direct ZED capture, this either grabs one frame
+                    # directly or waits until the background reader has cached
+                    # one frame in non-blocking mode.
                     _ = self._read_depth_frame()
                 except Exception as exc:
                     warn_every(f"Waiting for first usable depth frame: {type(exc).__name__}: {exc}", 1.0)
@@ -988,6 +1053,7 @@ class StudentDepthPolicyNode:
         return (rospy.Time.now() - self.active_loop_start_time).to_sec()
 
     def step(self) -> None:
+        t_step_start = time.time()
         if not self._ready():
             return
         if self.args.run_duration_s >= 0.0 and self._active_run_elapsed_s() >= self.args.run_duration_s:
@@ -995,11 +1061,15 @@ class StudentDepthPolicyNode:
             rospy.signal_shutdown("student depth policy run duration elapsed")
             return
         q, qd = self._joint_arrays()
+        t_depth_start = time.time()
         image, pipeline, stamp = self._image_tensor()
+        t_depth_done = time.time()
         proprio = self._proprio_tensor(q, qd)
+        t_policy_start = time.time()
         with torch.no_grad():
             output, self.hidden = self.policy(image, proprio, self.hidden)
         action = output.action.detach().cpu().numpy()
+        t_policy_done = time.time()
         if action.shape != (1, N_ACTIONS):
             raise RuntimeError(f"Expected action shape (1, 29), got {action.shape}")
         prev_targets = self.prev_targets.copy()
@@ -1017,6 +1087,12 @@ class StudentDepthPolicyNode:
             published = True
         self._set_prev_targets_after_step(q=q, q_targets=q_targets, published=published)
         self._publish_predicted_pose(output.aux, stamp)
+        t_step_done = time.time()
+        self.last_step_timing_ms = {
+            "depth": 1000.0 * (t_depth_done - t_depth_start),
+            "policy": 1000.0 * (t_policy_done - t_policy_start),
+            "total": 1000.0 * (t_step_done - t_step_start),
+        }
         self._print_status(pipeline, action[0], q_targets, prev_targets, published)
         self.loop_count += 1
 
@@ -1065,6 +1141,18 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--zed_depth_mode", default="NEURAL")
     parser.add_argument("--zed_camera_fps", type=int, default=30)
     parser.add_argument("--zed_camera_upsidedown", action="store_true")
+    parser.add_argument(
+        "--zed_nonblocking",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Grab ZED depth in a background thread and reuse the latest cached frame in the policy loop.",
+    )
+    parser.add_argument(
+        "--zed_max_cached_depth_age_s",
+        type=float,
+        default=0.20,
+        help="Warn if non-blocking cached ZED depth is older than this. Set <=0 to disable stale-frame warnings.",
+    )
     parser.add_argument("--iiwa_joint_state_topic", default="/iiwa/joint_states")
     parser.add_argument("--sharpa_joint_state_topic", default="/sharpa/joint_states")
     parser.add_argument("--iiwa_joint_cmd_topic", default="/iiwa/joint_cmd")
