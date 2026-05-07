@@ -4,6 +4,7 @@ Run these from anywhere; each script changes to the repository root first.
 
 1. `01_zed_baseline_60hz_no_preprocess.sh`
    Baseline producer/consumer test at 60 Hz with no depth preprocessing.
+   Check `tick_period_med/p95/max`: for a healthy 60 Hz consumer this should be near `16.7 ms`.
 
 2. `02_zed_consumer_120hz_no_preprocess.sh`
    Checks whether the consumer loop can reuse cached ZED frames at 120 Hz.

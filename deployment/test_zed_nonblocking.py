@@ -306,8 +306,11 @@ def run_consumer(args: argparse.Namespace, producer: ZedProducer) -> None:
     new_frame_count = 0
     slow_count = 0
     loop_ms = CounterWindow()
+    tick_period_ms = CounterWindow()
+    sleep_actual_ms = CounterWindow()
     consumer_pre_ms = CounterWindow()
     latest_age_ms = 0.0
+    last_tick_start_s: float | None = None
 
     info(
         "Consumer loop "
@@ -316,13 +319,19 @@ def run_consumer(args: argparse.Namespace, producer: ZedProducer) -> None:
     )
     while not producer.stop_event.is_set():
         tick_start_s = now_s()
+        if last_tick_start_s is not None:
+            tick_period_ms.add(1000.0 * (tick_start_s - last_tick_start_s))
+        last_tick_start_s = tick_start_s
         if args.duration_s > 0.0 and tick_start_s - start_s >= args.duration_s:
             break
 
         frame = producer.get_latest()
         if frame is None:
             none_count += 1
-            time.sleep(min(0.001, consumer_period_s) if consumer_period_s > 0 else 0.001)
+            sleep_request_s = min(0.001, consumer_period_s) if consumer_period_s > 0 else 0.001
+            sleep_start_s = now_s()
+            time.sleep(sleep_request_s)
+            sleep_actual_ms.add(1000.0 * (now_s() - sleep_start_s))
             continue
 
         consumer_count += 1
@@ -351,6 +360,8 @@ def run_consumer(args: argparse.Namespace, producer: ZedProducer) -> None:
         if status_now_s >= next_status_s:
             elapsed_s = status_now_s - start_s
             loop_med, loop_p95, loop_max = loop_ms.summary()
+            tick_med, tick_p95, tick_max = tick_period_ms.summary()
+            sleep_med, sleep_p95, sleep_max = sleep_actual_ms.summary()
             pre_med, pre_p95, pre_max = consumer_pre_ms.summary()
             reuse_pct = 100.0 * reused_count / max(1, consumer_count)
             producer_fps = producer.frame_id / max(1e-6, elapsed_s)
@@ -364,6 +375,8 @@ def run_consumer(args: argparse.Namespace, producer: ZedProducer) -> None:
                 f"zed_grab={frame.grab_ms:.1f}ms retrieve={frame.retrieve_ms:.1f}ms "
                 f"copy={frame.copy_ms:.1f}ms prod_pre={frame.preprocess_ms:.1f}ms "
                 f"prod_total={frame.total_ms:.1f}ms zed_period={frame_period:.1f}ms "
+                f"tick_period_med/p95/max={tick_med:.2f}/{tick_p95:.2f}/{tick_max:.2f}ms "
+                f"sleep_actual_med/p95/max={sleep_med:.2f}/{sleep_p95:.2f}/{sleep_max:.2f}ms "
                 f"consumer_loop_med/p95/max={loop_med:.2f}/{loop_p95:.2f}/{loop_max:.2f}ms "
                 f"consumer_pre_med/p95/max={pre_med:.2f}/{pre_p95:.2f}/{pre_max:.2f}ms "
                 f"depth_shape={tuple(frame.depth_mm.shape)} failures={producer.fail_count}"
@@ -372,7 +385,10 @@ def run_consumer(args: argparse.Namespace, producer: ZedProducer) -> None:
 
         elapsed_s = now_s() - tick_start_s
         if consumer_period_s > elapsed_s:
-            time.sleep(consumer_period_s - elapsed_s)
+            sleep_request_s = consumer_period_s - elapsed_s
+            sleep_start_s = now_s()
+            time.sleep(sleep_request_s)
+            sleep_actual_ms.add(1000.0 * (now_s() - sleep_start_s))
 
 
 def parse_args() -> argparse.Namespace:
