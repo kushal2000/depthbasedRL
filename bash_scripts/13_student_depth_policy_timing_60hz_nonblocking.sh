@@ -8,9 +8,9 @@ if [[ ! -f "${DEFAULT_CHECKPOINT}" && -f "distillation_runs/10_local_rot6d_mediu
   DEFAULT_CHECKPOINT="distillation_runs/10_local_rot6d_medium_noise_camrand20mm2deg_256env/checkpoints/student_latest.pt"
 fi
 CHECKPOINT="${1:-${DEFAULT_CHECKPOINT}}"
-RUN_DURATION_S="${RUN_DURATION_S:-5}"
-PUBLISH_DURATION_S="${PUBLISH_DURATION_S:-1.0}"
+RUN_DURATION_S="${RUN_DURATION_S:-60}"
 STATUS_INTERVAL_S="${STATUS_INTERVAL_S:-0.5}"
+BENCHMARK_STEPS="${BENCHMARK_STEPS:-100}"
 
 if [[ ! -f "${CHECKPOINT}" ]]; then
   echo "Checkpoint not found: ${CHECKPOINT}" >&2
@@ -22,5 +22,5 @@ python deployment/student_depth_policy_node_nonblocking.py \
   --checkpoint_path "${CHECKPOINT}" \
   --run_duration_s "${RUN_DURATION_S}" \
   --status_interval_s "${STATUS_INTERVAL_S}" \
-  --publish_joint_commands \
-  --publish_joint_commands_duration_s "${PUBLISH_DURATION_S}"
+  --startup_policy_benchmark_steps "${BENCHMARK_STEPS}" \
+  --no-publish_joint_commands
