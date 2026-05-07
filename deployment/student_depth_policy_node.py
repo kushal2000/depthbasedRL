@@ -50,6 +50,9 @@ CROP_Y1 = 70
 POLICY_WIDTH = CROP_X1 - CROP_X0
 POLICY_HEIGHT = CROP_Y1 - CROP_Y0
 DEFAULT_CONTROL_HZ = 60.0
+# distill_depth.py trains object_pos in the env-local/world frame. The real
+# robot ROS topics use robot_frame, whose origin is translated +0.8 m in sim.
+SIM_WORLD_T_ROBOT_POS_M = np.array([0.0, 0.8, 0.0], dtype=np.float64)
 
 # Keep these in sync with
 # isaacgymenvs/utils/observation_action_utils_sharpa.py. The deployment node
@@ -552,17 +555,31 @@ class DepthDebugSaver:
     def _window_metric(self, depth_m: np.ndarray) -> np.ndarray:
         return np.clip((np.nan_to_num(depth_m, nan=DEPTH_FAR_M, posinf=DEPTH_FAR_M, neginf=DEPTH_NEAR_M) - DEPTH_NEAR_M) / (DEPTH_FAR_M - DEPTH_NEAR_M), 0.0, 1.0)
 
-    def _panel(self, image: np.ndarray, label: str, *, size: tuple[int, int] = (160, 90)) -> np.ndarray:
+    def _panel(
+        self,
+        image: np.ndarray,
+        label: str,
+        *,
+        size: tuple[int, int] | None = (160, 90),
+        pad_to: tuple[int, int] | None = None,
+    ) -> np.ndarray:
         from PIL import Image as PILImage
         from PIL import ImageDraw
 
-        if image.shape[:2] != (size[1], size[0]):
+        if size is None:
+            img = PILImage.fromarray(self._gray_to_u8(image))
+            size = (img.width, img.height)
+        elif image.shape[:2] != (size[1], size[0]):
             img = PILImage.fromarray(self._gray_to_u8(image)).resize(size, resample=PILImage.Resampling.NEAREST)
         else:
             img = PILImage.fromarray(self._gray_to_u8(image))
         img = img.convert("RGB")
         label_h = 16
-        canvas = PILImage.new("RGB", (size[0], size[1] + label_h), color=(255, 255, 255))
+        canvas_w, canvas_h = size
+        if pad_to is not None:
+            canvas_w = max(canvas_w, pad_to[0])
+            canvas_h = max(canvas_h, pad_to[1])
+        canvas = PILImage.new("RGB", (canvas_w, canvas_h + label_h), color=(255, 255, 255))
         draw = ImageDraw.Draw(canvas)
         draw.text((3, 2), label, fill=(0, 0, 0))
         canvas.paste(img, (0, label_h))
@@ -575,7 +592,7 @@ class DepthDebugSaver:
             self._panel(raw_window, "raw ZED window"),
             self._panel(resized_window, "resized 160x90"),
             self._panel(pipeline.policy_full_depth, "window normalized"),
-            self._panel(pipeline.policy_crop, "policy crop 70x70"),
+            self._panel(pipeline.policy_crop, "policy crop 70x70", size=None, pad_to=(90, 90)),
         ]
         return np.concatenate(panels, axis=1)
 
@@ -655,6 +672,11 @@ class StudentDepthPolicyNode:
             info(f"Object pose publishing mode: object_pos with fallback quat {tuple(args.position_only_quat_xyzw)}")
         else:
             warn("Checkpoint has no object_pos aux head; object pose publishing will only warn.")
+        if args.publish_object_pose:
+            info(
+                f"Predicted object pose frame conversion: model_frame={args.predicted_pose_model_frame} "
+                f"publish_frame={args.object_pose_frame_id}"
+            )
 
     def depth_callback(self, msg: Image) -> None:
         self.latest_depth_msg = msg
@@ -745,6 +767,7 @@ class StudentDepthPolicyNode:
         if "object_pos" not in aux:
             return None
         pos = aux["object_pos"][0].detach().cpu().numpy().astype(np.float64)
+        pos = self._convert_predicted_pos_to_publish_frame(pos)
         if "object_rot6d" in aux:
             rot_m = rot6d_to_matrix(aux["object_rot6d"])[0].detach().cpu().numpy()
             quat_xyzw = R.from_matrix(rot_m).as_quat()
@@ -753,6 +776,30 @@ class StudentDepthPolicyNode:
             norm = np.linalg.norm(quat_xyzw)
             quat_xyzw = quat_xyzw / norm if norm > 1e-8 else np.array([0.0, 0.0, 0.0, 1.0])
         return pos, quat_xyzw
+
+    def _convert_predicted_pos_to_publish_frame(self, pos: np.ndarray) -> np.ndarray:
+        """Convert the learned aux position to the requested ROS frame.
+
+        The Isaac Sim distillation target is env-local/world-local position.
+        Real SimToolReal ROS pose topics under /robot_frame are robot-frame
+        positions. In this setup the robot frame differs by only a translation.
+        """
+
+        model_frame = self.args.predicted_pose_model_frame
+        publish_frame = self.args.object_pose_frame_id
+        if model_frame == publish_frame:
+            return pos
+        if model_frame == "env" and publish_frame == "robot_frame":
+            return pos - SIM_WORLD_T_ROBOT_POS_M
+        if model_frame == "robot_frame" and publish_frame in {"env", "world"}:
+            return pos + SIM_WORLD_T_ROBOT_POS_M
+        warn_every(
+            f"No explicit object pose conversion from model_frame={model_frame!r} to publish_frame={publish_frame!r}; "
+            "publishing raw predicted position.",
+            5.0,
+            key="unsupported_predicted_pose_frame_conversion",
+        )
+        return pos
 
     def _publish_predicted_pose(self, aux: dict[str, torch.Tensor], stamp: rospy.Time) -> None:
         if not self.args.publish_object_pose:
@@ -1051,6 +1098,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--publish_object_pose", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--object_pose_topic", default="/robot_frame/current_pose")
     parser.add_argument("--object_pose_frame_id", default="robot_frame")
+    parser.add_argument(
+        "--predicted_pose_model_frame",
+        choices=("env", "robot_frame"),
+        default="env",
+        help="Frame used by the checkpoint's aux object_pos head. distill_depth.py trains env-local positions.",
+    )
     parser.add_argument("--position_only_quat_xyzw", type=float, nargs=4, default=(0.0, 0.0, 0.0, 1.0))
     parser.add_argument("--control_hz", type=float, default=DEFAULT_CONTROL_HZ)
     parser.add_argument("--hand_moving_average", type=float, default=0.1)
