@@ -8,7 +8,7 @@ if [[ ! -f "${DEFAULT_CHECKPOINT}" && -f "distillation_runs/10_local_rot6d_mediu
   DEFAULT_CHECKPOINT="distillation_runs/10_local_rot6d_medium_noise_camrand20mm2deg_256env/checkpoints/student_latest.pt"
 fi
 CHECKPOINT="${1:-${DEFAULT_CHECKPOINT}}"
-DEBUG_DIR="${DEBUG_DIR:-/tmp/depth_student_debug}"
+DEBUG_DIR="${DEBUG_DIR:-./depth_student_debug}"
 DEBUG_VIDEO="${DEBUG_VIDEO:-${DEBUG_DIR}/depth_debug.mp4}"
 RUN_DURATION_S="${RUN_DURATION_S:-10}"
 DEBUG_EVERY_N="${DEBUG_EVERY_N:-2}"

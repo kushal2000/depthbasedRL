@@ -130,9 +130,9 @@ Example dry-run command with no joint command publishing:
 PYTHONPATH=/home/tylerlum/github_repos/depthbasedRL:$PYTHONPATH \
 python deployment/student_depth_policy_node_nonblocking.py \
   --checkpoint_path distillation_runs/09ctd_rot6d_medium_noise_camrand50mm5deg/checkpoints/student_latest.pt \
-  --debug_depth_dir /tmp/depth_student_debug \
+  --debug_depth_dir ./depth_student_debug \
   --debug_depth_every_n 30 \
-  --debug_depth_video_path /tmp/depth_student_debug/depth_debug.mp4 \
+  --debug_depth_video_path ./depth_student_debug/depth_debug.mp4 \
   --no-publish_joint_commands
 ```
 
@@ -175,7 +175,7 @@ Useful variants:
 - `--consumer_preprocess policy` simulates the bad design where the consumer repeats preprocessing every control tick.
 - `--zed_grab_hz 0` removes the producer rate cap so you can see whether over-polling the ZED SDK hurts timing.
 - `--zed_depth_mode PERFORMANCE` or `--zed_depth_mode NEURAL_LIGHT` compares cheaper depth modes against the default `NEURAL`.
-- `--save_dir /tmp/zed_nonblocking_debug` saves raw depth arrays plus window/crop PNGs for visual inspection.
+- `--save_dir ./zed_nonblocking_debug` saves raw depth arrays plus window/crop PNGs for visual inspection.
 
 The older explicit multiprocess diagnostic is still available for comparison:
 

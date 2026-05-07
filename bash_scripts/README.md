@@ -19,7 +19,7 @@ Run these from anywhere; each script changes to the repository root first.
    Removes the producer rate cap to see whether over-polling the ZED SDK hurts timing.
 
 6. `06_zed_save_depth_debug_images.sh`
-   Saves raw metric depth arrays plus window/crop PNGs to `/tmp/zed_nonblocking_debug`.
+   Saves raw metric depth arrays plus window/crop PNGs to `./zed_nonblocking_debug`.
 
 7. `07_student_depth_policy_dry_run_nonblocking.sh [checkpoint]`
    Runs the full nonblocking student policy node for 30 seconds without publishing joint commands. This still publishes the predicted object pose to `/robot_frame/current_object_pose`.
@@ -37,7 +37,7 @@ Run these from anywhere; each script changes to the repository root first.
     Multiprocess version of the intended deployment design: policy-style depth preprocessing happens once per ZED frame in the producer process.
 
 12. `12_student_depth_policy_save_debug_nonblocking.sh [checkpoint]`
-    Runs the full student node without joint commands and saves raw/resized/windowed/cropped depth debug files to `/tmp/depth_student_debug`.
+    Runs the full student node without joint commands and saves raw/resized/windowed/cropped depth debug files to `./depth_student_debug`.
 
 13. `13_student_depth_policy_timing_60hz_nonblocking.sh [checkpoint]`
     Longer 60-second full-node timing run without debug image writes or joint commands.
@@ -59,5 +59,5 @@ can pass a checkpoint as the first argument or set `DEFAULT_STUDENT_CHECKPOINT`.
 Useful env overrides:
 
 - `RUN_DURATION_S=120 bash_scripts/07_student_depth_policy_dry_run_nonblocking.sh`
-- `DEBUG_DIR=/tmp/my_depth_debug bash_scripts/12_student_depth_policy_save_debug_nonblocking.sh`
+- `DEBUG_DIR=./my_depth_debug bash_scripts/12_student_depth_policy_save_debug_nonblocking.sh`
 - `PUBLISH_DURATION_S=0.25 bash_scripts/08_student_depth_policy_publish_1s_nonblocking.sh`
