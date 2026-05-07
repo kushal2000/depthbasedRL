@@ -23,6 +23,7 @@ import numpy as np
 
 DEPTH_NEAR_M = 0.70
 DEPTH_FAR_M = 1.10
+DEPTH_INVALID_M = 100.0
 RESIZED_WIDTH = 160
 RESIZED_HEIGHT = 90
 CROP_X0 = 90
@@ -59,7 +60,9 @@ def preprocess_depth_mm(depth_mm: np.ndarray, mode: str) -> np.ndarray:
         raise ValueError(f"preprocess mode must be none, resize, or policy; got {mode!r}")
 
     depth_m = depth_mm / 1000.0
-    depth_m[(depth_m < 0.001) | (~np.isfinite(depth_m))] = 0.0
+    finite = np.isfinite(depth_m)
+    depth_m[finite & (depth_m < 0.001)] = 0.0
+    depth_m[~finite] = DEPTH_INVALID_M
     resized_m = resize_depth_nearest(depth_m, RESIZED_WIDTH, RESIZED_HEIGHT)
     safe = np.nan_to_num(resized_m, nan=DEPTH_FAR_M, posinf=DEPTH_FAR_M, neginf=DEPTH_NEAR_M)
     return np.clip((safe - DEPTH_NEAR_M) / (DEPTH_FAR_M - DEPTH_NEAR_M), 0.0, 1.0).astype(np.float32)
