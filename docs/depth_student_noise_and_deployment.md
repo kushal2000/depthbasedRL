@@ -91,13 +91,12 @@ The ZED SDK settings are intentionally aligned with
 `NEURAL` depth, millimeter coordinate units, `svo_real_time_mode=True`, manual
 exposure `25`, manual gain `40`, optional upside-down image/depth flipping, and
 nearest-neighbor depth resizing. The student node additionally defaults to
-retrieving depth directly at `160 x 90` for policy-loop speed. The non-blocking
-ZED reader is rate-capped at `30 Hz`, matching the camera FPS; this should be a
-no-op when `grab()` blocks normally, but it prevents accidental over-polling if
-the SDK returns quickly. The ZED reader also caches the depth frame at
-`160 x 90` before the policy loop sees it, so if a particular ZED Python binding
-falls back to full-frame retrieval, the resize is kept in the camera reader path
-instead of repeatedly hitting the control loop.
+retrieving depth directly at `160 x 90` for policy-loop speed. In non-blocking
+mode, all ZED SDK calls run in a child process and the policy process reads the
+latest raw `160 x 90` depth frame from shared memory. The producer is
+rate-capped at `30 Hz`, matching the camera FPS; this should be a no-op when
+`grab()` blocks normally, but it prevents accidental over-polling if the SDK
+returns quickly.
 Set `--zed_retrieve_width 0 --zed_retrieve_height 0` to retrieve
 full-resolution depth and resize in Python for a closer FoundationPose-style
 path, at higher latency.
@@ -121,7 +120,7 @@ Deployment safety/default behavior:
 - Joint targets are clipped to full URDF joint limits. The extra arm-delta publish guard is off by default; pass `--max_arm_target_delta_deg <degrees>` if you want to block unexpectedly large arm target jumps during a cautious test.
 - Joint-position proprioception is normalized with the full URDF joint limits, matching Isaac Sim training.
 - Action smoothing uses the fixed training values: hand moving average `0.1`, arm moving average `0.1`, and arm velocity-delta scale `1.5`.
-- In non-blocking ZED mode at 60 Hz control and 30 Hz camera FPS, repeated depth frames are expected. Status logs include `depth_frame_id` and `depth_reused=True/False`; proprio is still updated every control step. Reused depth frames reuse the cached preprocessed policy tensor, so the control loop does not repeat depth resizing/windowing/debug saving when the camera frame has not changed. Timing logs break out ZED grab time/period, depth read, depth preprocessing, debug saving, policy submit time, action GPU sync time, target computation, and pose publishing.
+- In non-blocking ZED mode at 60 Hz control and 30 Hz camera FPS, repeated depth frames are expected. Status logs include `depth_frame_id` and `depth_reused=True/False`; proprio is still updated every control step. Reused depth frames reuse the cached preprocessed policy tensor, so the control loop does not repeat depth resizing/windowing/debug saving when the camera frame has not changed. Timing logs break out ZED producer timings, depth read, depth preprocessing, debug saving, policy submit time, action GPU sync time, target computation, and pose publishing.
 
 ## Deployment Command
 
@@ -172,15 +171,13 @@ python deployment/test_zed_nonblocking.py \
 Useful variants:
 
 - `--consumer_hz 120` checks whether the consumer loop can reuse cached frames at a higher rate.
-- `--producer_preprocess policy` checks the intended deployment design: the ZED thread does policy-style resize/window/crop once per camera frame.
+- `--producer_preprocess policy` checks the cost of doing policy-style resize/window/crop once per camera frame in the ZED producer process.
 - `--consumer_preprocess policy` simulates the bad design where the consumer repeats preprocessing every control tick.
 - `--zed_grab_hz 0` removes the producer rate cap so you can see whether over-polling the ZED SDK hurts timing.
 - `--zed_depth_mode PERFORMANCE` or `--zed_depth_mode NEURAL_LIGHT` compares cheaper depth modes against the default `NEURAL`.
 - `--save_dir /tmp/zed_nonblocking_debug` saves raw depth arrays plus window/crop PNGs for visual inspection.
 
-If the threaded diagnostic shows `tick_period_med` near the camera period
-instead of the requested consumer period, run the multiprocess/shared-memory
-diagnostic:
+The older explicit multiprocess diagnostic is still available for comparison:
 
 ```bash
 python deployment/test_zed_multiprocess.py \

@@ -12,10 +12,12 @@ from __future__ import annotations
 import argparse
 import atexit
 import importlib.util
+import multiprocessing as mp
+import struct
 import sys
-import threading
 import time
 from dataclasses import dataclass
+from multiprocessing import shared_memory
 from pathlib import Path
 from typing import Optional
 
@@ -52,6 +54,9 @@ POLICY_WIDTH = CROP_X1 - CROP_X0
 POLICY_HEIGHT = CROP_Y1 - CROP_Y0
 DEFAULT_CONTROL_HZ = 60.0
 STARTUP_POLICY_BENCHMARK_STEPS = 30
+_ZED_META_FMT = "<qdqddddddqii"
+_ZED_META_SIZE = struct.calcsize(_ZED_META_FMT)
+_ZED_TS_NONE = -1
 # distill_depth.py trains object_pos in the env-local/world frame. The real
 # robot ROS topics use robot_frame, whose origin is translated +0.8 m in sim.
 SIM_WORLD_T_ROBOT_POS_M = np.array([0.0, 0.8, 0.0], dtype=np.float64)
@@ -324,13 +329,201 @@ class DepthFrame:
     stamp: rospy.Time
     frame_id: int = -1
     grab_ms: float | None = None
+    retrieve_ms: float | None = None
+    copy_ms: float | None = None
+    resize_ms: float | None = None
+    total_ms: float | None = None
     inter_frame_ms: float | None = None
+    failures: int = 0
+
+
+def _zed_enum_value(enum_cls, name: str):
+    try:
+        return getattr(enum_cls, str(name).upper())
+    except AttributeError as exc:
+        valid = [item for item in dir(enum_cls) if item.isupper()]
+        raise ValueError(f"Invalid ZED enum value {name!r}; valid values include {valid}") from exc
+
+
+def _resize_zed_depth_for_policy_cache(depth_mm: np.ndarray) -> np.ndarray:
+    if depth_mm.ndim == 3:
+        depth_mm = depth_mm[..., 0]
+    depth_mm = np.asarray(depth_mm, dtype=np.float32)
+    if depth_mm.shape == (RESIZED_HEIGHT, RESIZED_WIDTH):
+        return depth_mm
+    import cv2
+
+    return cv2.resize(
+        depth_mm,
+        (RESIZED_WIDTH, RESIZED_HEIGHT),
+        interpolation=cv2.INTER_NEAREST,
+    ).astype(np.float32, copy=False)
+
+
+def _zed_shared_memory_producer_main(
+    args_dict: dict,
+    meta_shm_name: str,
+    depth_shm_name: str,
+    lock,
+    stop_event,
+) -> None:
+    try:
+        import pyzed.sl as sl
+    except ModuleNotFoundError as exc:
+        raise RuntimeError("pyzed.sl is required in the ZED producer process.") from exc
+
+    args = argparse.Namespace(**args_dict)
+    meta_shm = shared_memory.SharedMemory(name=meta_shm_name)
+    depth_shm = shared_memory.SharedMemory(name=depth_shm_name)
+    camera = sl.Camera()
+    depth_mat = sl.Mat()
+    retrieve_resolution = None
+    low_res_retrieve_failed = False
+    last_frame_wall_time_s = None
+    runtime_parameters = sl.RuntimeParameters()
+    grab_period_s = 1.0 / float(args.zed_grab_hz) if float(args.zed_grab_hz) > 0.0 else 0.0
+
+    try:
+        init_params = sl.InitParameters(input_t=sl.InputType())
+        init_params.svo_real_time_mode = True
+        init_params.camera_resolution = _zed_enum_value(sl.RESOLUTION, args.zed_resolution)
+        init_params.depth_mode = _zed_enum_value(sl.DEPTH_MODE, args.zed_depth_mode)
+        init_params.coordinate_units = sl.UNIT.MILLIMETER
+        if int(args.zed_camera_fps) > 0:
+            init_params.camera_fps = int(args.zed_camera_fps)
+        if args.zed_serial_number:
+            init_params.set_from_serial_number(int(args.zed_serial_number))
+
+        err = camera.open(init_params)
+        if err != sl.ERROR_CODE.SUCCESS:
+            raise RuntimeError(f"Failed to open ZED camera serial={args.zed_serial_number!r}: {err}")
+        if int(args.zed_exposure) >= 0:
+            camera.set_camera_settings(sl.VIDEO_SETTINGS.EXPOSURE, int(args.zed_exposure))
+        if int(args.zed_gain) >= 0:
+            camera.set_camera_settings(sl.VIDEO_SETTINGS.GAIN, int(args.zed_gain))
+        if int(args.zed_retrieve_width) > 0 and int(args.zed_retrieve_height) > 0:
+            retrieve_resolution = sl.Resolution(int(args.zed_retrieve_width), int(args.zed_retrieve_height))
+
+        info(
+            "ZED producer process started "
+            f"serial={args.zed_serial_number or '<default>'} resolution={args.zed_resolution} "
+            f"depth_mode={args.zed_depth_mode} camera_fps={args.zed_camera_fps} "
+            f"grab_hz_cap={args.zed_grab_hz if float(args.zed_grab_hz) > 0.0 else 'none'} "
+            f"retrieve={args.zed_retrieve_width}x{args.zed_retrieve_height}"
+        )
+
+        frame_id = 0
+        fail_count = 0
+        while not stop_event.is_set():
+            t0 = time.time()
+            err = camera.grab(runtime_parameters)
+            t_grab = time.time()
+            if err != sl.ERROR_CODE.SUCCESS:
+                fail_count += 1
+                with lock:
+                    meta = struct.unpack_from(_ZED_META_FMT, meta_shm.buf)
+                    struct.pack_into(
+                        _ZED_META_FMT,
+                        meta_shm.buf,
+                        0,
+                        *meta[:9],
+                        fail_count,
+                        *meta[10:],
+                    )
+                stop_event.wait(min(grab_period_s, 0.01) if grab_period_s > 0.0 else 0.001)
+                continue
+
+            if retrieve_resolution is None or low_res_retrieve_failed:
+                camera.retrieve_measure(depth_mat, sl.MEASURE.DEPTH)
+            else:
+                try:
+                    camera.retrieve_measure(depth_mat, sl.MEASURE.DEPTH, sl.MEM.CPU, retrieve_resolution)
+                except TypeError:
+                    low_res_retrieve_failed = True
+                    info("ZED low-resolution retrieve_measure overload failed; falling back to full-frame retrieve.")
+                    camera.retrieve_measure(depth_mat, sl.MEASURE.DEPTH)
+            t_retrieve = time.time()
+
+            depth_mm = np.array(depth_mat.get_data(), copy=True)
+            if args.zed_camera_upsidedown:
+                import cv2
+
+                depth_mm = cv2.flip(depth_mm, -1)
+            t_copy = time.time()
+            depth_mm = _resize_zed_depth_for_policy_cache(depth_mm)
+            t_resize = time.time()
+
+            zed_ts_ms = _ZED_TS_NONE
+            try:
+                zed_ts_ms = int(camera.get_timestamp(sl.TIME_REFERENCE.IMAGE).get_milliseconds())
+            except Exception:
+                pass
+
+            camera_period_ms = float("nan")
+            if last_frame_wall_time_s is not None:
+                camera_period_ms = 1000.0 * (t_resize - last_frame_wall_time_s)
+            last_frame_wall_time_s = t_resize
+
+            rows, cols = depth_mm.shape[:2]
+            depth_bytes = depth_mm.astype(np.float32, copy=False).tobytes()
+            with lock:
+                depth_shm.buf[: len(depth_bytes)] = depth_bytes
+                struct.pack_into(
+                    _ZED_META_FMT,
+                    meta_shm.buf,
+                    0,
+                    frame_id,
+                    time.time(),
+                    zed_ts_ms,
+                    1000.0 * (t_grab - t0),
+                    1000.0 * (t_retrieve - t_grab),
+                    1000.0 * (t_copy - t_retrieve),
+                    1000.0 * (t_resize - t_copy),
+                    1000.0 * (t_resize - t0),
+                    camera_period_ms,
+                    fail_count,
+                    rows,
+                    cols,
+                )
+            frame_id += 1
+
+            elapsed_s = time.time() - t0
+            if grab_period_s > elapsed_s:
+                stop_event.wait(grab_period_s - elapsed_s)
+    finally:
+        camera.close()
+        meta_shm.close()
+        depth_shm.close()
 
 
 class ZedDepthCamera:
-    """Direct ZED SDK depth capture to avoid streaming depth images through ROS."""
+    """Direct ZED SDK depth capture without streaming depth images through ROS."""
 
     def __init__(self, args: argparse.Namespace) -> None:
+        self.nonblocking = bool(args.zed_nonblocking)
+        self.max_cached_depth_age_s = float(args.zed_max_cached_depth_age_s)
+        self.camera = None
+        self.sl = None
+        self.runtime_parameters = None
+        self.depth_mat = None
+        self.camera_upsidedown = bool(args.zed_camera_upsidedown)
+        self.retrieve_resolution = None
+        self._frame_id = 0
+        self._last_frame_wall_time: float | None = None
+        self._mp_ctx = None
+        self._meta_shm = None
+        self._depth_shm = None
+        self._lock = None
+        self._stop_event = None
+        self._process = None
+
+        if self.nonblocking:
+            self._start_shared_memory_process(args)
+        else:
+            self._open_direct_camera(args)
+        atexit.register(self.close)
+
+    def _open_direct_camera(self, args: argparse.Namespace) -> None:
         try:
             import pyzed.sl as sl
         except ModuleNotFoundError as exc:
@@ -343,8 +536,8 @@ class ZedDepthCamera:
         self.camera = sl.Camera()
         init_params = sl.InitParameters(input_t=sl.InputType())
         init_params.svo_real_time_mode = True
-        init_params.camera_resolution = self._enum_value(sl.RESOLUTION, args.zed_resolution)
-        init_params.depth_mode = self._enum_value(sl.DEPTH_MODE, args.zed_depth_mode)
+        init_params.camera_resolution = _zed_enum_value(sl.RESOLUTION, args.zed_resolution)
+        init_params.depth_mode = _zed_enum_value(sl.DEPTH_MODE, args.zed_depth_mode)
         init_params.coordinate_units = sl.UNIT.MILLIMETER
         if int(args.zed_camera_fps) > 0:
             init_params.camera_fps = int(args.zed_camera_fps)
@@ -361,106 +554,118 @@ class ZedDepthCamera:
 
         self.runtime_parameters = sl.RuntimeParameters()
         self.depth_mat = sl.Mat()
-        self.camera_upsidedown = bool(args.zed_camera_upsidedown)
-        self.nonblocking = bool(args.zed_nonblocking)
-        self.max_cached_depth_age_s = float(args.zed_max_cached_depth_age_s)
-        grab_hz = float(args.zed_grab_hz)
-        self.grab_period_s = 1.0 / grab_hz if grab_hz > 0.0 else 0.0
-        retrieve_width = int(args.zed_retrieve_width)
-        retrieve_height = int(args.zed_retrieve_height)
-        self.retrieve_resolution = None
-        if retrieve_width > 0 and retrieve_height > 0:
-            self.retrieve_resolution = sl.Resolution(retrieve_width, retrieve_height)
-        self._camera_lock = threading.Lock()
-        self._latest_lock = threading.Lock()
-        self._latest_frame: DepthFrame | None = None
-        self._frame_id = 0
-        self._last_frame_wall_time: float | None = None
-        self._stop_event = threading.Event()
-        self._reader_thread: threading.Thread | None = None
-        atexit.register(self.close)
+        if int(args.zed_retrieve_width) > 0 and int(args.zed_retrieve_height) > 0:
+            self.retrieve_resolution = sl.Resolution(int(args.zed_retrieve_width), int(args.zed_retrieve_height))
+        self._log_camera_config(args, mode="blocking direct")
+
+    def _start_shared_memory_process(self, args: argparse.Namespace) -> None:
+        self._mp_ctx = mp.get_context("spawn")
+        self._lock = self._mp_ctx.Lock()
+        self._stop_event = self._mp_ctx.Event()
+        self._meta_shm = shared_memory.SharedMemory(create=True, size=_ZED_META_SIZE)
+        self._meta_shm.buf[:_ZED_META_SIZE] = b"\x00" * _ZED_META_SIZE
+        self._depth_shm = shared_memory.SharedMemory(
+            create=True,
+            size=RESIZED_HEIGHT * RESIZED_WIDTH * np.dtype(np.float32).itemsize,
+        )
+        args_dict = {
+            "zed_serial_number": args.zed_serial_number,
+            "zed_resolution": args.zed_resolution,
+            "zed_depth_mode": args.zed_depth_mode,
+            "zed_camera_fps": args.zed_camera_fps,
+            "zed_grab_hz": args.zed_grab_hz,
+            "zed_exposure": args.zed_exposure,
+            "zed_gain": args.zed_gain,
+            "zed_camera_upsidedown": args.zed_camera_upsidedown,
+            "zed_retrieve_width": args.zed_retrieve_width,
+            "zed_retrieve_height": args.zed_retrieve_height,
+        }
+        self._process = self._mp_ctx.Process(
+            target=_zed_shared_memory_producer_main,
+            args=(args_dict, self._meta_shm.name, self._depth_shm.name, self._lock, self._stop_event),
+            daemon=True,
+            name="zed_depth_producer",
+        )
+        self._process.start()
+        self._log_camera_config(args, mode="nonblocking shared-memory subprocess")
+
+    @staticmethod
+    def _log_camera_config(args: argparse.Namespace, *, mode: str) -> None:
         info(
             "Opened ZED SDK depth camera "
-            f"serial={args.zed_serial_number or '<default>'} resolution={args.zed_resolution} "
+            f"mode={mode} serial={args.zed_serial_number or '<default>'} resolution={args.zed_resolution} "
             f"depth_mode={args.zed_depth_mode} units=millimeters "
             f"exposure={args.zed_exposure} gain={args.zed_gain}"
         )
-        if self.nonblocking and self.grab_period_s > 0.0:
-            info(f"ZED reader rate cap: {1.0 / self.grab_period_s:.1f} Hz")
-        if self.retrieve_resolution is not None:
-            info(f"ZED retrieve resolution: {retrieve_width}x{retrieve_height}")
+        if bool(args.zed_nonblocking) and float(args.zed_grab_hz) > 0.0:
+            info(f"ZED producer rate cap: {float(args.zed_grab_hz):.1f} Hz")
+        if int(args.zed_retrieve_width) > 0 and int(args.zed_retrieve_height) > 0:
+            info(f"ZED retrieve resolution: {int(args.zed_retrieve_width)}x{int(args.zed_retrieve_height)}")
         info(f"ZED cached depth frame shape for policy preprocessing: {RESIZED_WIDTH}x{RESIZED_HEIGHT}")
-        if self.nonblocking:
-            self._reader_thread = threading.Thread(target=self._reader_loop, name="zed_depth_reader", daemon=True)
-            self._reader_thread.start()
-            info("ZED non-blocking mode enabled: policy loop reuses latest cached depth frame.")
-
-    @staticmethod
-    def _enum_value(enum_cls, name: str):
-        try:
-            return getattr(enum_cls, str(name).upper())
-        except AttributeError as exc:
-            valid = [item for item in dir(enum_cls) if item.isupper()]
-            raise ValueError(f"Invalid ZED enum value {name!r}; valid values include {valid}") from exc
-
-    @staticmethod
-    def _resize_for_policy_cache(depth_mm: np.ndarray) -> np.ndarray:
-        if depth_mm.ndim == 3:
-            depth_mm = depth_mm[..., 0]
-        depth_mm = np.asarray(depth_mm, dtype=np.float32)
-        if depth_mm.shape == (RESIZED_HEIGHT, RESIZED_WIDTH):
-            return depth_mm
-        import cv2
-
-        return cv2.resize(
-            depth_mm,
-            (RESIZED_WIDTH, RESIZED_HEIGHT),
-            interpolation=cv2.INTER_NEAREST,
-        ).astype(np.float32, copy=False)
 
     def close(self) -> None:
-        self._stop_event.set()
-        if self._reader_thread is not None and self._reader_thread.is_alive():
-            self._reader_thread.join(timeout=1.0)
-        with self._camera_lock:
-            if self.camera is not None:
-                self.camera.close()
-                self.camera = None
+        if self._stop_event is not None:
+            self._stop_event.set()
+        if self._process is not None and self._process.is_alive():
+            self._process.join(timeout=2.0)
+            if self._process.is_alive():
+                self._process.terminate()
+                self._process.join(timeout=1.0)
+        if self.camera is not None:
+            self.camera.close()
+            self.camera = None
+        if self._meta_shm is not None:
+            self._meta_shm.close()
+            try:
+                self._meta_shm.unlink()
+            except FileNotFoundError:
+                pass
+            self._meta_shm = None
+        if self._depth_shm is not None:
+            self._depth_shm.close()
+            try:
+                self._depth_shm.unlink()
+            except FileNotFoundError:
+                pass
+            self._depth_shm = None
 
     def _grab_once(self) -> DepthFrame | None:
+        assert self.camera is not None
+        assert self.sl is not None
+        assert self.runtime_parameters is not None
+        assert self.depth_mat is not None
         t0 = time.time()
-        with self._camera_lock:
-            if self.camera is None:
-                return None
-            err = self.camera.grab(self.runtime_parameters)
-            if err != self.sl.ERROR_CODE.SUCCESS:
-                warn_every(f"ZED grab failed: {err}", 1.0, key="zed_grab_failed")
-                return None
-            if self.retrieve_resolution is None:
+        err = self.camera.grab(self.runtime_parameters)
+        t_grab = time.time()
+        if err != self.sl.ERROR_CODE.SUCCESS:
+            warn_every(f"ZED grab failed: {err}", 1.0, key="zed_grab_failed")
+            return None
+        if self.retrieve_resolution is None:
+            self.camera.retrieve_measure(self.depth_mat, self.sl.MEASURE.DEPTH)
+        else:
+            try:
+                self.camera.retrieve_measure(
+                    self.depth_mat,
+                    self.sl.MEASURE.DEPTH,
+                    self.sl.MEM.CPU,
+                    self.retrieve_resolution,
+                )
+            except TypeError:
+                warn_every(
+                    "ZED Python API did not accept low-resolution retrieve_measure; falling back to full frame.",
+                    5.0,
+                    key="zed_retrieve_resolution_unsupported",
+                )
                 self.camera.retrieve_measure(self.depth_mat, self.sl.MEASURE.DEPTH)
-            else:
-                try:
-                    self.camera.retrieve_measure(
-                        self.depth_mat,
-                        self.sl.MEASURE.DEPTH,
-                        self.sl.MEM.CPU,
-                        self.retrieve_resolution,
-                    )
-                except TypeError:
-                    warn_every(
-                        "ZED Python API did not accept low-resolution retrieve_measure; falling back to full frame.",
-                        5.0,
-                        key="zed_retrieve_resolution_unsupported",
-                    )
-                    self.camera.retrieve_measure(self.depth_mat, self.sl.MEASURE.DEPTH)
-            depth_mm = np.array(self.depth_mat.get_data(), copy=True)
+        t_retrieve = time.time()
+        depth_mm = np.array(self.depth_mat.get_data(), copy=True)
         if self.camera_upsidedown:
             import cv2
 
             depth_mm = cv2.flip(depth_mm, -1)
-        depth_mm = self._resize_for_policy_cache(depth_mm)
+        t_copy = time.time()
+        depth_mm = _resize_zed_depth_for_policy_cache(depth_mm)
         now = time.time()
-        grab_ms = 1000.0 * (now - t0)
         inter_frame_ms = None
         if self._last_frame_wall_time is not None:
             inter_frame_ms = 1000.0 * (now - self._last_frame_wall_time)
@@ -472,30 +677,69 @@ class ZedDepthCamera:
             encoding="zed_sdk_mm",
             stamp=rospy.Time.now(),
             frame_id=frame_id,
-            grab_ms=grab_ms,
+            grab_ms=1000.0 * (t_grab - t0),
+            retrieve_ms=1000.0 * (t_retrieve - t_grab),
+            copy_ms=1000.0 * (t_copy - t_retrieve),
+            resize_ms=1000.0 * (now - t_copy),
+            total_ms=1000.0 * (now - t0),
             inter_frame_ms=inter_frame_ms,
         )
 
-    def _reader_loop(self) -> None:
-        while not self._stop_event.is_set():
-            t0 = time.time()
-            frame = self._grab_once()
-            if frame is not None:
-                with self._latest_lock:
-                    self._latest_frame = frame
-            elapsed_s = time.time() - t0
-            if self.grab_period_s > elapsed_s:
-                self._stop_event.wait(self.grab_period_s - elapsed_s)
-            elif frame is None:
-                self._stop_event.wait(0.001)
+    def _read_shared_memory_frame(self) -> DepthFrame | None:
+        assert self._meta_shm is not None
+        assert self._depth_shm is not None
+        assert self._lock is not None
+        with self._lock:
+            meta = struct.unpack_from(_ZED_META_FMT, self._meta_shm.buf)
+            (
+                frame_id,
+                wall_time_s,
+                zed_ts_ms,
+                grab_ms,
+                retrieve_ms,
+                copy_ms,
+                resize_ms,
+                total_ms,
+                camera_period_ms,
+                failures,
+                rows,
+                cols,
+            ) = meta
+            if int(rows) <= 0 or int(cols) <= 0 or int(frame_id) < 0:
+                return None
+            depth_mm = np.ndarray(
+                (int(rows), int(cols)),
+                dtype=np.float32,
+                buffer=self._depth_shm.buf,
+            ).copy()
+        stamp = rospy.Time.from_sec(float(wall_time_s)) if wall_time_s > 0.0 else rospy.Time.now()
+        inter_frame_ms = None if np.isnan(camera_period_ms) else float(camera_period_ms)
+        return DepthFrame(
+            depth=depth_mm,
+            encoding="zed_sdk_mm",
+            stamp=stamp,
+            frame_id=int(frame_id),
+            grab_ms=float(grab_ms),
+            retrieve_ms=float(retrieve_ms),
+            copy_ms=float(copy_ms),
+            resize_ms=float(resize_ms),
+            total_ms=float(total_ms),
+            inter_frame_ms=inter_frame_ms,
+            failures=int(failures),
+        )
 
     def read(self) -> DepthFrame | None:
         if not self.nonblocking:
             return self._grab_once()
-        with self._latest_lock:
-            frame = self._latest_frame
+        frame = self._read_shared_memory_frame()
         if frame is None:
-            warn_every("Waiting for first cached ZED depth frame.", 1.0, key="zed_waiting_cached_frame")
+            if self._process is not None and not self._process.is_alive():
+                warn_every(
+                    f"ZED producer process is not running; exitcode={self._process.exitcode}.",
+                    1.0,
+                    key="zed_process_dead",
+                )
+            warn_every("Waiting for first cached ZED depth frame from producer process.", 1.0, key="zed_waiting_cached_frame")
             return None
         age_s = max(0.0, (rospy.Time.now() - frame.stamp).to_sec())
         if self.max_cached_depth_age_s > 0.0 and age_s > self.max_cached_depth_age_s:
@@ -505,6 +749,8 @@ class ZedDepthCamera:
                 1.0,
                 key="zed_cached_frame_stale",
             )
+        if frame.failures > 0:
+            warn_every(f"ZED producer process has reported {frame.failures} grab failures.", 2.0, key="zed_failures")
         return frame
 
 
@@ -790,7 +1036,12 @@ class StudentDepthPolicyNode:
         self.last_depth_stamp: rospy.Time | None = None
         self.last_depth_frame_id: int = -1
         self.last_zed_grab_ms: float | None = None
+        self.last_zed_retrieve_ms: float | None = None
+        self.last_zed_copy_ms: float | None = None
+        self.last_zed_resize_ms: float | None = None
+        self.last_zed_total_ms: float | None = None
         self.last_zed_inter_frame_ms: float | None = None
+        self.last_zed_failures: int = 0
         self.depth_frame_reused = False
         self.cached_depth_stamp: rospy.Time | None = None
         self.cached_depth_frame_id: int = -1
@@ -827,7 +1078,7 @@ class StudentDepthPolicyNode:
             info("Depth source: direct ZED SDK capture. No ROS depth image topic is subscribed.")
             if args.zed_nonblocking:
                 info(
-                    "ZED timing: non-blocking cached capture enabled. "
+                    "ZED timing: non-blocking shared-memory subprocess enabled. "
                     "Policy loop may reuse a 30 Hz depth frame while running faster than camera FPS."
                 )
         else:
@@ -984,7 +1235,12 @@ class StudentDepthPolicyNode:
         self.last_depth_stamp = frame.stamp
         self.last_depth_frame_id = frame.frame_id
         self.last_zed_grab_ms = frame.grab_ms
+        self.last_zed_retrieve_ms = frame.retrieve_ms
+        self.last_zed_copy_ms = frame.copy_ms
+        self.last_zed_resize_ms = frame.resize_ms
+        self.last_zed_total_ms = frame.total_ms
         self.last_zed_inter_frame_ms = frame.inter_frame_ms
+        self.last_zed_failures = frame.failures
         self.last_depth_timing_ms = {
             "read": 1000.0 * (t_read_done - t_read_start),
             "preprocess": 1000.0 * (t_preprocess_done - t_read_done),
@@ -1138,8 +1394,18 @@ class StudentDepthPolicyNode:
         zed_timing_text = ""
         if self.last_zed_grab_ms is not None:
             zed_timing_text += f" zed_grab_ms={self.last_zed_grab_ms:.1f}"
+        if self.last_zed_retrieve_ms is not None:
+            zed_timing_text += f" zed_retrieve_ms={self.last_zed_retrieve_ms:.1f}"
+        if self.last_zed_copy_ms is not None:
+            zed_timing_text += f" zed_copy_ms={self.last_zed_copy_ms:.1f}"
+        if self.last_zed_resize_ms is not None:
+            zed_timing_text += f" zed_resize_ms={self.last_zed_resize_ms:.1f}"
+        if self.last_zed_total_ms is not None:
+            zed_timing_text += f" zed_total_ms={self.last_zed_total_ms:.1f}"
         if self.last_zed_inter_frame_ms is not None:
             zed_timing_text += f" zed_period_ms={self.last_zed_inter_frame_ms:.1f}"
+        if self.last_zed_failures:
+            zed_timing_text += f" zed_failures={self.last_zed_failures}"
         timing_text = ""
         if self.last_step_timing_ms:
             timing_text = (
@@ -1423,7 +1689,7 @@ def parse_args() -> argparse.Namespace:
         "--zed_nonblocking",
         action=argparse.BooleanOptionalAction,
         default=False,
-        help="Grab ZED depth in a background thread and reuse the latest cached frame in the policy loop.",
+        help="Grab ZED depth in a subprocess and reuse the latest shared-memory frame in the policy loop.",
     )
     parser.add_argument(
         "--zed_max_cached_depth_age_s",

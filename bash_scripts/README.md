@@ -10,7 +10,7 @@ Run these from anywhere; each script changes to the repository root first.
    Checks whether the consumer loop can reuse cached ZED frames at 120 Hz.
 
 3. `03_zed_producer_policy_preprocess_60hz.sh`
-   Intended deployment design: policy-style depth preprocessing happens once per ZED frame in the producer thread.
+   Intended deployment design: policy-style depth preprocessing happens once per ZED frame in the producer process.
 
 4. `04_zed_consumer_policy_preprocess_60hz.sh`
    Bad-path comparison: policy-style depth preprocessing happens every consumer tick.

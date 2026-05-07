@@ -3,8 +3,8 @@
 
 This entrypoint is intentionally tiny so the deployment logic stays in
 student_depth_policy_node.py. It only defaults the node to --zed_nonblocking,
-which captures ZED depth in a background thread and lets the policy loop reuse
-the latest cached depth frame instead of blocking on the camera FPS.
+which captures ZED depth in a shared-memory subprocess and lets the policy loop
+reuse the latest cached depth frame instead of blocking on the camera FPS.
 """
 
 from __future__ import annotations
