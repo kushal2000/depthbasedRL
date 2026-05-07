@@ -8,7 +8,7 @@ if [[ ! -f "${DEFAULT_CHECKPOINT}" && -f "distillation_runs/10_local_rot6d_mediu
   DEFAULT_CHECKPOINT="distillation_runs/10_local_rot6d_medium_noise_camrand20mm2deg_256env/checkpoints/student_latest.pt"
 fi
 CHECKPOINT="${1:-${DEFAULT_CHECKPOINT}}"
-RUN_DURATION_S="${RUN_DURATION_S:-5}"
+RUN_DURATION_S="${RUN_DURATION_S:--1}"
 PUBLISH_DURATION_S="${PUBLISH_DURATION_S:-1.0}"
 STATUS_INTERVAL_S="${STATUS_INTERVAL_S:-0.5}"
 
@@ -17,6 +17,12 @@ if [[ ! -f "${CHECKPOINT}" ]]; then
   echo "Pass a checkpoint as arg 1, or set DEFAULT_STUDENT_CHECKPOINT." >&2
   exit 1
 fi
+
+echo "Running student depth policy with:"
+echo "  checkpoint=${CHECKPOINT}"
+echo "  RUN_DURATION_S=${RUN_DURATION_S} (node lifetime; -1 means until Ctrl-C)"
+echo "  PUBLISH_DURATION_S=${PUBLISH_DURATION_S} (joint target publishing duration; -1 means continuous)"
+echo "  STATUS_INTERVAL_S=${STATUS_INTERVAL_S}"
 
 python deployment/student_depth_policy_node_nonblocking.py \
   --checkpoint_path "${CHECKPOINT}" \

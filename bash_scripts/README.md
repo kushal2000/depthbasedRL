@@ -25,7 +25,7 @@ Run these from anywhere; each script changes to the repository root first.
    Runs the full nonblocking student policy node for 30 seconds without publishing joint commands. This still publishes the predicted object pose to `/robot_frame/current_object_pose`.
 
 8. `08_student_depth_policy_publish_1s_nonblocking.sh [checkpoint]`
-   Runs the full nonblocking student policy node and publishes joint targets for one second.
+   Runs the full nonblocking student policy node until Ctrl-C by default and publishes joint targets for `PUBLISH_DURATION_S` seconds. The default is one second.
 
 9. `09_zed_multiprocess_60hz_no_preprocess.sh`
    Same baseline as script 1, but ZED capture runs in a separate process and shares the latest image through shared memory.
@@ -60,4 +60,5 @@ Useful env overrides:
 
 - `RUN_DURATION_S=120 bash_scripts/07_student_depth_policy_dry_run_nonblocking.sh`
 - `DEBUG_DIR=./my_depth_debug bash_scripts/12_student_depth_policy_save_debug_nonblocking.sh`
-- `PUBLISH_DURATION_S=0.25 bash_scripts/08_student_depth_policy_publish_1s_nonblocking.sh`
+- `PUBLISH_DURATION_S=3 bash_scripts/08_student_depth_policy_publish_1s_nonblocking.sh`
+- `PUBLISH_DURATION_S=-1 bash_scripts/08_student_depth_policy_publish_1s_nonblocking.sh`
