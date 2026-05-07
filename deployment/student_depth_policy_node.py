@@ -1247,7 +1247,7 @@ def parse_args() -> argparse.Namespace:
         help="If non-negative, stop the policy loop after this many seconds after warmup.",
     )
     parser.add_argument("--publish_object_pose", action=argparse.BooleanOptionalAction, default=True)
-    parser.add_argument("--object_pose_topic", default="/robot_frame/current_pose")
+    parser.add_argument("--object_pose_topic", default="/robot_frame/current_object_pose")
     parser.add_argument("--object_pose_frame_id", default="robot_frame")
     parser.add_argument(
         "--predicted_pose_model_frame",

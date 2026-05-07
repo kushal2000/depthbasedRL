@@ -159,7 +159,7 @@ The student node differs intentionally:
 - it has no privileged object-pose input; the depth image and proprio drive the student directly
 - joint command publishing defaults to off for safe policy/pose visualization
 - debug depth saving is first-class and saves metric arrays plus raw/resized/windowed/cropped visualizations
-- predicted object pose is published to `/robot_frame/current_pose`, with full pose when the checkpoint has `object_rot6d`
+- predicted object pose is published to `/robot_frame/current_object_pose`, with full pose when the checkpoint has `object_rot6d`
 
 ## Aux Pose Output
 
@@ -168,7 +168,7 @@ The deployment node supports both aux-head formats:
 - `object_pos` only: publishes predicted object position with identity orientation, or the orientation passed through `--position_only_quat_xyzw`.
 - `object_pos` plus `object_rot6d`: converts the predicted 6D rotation to a valid rotation matrix/quaternion and publishes the full predicted object pose.
 
-The pose is published in `robot_frame` by default to `/robot_frame/current_pose`.
+The pose is published in `robot_frame` by default to `/robot_frame/current_object_pose`.
 
 ## Future Item
 
