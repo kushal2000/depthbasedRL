@@ -34,6 +34,34 @@ SAMRAT_ZED2I_INTRINSIC_MATRIX = (
     0.0,
     1.0,
 )
+SAMRAT_ZED2I_WIDTH = 384
+SAMRAT_ZED2I_HEIGHT = 224
+
+
+def _scale_intrinsic_matrix(
+    intrinsic_matrix: tuple[float, ...],
+    *,
+    source_width: int,
+    source_height: int,
+    target_width: int,
+    target_height: int,
+) -> tuple[float, ...]:
+    """Scale a row-major pinhole K for image resizing from source to target."""
+    if len(intrinsic_matrix) != 9:
+        raise ValueError(f"Expected 9 K values, got {len(intrinsic_matrix)}")
+    sx = float(target_width) / float(source_width)
+    sy = float(target_height) / float(source_height)
+    return (
+        float(intrinsic_matrix[0]) * sx,
+        0.0,
+        float(intrinsic_matrix[2]) * sx,
+        0.0,
+        float(intrinsic_matrix[4]) * sy,
+        float(intrinsic_matrix[5]) * sy,
+        0.0,
+        0.0,
+        1.0,
+    )
 
 
 def _parse_optional_pair(value: str | None) -> tuple[int, int] | None:
@@ -54,25 +82,45 @@ def _apply_student_camera_preset(env_cfg, preset: str) -> None:
     preset = str(preset).lower()
     if preset == "default":
         return
-    if preset != "samrat_zed2i_debug":
+    if preset not in {"samrat_zed2i_debug", "samrat_zed2i_160x90_debug"}:
         raise ValueError(f"Unsupported --student_camera_preset {preset!r}")
 
     cfg = env_cfg.student_obs
-    cfg.image_width = 384
-    cfg.image_height = 224
-    cfg.image_input_width = 384
-    cfg.image_input_height = 224
-    cfg.crop_enabled = False
-    cfg.crop_top_left = (0, 0)
-    cfg.crop_bottom_right = (384, 224)
+    if preset == "samrat_zed2i_debug":
+        cfg.image_width = SAMRAT_ZED2I_WIDTH
+        cfg.image_height = SAMRAT_ZED2I_HEIGHT
+        cfg.image_input_width = SAMRAT_ZED2I_WIDTH
+        cfg.image_input_height = SAMRAT_ZED2I_HEIGHT
+        cfg.crop_enabled = False
+        cfg.crop_top_left = (0, 0)
+        cfg.crop_bottom_right = (SAMRAT_ZED2I_WIDTH, SAMRAT_ZED2I_HEIGHT)
+        cfg.camera_intrinsic_matrix = SAMRAT_ZED2I_INTRINSIC_MATRIX
+        preset_note = "384x224 full-frame/no-crop with explicit K"
+    else:
+        cfg.image_width = 160
+        cfg.image_height = 90
+        cfg.image_input_width = 70
+        cfg.image_input_height = 70
+        cfg.crop_enabled = True
+        cfg.crop_top_left = (45, 20)
+        cfg.crop_bottom_right = (115, 90)
+        cfg.camera_intrinsic_matrix = _scale_intrinsic_matrix(
+            SAMRAT_ZED2I_INTRINSIC_MATRIX,
+            source_width=SAMRAT_ZED2I_WIDTH,
+            source_height=SAMRAT_ZED2I_HEIGHT,
+            target_width=160,
+            target_height=90,
+        )
+        cfg.depth_min_m = 0.40
+        cfg.depth_max_m = 0.90
+        preset_note = "160x90 with scaled K and center-bottom 70x70 crop"
     cfg.camera_convention = "opengl"
     cfg.camera_pos = (-0.079, -0.460, 0.826)
     cfg.camera_quat_wxyz = (0.7532, 0.3917, 0.0, 0.0)
-    cfg.camera_intrinsic_matrix = SAMRAT_ZED2I_INTRINSIC_MATRIX
     cfg.clipping_range = (0.1, 1.2)
     print(
-        "[distill_depth] applied provisional samrat_zed2i_debug camera preset: "
-        "384x224 full-frame/no-crop with explicit K. Verify real capture "
+        f"[distill_depth] applied provisional {preset} camera preset: "
+        f"{preset_note}. Verify real capture "
         "resolution/downscale before training policies with this view.",
         flush=True,
     )
@@ -650,9 +698,12 @@ def main() -> None:
     parser.add_argument("--depth_noise_strength", type=float, default=None)
     parser.add_argument(
         "--student_camera_preset",
-        choices=("default", "samrat_zed2i_debug"),
+        choices=("default", "samrat_zed2i_debug", "samrat_zed2i_160x90_debug"),
         default="default",
-        help="Camera preset. samrat_zed2i_debug is full-frame/no-crop visualization only until real K/resolution is verified.",
+        help=(
+            "Camera preset. samrat_zed2i_debug is full-frame/no-crop visualization; "
+            "samrat_zed2i_160x90_debug uses scaled K plus a 70x70 crop."
+        ),
     )
     parser.add_argument(
         "--camera_pose_randomization_profile",
