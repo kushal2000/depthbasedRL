@@ -156,6 +156,22 @@ This still never publishes policy actions during warmup; it only republishes the
 
 For a DEXTRAH-matched policy candidate, prefer a checkpoint trained with `medium` depth noise and about `30mm/3deg` camera pose randomization. The existing `20mm/2deg` checkpoints are conservative; the `50mm/5deg` checkpoints are stress-test robust.
 
+## Open Concerns
+
+The V3 Samrat ZED2i sim preset is still a training/debug path, not a finalized
+deployment path:
+
+- The ROS deployment node currently matches the older default depth student
+  preprocessing: `160 x 90`, crop `x=[90,160)`, `y=[0,70)`, depth window
+  `[0.70, 1.10] m`. The V3 Samrat preset uses crop `x=[45,115)`,
+  `y=[20,90)` and depth window `[0.40, 0.90] m`. Any Samrat-view checkpoint
+  needs a matching deployment preset before real-robot use.
+- Isaac Sim warns that non-square camera pixels and principal-point aperture
+  offsets are not fully supported. The Samrat `384 x 224 -> 160 x 90` scaled-K
+  preset is useful for visual/training experiments, but exact real-camera K
+  matching is approximate unless we use an Isaac-compatible centered,
+  square-pixel camera model or an aspect-preserving real preprocessing path.
+
 ## ZED Non-Blocking Diagnostic
 
 Use the standalone diagnostic before blaming the policy node:

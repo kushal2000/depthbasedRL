@@ -31,6 +31,9 @@ RUN_DIR="${RUN_DIR:-distillation_runs/${RUN_NAME}}"
 
 DEPTH_NOISE_PROFILE="${DEPTH_NOISE_PROFILE:-off}"
 DEPTH_NOISE_STRENGTH="${DEPTH_NOISE_STRENGTH:-}"
+STUDENT_CAMERA_PRESET="${STUDENT_CAMERA_PRESET:-default}"
+STUDENT_IMAGE_DELAY_QUEUE_SIZE="${STUDENT_IMAGE_DELAY_QUEUE_SIZE:-}"
+PEG_URDF="${PEG_URDF:-}"
 CAMERA_POSE_PROFILE="${CAMERA_POSE_PROFILE:-off}"
 CAMERA_POSE_MODE="${CAMERA_POSE_MODE:-startup}"
 CAMERA_POS_NOISE_M="${CAMERA_POS_NOISE_M:-}"
@@ -98,9 +101,18 @@ if [[ -n "$STUDENT_CHECKPOINT" ]]; then
   fi
 fi
 
+if [[ -n "$PEG_URDF" ]]; then
+  cmd+=(--peg_urdf "$PEG_URDF")
+fi
+
+if [[ -n "$STUDENT_IMAGE_DELAY_QUEUE_SIZE" ]]; then
+  cmd+=(--student_image_delay_queue_size "$STUDENT_IMAGE_DELAY_QUEUE_SIZE")
+fi
+
 if [[ "$STUDENT_INPUT" == "camera" ]]; then
   cmd+=(
     --depth_noise_profile "$DEPTH_NOISE_PROFILE"
+    --student_camera_preset "$STUDENT_CAMERA_PRESET"
     --camera_pose_randomization_profile "$CAMERA_POSE_PROFILE"
     --camera_pose_randomization_mode "$CAMERA_POSE_MODE"
     --depth_debug_interval "$DEPTH_DEBUG_INTERVAL"
@@ -137,6 +149,9 @@ echo "python=$PYTHON_BIN"
 echo "run_name=$RUN_NAME"
 echo "wandb_group=$WANDB_GROUP"
 echo "aux_pose_mode=$AUX_POSE_MODE"
+echo "student_camera_preset=$STUDENT_CAMERA_PRESET"
+echo "student_image_delay_queue_size=${STUDENT_IMAGE_DELAY_QUEUE_SIZE:-1}"
+echo "peg_urdf=${PEG_URDF:-default}"
 echo "cache=$OMNI_KIT_CACHE_PATH"
 nvidia-smi || true
 printf 'command:'
