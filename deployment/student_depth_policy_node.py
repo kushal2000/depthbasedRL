@@ -68,10 +68,10 @@ DEPTH_TOPIC = "/zed/zed_node/depth/depth_registered"
 DEPTH_UNITS = "auto"
 RESIZE_INTERPOLATION = "nearest"
 ZED_SERIAL_NUMBER = "15107"
-ZED_RESOLUTION = "HD1080"
+ZED_RESOLUTION = "HD720"
 ZED_DEPTH_MODE = "NEURAL"
-ZED_CAMERA_FPS = 30
-ZED_GRAB_HZ = 30.0
+ZED_CAMERA_FPS = 60
+ZED_GRAB_HZ = 60.0
 ZED_EXPOSURE = 25
 ZED_GAIN = 40
 MAX_ARM_TARGET_DELTA_DEG = 0.0
@@ -346,6 +346,24 @@ def _zed_enum_value(enum_cls, name: str):
         raise ValueError(f"Invalid ZED enum value {name!r}; valid values include {valid}") from exc
 
 
+def _format_zed_camera_info(camera) -> str:
+    """Return SDK-confirmed resolution/FPS/intrinsics after camera.open()."""
+    try:
+        camera_info = camera.get_camera_information()
+        camera_cfg = camera_info.camera_configuration
+        resolution = camera_cfg.resolution
+        calib = camera_cfg.calibration_parameters
+        left = calib.left_cam
+        return (
+            f"opened={int(resolution.width)}x{int(resolution.height)}@{int(camera_cfg.fps)}Hz "
+            f"K_left=[[{float(left.fx):.3f},0,{float(left.cx):.3f}],"
+            f"[0,{float(left.fy):.3f},{float(left.cy):.3f}],[0,0,1]] "
+            f"dist_left={[float(x) for x in left.disto]}"
+        )
+    except Exception as exc:
+        return f"opened_camera_info_unavailable={type(exc).__name__}: {exc}"
+
+
 def _resize_zed_depth_for_policy_cache(depth_mm: np.ndarray) -> np.ndarray:
     if depth_mm.ndim == 3:
         depth_mm = depth_mm[..., 0]
@@ -410,7 +428,8 @@ def _zed_shared_memory_producer_main(
             f"serial={args.zed_serial_number or '<default>'} resolution={args.zed_resolution} "
             f"depth_mode={args.zed_depth_mode} camera_fps={args.zed_camera_fps} "
             f"grab_hz_cap={args.zed_grab_hz if float(args.zed_grab_hz) > 0.0 else 'none'} "
-            f"retrieve={args.zed_retrieve_width}x{args.zed_retrieve_height}"
+            f"retrieve={args.zed_retrieve_width}x{args.zed_retrieve_height} "
+            f"{_format_zed_camera_info(camera)}"
         )
 
         frame_id = 0
@@ -557,7 +576,7 @@ class ZedDepthCamera:
         self.depth_mat = sl.Mat()
         if int(args.zed_retrieve_width) > 0 and int(args.zed_retrieve_height) > 0:
             self.retrieve_resolution = sl.Resolution(int(args.zed_retrieve_width), int(args.zed_retrieve_height))
-        self._log_camera_config(args, mode="blocking direct")
+        self._log_camera_config(args, mode="blocking direct", camera=self.camera)
 
     def _start_shared_memory_process(self, args: argparse.Namespace) -> None:
         self._mp_ctx = mp.get_context("spawn")
@@ -591,13 +610,15 @@ class ZedDepthCamera:
         self._log_camera_config(args, mode="nonblocking shared-memory subprocess")
 
     @staticmethod
-    def _log_camera_config(args: argparse.Namespace, *, mode: str) -> None:
+    def _log_camera_config(args: argparse.Namespace, *, mode: str, camera=None) -> None:
         info(
             "Opened ZED SDK depth camera "
             f"mode={mode} serial={args.zed_serial_number or '<default>'} resolution={args.zed_resolution} "
             f"depth_mode={args.zed_depth_mode} units=millimeters "
             f"exposure={args.zed_exposure} gain={args.zed_gain}"
         )
+        if camera is not None:
+            info(f"ZED actual camera info: {_format_zed_camera_info(camera)}")
         if bool(args.zed_nonblocking) and float(args.zed_grab_hz) > 0.0:
             info(f"ZED producer rate cap: {float(args.zed_grab_hz):.1f} Hz")
         if int(args.zed_retrieve_width) > 0 and int(args.zed_retrieve_height) > 0:

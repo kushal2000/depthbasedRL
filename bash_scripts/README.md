@@ -2,6 +2,13 @@
 
 Run these from anywhere; each script changes to the repository root first.
 
+ZED defaults for these scripts and the student policy node are `HD720 @ 60 Hz`
+with `NEURAL` depth and SDK retrieval directly at `160x90`. This is the
+recommended deployment default because the policy downsamples/crops heavily and
+fresh depth matters more than HD1080 source pixels. Use `HD1080 @ 30 Hz` only as
+a quality comparison or if HD720/60 is unstable. The scripts print the
+SDK-confirmed opened resolution/FPS and left-camera intrinsics.
+
 1. `01_zed_baseline_60hz_no_preprocess.sh`
    Baseline producer/consumer test at 60 Hz with no depth preprocessing.
    Check `tick_period_med/p95/max`: for a healthy 60 Hz consumer this should be near `16.7 ms`.
@@ -62,3 +69,15 @@ Useful env overrides:
 - `DEBUG_DIR=./my_depth_debug bash_scripts/12_student_depth_policy_save_debug_nonblocking.sh`
 - `PUBLISH_DURATION_S=3 bash_scripts/08_student_depth_policy_publish_1s_nonblocking.sh`
 - `PUBLISH_DURATION_S=-1 bash_scripts/08_student_depth_policy_publish_1s_nonblocking.sh`
+
+HD1080 comparison example:
+
+```bash
+python deployment/test_zed_multiprocess.py \
+  --zed_resolution HD1080 \
+  --zed_camera_fps 30 \
+  --zed_grab_hz 30 \
+  --duration_s 30 \
+  --consumer_hz 60 \
+  --producer_preprocess policy
+```

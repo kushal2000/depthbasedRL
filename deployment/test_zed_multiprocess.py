@@ -108,6 +108,21 @@ def _enum_value(enum_cls, name: str):
         raise ValueError(f"Invalid ZED enum value {name!r}; valid values include {valid}") from exc
 
 
+def _format_zed_camera_info(camera) -> str:
+    try:
+        camera_info = camera.get_camera_information()
+        camera_cfg = camera_info.camera_configuration
+        resolution = camera_cfg.resolution
+        left = camera_cfg.calibration_parameters.left_cam
+        return (
+            f"opened={int(resolution.width)}x{int(resolution.height)}@{int(camera_cfg.fps)}Hz "
+            f"K_left=[[{float(left.fx):.3f},0,{float(left.cx):.3f}],"
+            f"[0,{float(left.fy):.3f},{float(left.cy):.3f}],[0,0,1]]"
+        )
+    except Exception as exc:
+        return f"opened_camera_info_unavailable={type(exc).__name__}: {exc}"
+
+
 def zed_producer_process(args: argparse.Namespace, state: SharedZedState, stop_event: mp.Event) -> None:
     try:
         import pyzed.sl as sl
@@ -149,7 +164,7 @@ def zed_producer_process(args: argparse.Namespace, state: SharedZedState, stop_e
             "ZED producer process started "
             f"resolution={args.zed_resolution} depth_mode={args.zed_depth_mode} "
             f"camera_fps={args.zed_camera_fps} grab_hz_cap={args.zed_grab_hz if args.zed_grab_hz > 0 else 'none'} "
-            f"producer_preprocess={args.producer_preprocess}"
+            f"producer_preprocess={args.producer_preprocess} {_format_zed_camera_info(camera)}"
         )
 
         local_frame_id = 0
@@ -339,10 +354,10 @@ def run_consumer(args: argparse.Namespace, state: SharedZedState, shm: shared_me
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--zed_serial_number", default="15107")
-    parser.add_argument("--zed_resolution", default="HD1080")
+    parser.add_argument("--zed_resolution", default="HD720")
     parser.add_argument("--zed_depth_mode", default="NEURAL")
-    parser.add_argument("--zed_camera_fps", type=int, default=30)
-    parser.add_argument("--zed_grab_hz", type=float, default=30.0, help="Producer rate cap. Use 0 for no cap.")
+    parser.add_argument("--zed_camera_fps", type=int, default=60)
+    parser.add_argument("--zed_grab_hz", type=float, default=60.0, help="Producer rate cap. Use 0 for no cap.")
     parser.add_argument("--zed_exposure", type=int, default=25)
     parser.add_argument("--zed_gain", type=int, default=40)
     parser.add_argument("--zed_camera_upsidedown", action="store_true")
