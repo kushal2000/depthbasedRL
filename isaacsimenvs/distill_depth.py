@@ -576,18 +576,31 @@ def _log_depth_rollout_video(
     fps: int,
     max_frames: int,
     interval: int,
+    local_output_dir: Path | None = None,
+    force_log: bool = False,
 ) -> list:
-    if frame is None or max_frames <= 0:
+    if max_frames <= 0:
         return frames
-    frames.append(frame)
-    if len(frames) > max_frames:
-        frames = frames[-max_frames:]
-    if wandb_run is not None and len(frames) >= 2 and step % max(1, interval) == 0:
+    if frame is not None:
+        frames.append(frame)
+        if len(frames) > max_frames:
+            frames = frames[-max_frames:]
+    should_log = force_log or (frame is not None and step % max(1, interval) == 0)
+    if len(frames) >= 2 and should_log:
         import numpy as np
-        import wandb
 
-        video = np.stack(frames, axis=0).transpose(0, 3, 1, 2)
-        wandb_run.log({key: wandb.Video(video, fps=max(1, int(fps)), format="mp4")}, step=step)
+        if local_output_dir is not None:
+            import imageio.v2 as imageio
+
+            local_output_dir.mkdir(parents=True, exist_ok=True)
+            path = local_output_dir / f"depth_rollout_step_{step:08d}.mp4"
+            imageio.mimsave(path, frames, fps=max(1, int(fps)), macro_block_size=1)
+            print(f"[distill_depth] wrote depth rollout MP4: {path}", flush=True)
+        if wandb_run is not None:
+            import wandb
+
+            video = np.stack(frames, axis=0).transpose(0, 3, 1, 2)
+            wandb_run.log({key: wandb.Video(video, fps=max(1, int(fps)), format="mp4")}, step=step)
     return frames
 
 
@@ -934,6 +947,7 @@ def main() -> None:
                 fps=args.wandb_depth_rollout_video_fps,
                 max_frames=args.wandb_depth_rollout_video_len,
                 interval=args.wandb_depth_rollout_video_interval,
+                local_output_dir=run_dir / "depth_rollout_videos",
             )
 
         interval_action_loss += float(action_loss.mean().detach().cpu().item())
@@ -1007,6 +1021,19 @@ def main() -> None:
             append_frame=False,
             wandb_run=wandb_run,
             wandb_key=args.wandb_viewer_key,
+        )
+    if depth_rollout_video_frames:
+        depth_rollout_video_frames = _log_depth_rollout_video(
+            frame=None,
+            frames=depth_rollout_video_frames,
+            wandb_run=wandb_run,
+            step=start_step + args.num_iters,
+            key=args.wandb_depth_rollout_video_key,
+            fps=args.wandb_depth_rollout_video_fps,
+            max_frames=args.wandb_depth_rollout_video_len,
+            interval=args.wandb_depth_rollout_video_interval,
+            local_output_dir=run_dir / "depth_rollout_videos",
+            force_log=True,
         )
     if args.mode == "train_online":
         _save_checkpoint(run_dir / "checkpoints" / "student_latest.pt", student, optimizer, start_step + args.num_iters, best_metric)
