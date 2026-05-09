@@ -82,7 +82,7 @@ def _apply_student_camera_preset(env_cfg, preset: str) -> None:
     preset = str(preset).lower()
     if preset == "default":
         return
-    if preset not in {"samrat_zed2i_debug", "samrat_zed2i_160x90_debug"}:
+    if preset not in {"samrat_zed2i_debug", "samrat_zed2i_160x90_debug", "samrat_zed2i_half_debug"}:
         raise ValueError(f"Unsupported --student_camera_preset {preset!r}")
 
     cfg = env_cfg.student_obs
@@ -96,7 +96,7 @@ def _apply_student_camera_preset(env_cfg, preset: str) -> None:
         cfg.crop_bottom_right = (SAMRAT_ZED2I_WIDTH, SAMRAT_ZED2I_HEIGHT)
         cfg.camera_intrinsic_matrix = SAMRAT_ZED2I_INTRINSIC_MATRIX
         preset_note = "384x224 full-frame/no-crop with explicit K"
-    else:
+    elif preset == "samrat_zed2i_160x90_debug":
         cfg.image_width = 160
         cfg.image_height = 90
         cfg.image_input_width = 70
@@ -114,6 +114,31 @@ def _apply_student_camera_preset(env_cfg, preset: str) -> None:
         cfg.depth_min_m = 0.40
         cfg.depth_max_m = 0.90
         preset_note = "160x90 with scaled K and center-bottom 70x70 crop"
+    else:
+        cfg.image_width = SAMRAT_ZED2I_WIDTH // 2
+        cfg.image_height = SAMRAT_ZED2I_HEIGHT // 2
+        cfg.image_input_width = 100
+        cfg.image_input_height = 100
+        cfg.crop_enabled = True
+        centered_crop_x0 = (cfg.image_width - cfg.image_input_width) // 2
+        right_biased_center_x = round(cfg.image_width * 2 / 3)
+        right_biased_crop_x0 = max(
+            0, min(right_biased_center_x - cfg.image_input_width // 2, cfg.image_width - cfg.image_input_width)
+        )
+        crop_x0 = round((centered_crop_x0 + right_biased_crop_x0) / 2)
+        crop_y0 = cfg.image_height - cfg.image_input_height
+        cfg.crop_top_left = (crop_x0, crop_y0)
+        cfg.crop_bottom_right = (crop_x0 + cfg.image_input_width, crop_y0 + cfg.image_input_height)
+        cfg.camera_intrinsic_matrix = _scale_intrinsic_matrix(
+            SAMRAT_ZED2I_INTRINSIC_MATRIX,
+            source_width=SAMRAT_ZED2I_WIDTH,
+            source_height=SAMRAT_ZED2I_HEIGHT,
+            target_width=cfg.image_width,
+            target_height=cfg.image_height,
+        )
+        cfg.depth_min_m = 0.40
+        cfg.depth_max_m = 0.90
+        preset_note = "192x112 half-res with scaled K and mid-right bottom 100x100 crop"
     cfg.camera_convention = "opengl"
     cfg.camera_pos = (-0.079, -0.460, 0.826)
     cfg.camera_quat_wxyz = (0.7532, 0.3917, 0.0, 0.0)
@@ -698,11 +723,11 @@ def main() -> None:
     parser.add_argument("--depth_noise_strength", type=float, default=None)
     parser.add_argument(
         "--student_camera_preset",
-        choices=("default", "samrat_zed2i_debug", "samrat_zed2i_160x90_debug"),
+        choices=("default", "samrat_zed2i_debug", "samrat_zed2i_160x90_debug", "samrat_zed2i_half_debug"),
         default="default",
         help=(
             "Camera preset. samrat_zed2i_debug is full-frame/no-crop visualization; "
-            "samrat_zed2i_160x90_debug uses scaled K plus a 70x70 crop."
+            "samrat_zed2i_160x90_debug and samrat_zed2i_half_debug use scaled K plus a 70x70 crop."
         ),
     )
     parser.add_argument(
