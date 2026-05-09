@@ -23,6 +23,17 @@ import yaml
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_TEACHER_DIR = Path("/juno/u/kedia/depthbasedRL/train_dir/Apr28/isaacSim_PegInHole")
+SAMRAT_ZED2I_INTRINSIC_MATRIX = (
+    163.6663,
+    0.0,
+    193.5522,
+    0.0,
+    163.6663,
+    114.4336,
+    0.0,
+    0.0,
+    1.0,
+)
 
 
 def _parse_optional_pair(value: str | None) -> tuple[int, int] | None:
@@ -37,6 +48,34 @@ def _parse_optional_pair(value: str | None) -> tuple[int, int] | None:
 def _load_yaml(path: Path) -> dict:
     with path.open() as f:
         return yaml.safe_load(f) or {}
+
+
+def _apply_student_camera_preset(env_cfg, preset: str) -> None:
+    preset = str(preset).lower()
+    if preset == "default":
+        return
+    if preset != "samrat_zed2i_debug":
+        raise ValueError(f"Unsupported --student_camera_preset {preset!r}")
+
+    cfg = env_cfg.student_obs
+    cfg.image_width = 384
+    cfg.image_height = 224
+    cfg.image_input_width = 384
+    cfg.image_input_height = 224
+    cfg.crop_enabled = False
+    cfg.crop_top_left = (0, 0)
+    cfg.crop_bottom_right = (384, 224)
+    cfg.camera_convention = "opengl"
+    cfg.camera_pos = (-0.079, -0.460, 0.826)
+    cfg.camera_quat_wxyz = (0.7532, 0.3917, 0.0, 0.0)
+    cfg.camera_intrinsic_matrix = SAMRAT_ZED2I_INTRINSIC_MATRIX
+    cfg.clipping_range = (0.1, 1.2)
+    print(
+        "[distill_depth] applied provisional samrat_zed2i_debug camera preset: "
+        "384x224 full-frame/no-crop with explicit K. Verify real capture "
+        "resolution/downscale before training policies with this view.",
+        flush=True,
+    )
 
 
 def _load_env_cfg(task: str, teacher_config: Path | None, num_envs: int, sim_device: str):
@@ -431,6 +470,7 @@ def _log_depth_debug_media(
         "raw_window_png",
         "noisy_window_png",
         "policy_full_depth_png",
+        "latest_policy_depth_png",
         "policy_depth_png",
     ):
         path = paths.get(name)
@@ -503,6 +543,15 @@ def _capture_depth_rollout_frame(
         policy_full = None
         if policy_full_depth is not None:
             policy_full = _normalized_policy_depth(policy_full_depth, env_ids=env_ids)
+        latest_policy_depth = getattr(env, "_student_image_latest", None)
+        latest_policy = None
+        if latest_policy_depth is not None:
+            latest_policy = _normalized_policy_depth(latest_policy_depth, env_ids=env_ids)
+        delay_indices = getattr(env, "_student_camera_delay_indices", None)
+        delay_idx_np = None
+        if delay_indices is not None:
+            delay_idx_np = delay_indices.detach().long().cpu().numpy()[env_ids]
+        delay_queue_size = getattr(env, "_student_camera_delay_queue_size", None)
         policy = _normalized_policy_depth(policy_depth, env_ids=env_ids)
 
     return _make_review_grid(
@@ -510,7 +559,10 @@ def _capture_depth_rollout_frame(
         raw_window=raw_window.cpu().numpy(),
         noisy_window=None if noisy_window is None else noisy_window.cpu().numpy(),
         policy_full=None if policy_full is None else policy_full.cpu().numpy(),
+        latest_policy=None if latest_policy is None else latest_policy.cpu().numpy(),
         policy=policy.cpu().numpy(),
+        delay_indices=delay_idx_np,
+        delay_queue_size=delay_queue_size,
     )
 
 
@@ -570,8 +622,25 @@ def main() -> None:
     parser.add_argument("--sim_device", default="cuda:0")
     parser.add_argument("--force_scene_tol_combo", default=None)
     parser.add_argument("--force_peg_idx", type=int, default=None)
+    parser.add_argument(
+        "--peg_urdf",
+        default=None,
+        help="Override cfg.assets.peg_urdf. Use assets/urdf/peg_in_hole/peg_L/peg_L.urdf for the L peg.",
+    )
+    parser.add_argument(
+        "--student_image_delay_queue_size",
+        type=int,
+        default=None,
+        help="Queue length for random student image delay. 1 disables delay; 3 means latest through 2-step delay.",
+    )
     parser.add_argument("--depth_noise_profile", choices=("off", "weak", "medium", "strong", "custom"), default=None)
     parser.add_argument("--depth_noise_strength", type=float, default=None)
+    parser.add_argument(
+        "--student_camera_preset",
+        choices=("default", "samrat_zed2i_debug"),
+        default="default",
+        help="Camera preset. samrat_zed2i_debug is full-frame/no-crop visualization only until real K/resolution is verified.",
+    )
     parser.add_argument(
         "--camera_pose_randomization_profile",
         choices=("off", "weak", "medium", "strong", "custom"),
@@ -645,6 +714,21 @@ def main() -> None:
         env_cfg.peg_in_hole.force_scene_tol_combo = _parse_optional_pair(args.force_scene_tol_combo)
     if args.force_peg_idx is not None:
         env_cfg.peg_in_hole.force_peg_idx = args.force_peg_idx
+    if args.peg_urdf is not None:
+        env_cfg.assets.peg_urdf = args.peg_urdf
+        env_cfg.assets.object_name = Path(args.peg_urdf).stem
+    if args.student_image_delay_queue_size is not None:
+        queue_size = int(args.student_image_delay_queue_size)
+        if queue_size < 1:
+            raise ValueError("--student_image_delay_queue_size must be >= 1")
+        env_cfg.student_obs.use_camera_delay = queue_size > 1
+        env_cfg.student_obs.camera_delay_max = queue_size
+        print(
+            f"[distill_depth] student image delay queue_size={queue_size} "
+            f"(max_delay_steps={max(queue_size - 1, 0)})",
+            flush=True,
+        )
+    _apply_student_camera_preset(env_cfg, args.student_camera_preset)
     if args.depth_noise_profile is not None:
         env_cfg.student_obs.depth_noise_profile = args.depth_noise_profile
     if args.depth_noise_strength is not None:
@@ -809,7 +893,10 @@ def main() -> None:
                 raw_depth=raw_depth,
                 noisy_depth=getattr(inner, "_student_depth_noisy_m", None),
                 policy_full_depth=getattr(inner, "_student_depth_policy_full", None),
+                latest_policy_depth=getattr(inner, "_student_image_latest", None),
                 policy_depth=image,
+                delay_indices=getattr(inner, "_student_camera_delay_indices", None),
+                delay_queue_size=getattr(inner, "_student_camera_delay_queue_size", None),
                 near=float(env_cfg.student_obs.depth_min_m),
                 far=float(env_cfg.student_obs.depth_max_m),
             )

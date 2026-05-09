@@ -121,7 +121,9 @@ def _sample_delay(
     values: torch.Tensor,
     env,
     flush: torch.Tensor | None = None,
-) -> tuple[torch.Tensor, torch.Tensor]:
+    *,
+    return_indices: bool = False,
+) -> tuple[torch.Tensor, torch.Tensor] | tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """Push current values into a rolling queue and sample per-env delay."""
     if flush is not None and flush.any():
         queue[flush] = values[flush].unsqueeze(1).expand(-1, queue.shape[1], -1)
@@ -130,6 +132,8 @@ def _sample_delay(
     queue[:, 0, :] = values
     idx = torch.randint(0, queue.shape[1], (env.num_envs,), device=env.device)
     delayed = queue[torch.arange(env.num_envs, device=env.device), idx]
+    if return_indices:
+        return queue, delayed, idx
     return queue, delayed
 
 
@@ -350,8 +354,11 @@ def _apply_student_tensor_delay(
     queue_attr: str,
     delay_max: int,
     enabled: bool,
-) -> torch.Tensor:
+    return_delay_indices: bool = False,
+) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
     if not enabled or delay_max <= 0:
+        if return_delay_indices:
+            return values, torch.zeros(env.num_envs, device=values.device, dtype=torch.long)
         return values
 
     flat_values = values.reshape(env.num_envs, -1)
@@ -366,14 +373,18 @@ def _apply_student_tensor_delay(
     ):
         queue = flat_values.unsqueeze(1).expand(-1, queue_len, -1).clone()
 
-    queue, delayed = _sample_delay(
+    queue, delayed, delay_indices = _sample_delay(
         queue,
         flat_values,
         env,
         flush=_episode_start(env),
+        return_indices=True,
     )
     setattr(env, queue_attr, queue)
-    return delayed.reshape_as(values)
+    delayed = delayed.reshape_as(values)
+    if return_delay_indices:
+        return delayed, delay_indices
+    return delayed
 
 
 def _apply_student_bundle_delay(
@@ -435,14 +446,23 @@ def build_student_observations(env) -> dict[str, torch.Tensor]:
         from .scene_utils import read_student_camera_image
 
         image = read_student_camera_image(env)
-        student_obs["image"] = _apply_student_tensor_delay(
+        delayed_image, delay_indices = _apply_student_tensor_delay(
             env,
             image,
             queue_attr="_student_camera_queue",
             delay_max=int(cfg.camera_delay_max),
             enabled=bool(cfg.use_camera_delay),
+            return_delay_indices=True,
         )
-    return _apply_student_bundle_delay(env, student_obs)
+        student_obs["image"] = delayed_image
+        env._student_image_latest = image.detach()
+        env._student_image_policy_input = delayed_image.detach()
+        env._student_camera_delay_indices = delay_indices.detach()
+        env._student_camera_delay_queue_size = int(cfg.camera_delay_max) if bool(cfg.use_camera_delay) else 1
+    student_obs = _apply_student_bundle_delay(env, student_obs)
+    if "image" in student_obs:
+        env._student_image_policy_input = student_obs["image"].detach()
+    return student_obs
 
 
 __all__ = [

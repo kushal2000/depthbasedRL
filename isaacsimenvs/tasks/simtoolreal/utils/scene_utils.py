@@ -516,6 +516,31 @@ def setup_student_camera(env) -> None:
 
     camera_cfg_cls = TiledCameraCfg if backend == "tiled" else CameraCfg
     camera_cls = TiledCamera if backend == "tiled" else Camera
+    intrinsic_matrix = tuple(float(x) for x in getattr(cfg, "camera_intrinsic_matrix", ()))
+    if intrinsic_matrix:
+        if len(intrinsic_matrix) != 9:
+            raise ValueError(
+                "cfg.student_obs.camera_intrinsic_matrix must be empty or contain 9 values, "
+                f"got {len(intrinsic_matrix)}."
+            )
+        camera_spawn_cfg = sim_utils.PinholeCameraCfg.from_intrinsic_matrix(
+            intrinsic_matrix=list(intrinsic_matrix),
+            width=int(cfg.image_width),
+            height=int(cfg.image_height),
+            clipping_range=tuple(float(x) for x in cfg.clipping_range),
+        )
+        _log_scene_step(
+            t0,
+            "student camera uses explicit intrinsic matrix "
+            f"for {int(cfg.image_width)}x{int(cfg.image_height)}",
+        )
+    else:
+        camera_spawn_cfg = sim_utils.PinholeCameraCfg(
+            focal_length=float(cfg.focal_length),
+            focus_distance=float(cfg.focus_distance),
+            horizontal_aperture=float(cfg.horizontal_aperture),
+            clipping_range=tuple(float(x) for x in cfg.clipping_range),
+        )
     camera_cfg = camera_cfg_cls(
         prim_path="/World/envs/env_.*/StudentCamera",
         update_period=0,
@@ -523,12 +548,7 @@ def setup_student_camera(env) -> None:
         height=int(cfg.image_height),
         width=int(cfg.image_width),
         data_types=_student_camera_data_types(cfg.image_modality),
-        spawn=sim_utils.PinholeCameraCfg(
-            focal_length=float(cfg.focal_length),
-            focus_distance=float(cfg.focus_distance),
-            horizontal_aperture=float(cfg.horizontal_aperture),
-            clipping_range=tuple(float(x) for x in cfg.clipping_range),
-        ),
+        spawn=camera_spawn_cfg,
         offset=camera_cfg_cls.OffsetCfg(
             pos=tuple(float(x) for x in cfg.camera_pos),
             rot=tuple(float(x) for x in cfg.camera_quat_wxyz),

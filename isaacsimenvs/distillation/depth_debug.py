@@ -46,18 +46,28 @@ def _save_png(path: Path, images: np.ndarray) -> None:
     Image.fromarray(make_image_grid(images)).save(path)
 
 
-def _gray_to_panel(image: np.ndarray, *, label: str, size: tuple[int, int]) -> np.ndarray:
+def _gray_to_panel(
+    image: np.ndarray,
+    *,
+    label: str,
+    panel_size: tuple[int, int],
+    resize: bool = True,
+) -> np.ndarray:
     from PIL import Image, ImageDraw
 
     image = np.nan_to_num(image, nan=0.0, posinf=1.0, neginf=0.0)
     image = np.clip(image, 0.0, 1.0)
     gray = (image * 255.0).round().astype(np.uint8)
-    panel = Image.fromarray(gray).resize(size, resample=Image.Resampling.NEAREST).convert("RGB")
+    img = Image.fromarray(gray).convert("RGB")
+    if resize:
+        img = img.resize(panel_size, resample=Image.Resampling.NEAREST)
     label_h = 16
-    canvas = Image.new("RGB", (size[0], size[1] + label_h), color=(255, 255, 255))
+    canvas = Image.new("RGB", (panel_size[0], panel_size[1] + label_h), color=(255, 255, 255))
     draw = ImageDraw.Draw(canvas)
     draw.text((3, 2), label, fill=(0, 0, 0))
-    canvas.paste(panel, (0, label_h))
+    paste_x = max(0, (panel_size[0] - img.width) // 2)
+    paste_y = label_h + max(0, (panel_size[1] - img.height) // 2)
+    canvas.paste(img, (paste_x, paste_y))
     return np.asarray(canvas)
 
 
@@ -68,22 +78,55 @@ def _make_review_grid(
     policy: np.ndarray,
     noisy_window: np.ndarray | None = None,
     policy_full: np.ndarray | None = None,
+    latest_policy: np.ndarray | None = None,
+    delay_indices: np.ndarray | None = None,
+    delay_queue_size: int | None = None,
 ) -> np.ndarray:
     """Build a labeled RGB grid for quick W&B/video review."""
-    panel_size = (160, 90)
+    panel_arrays = [raw_window, policy]
+    if noisy_window is not None:
+        panel_arrays.append(noisy_window)
+    if policy_full is not None:
+        panel_arrays.append(policy_full)
+    if latest_policy is not None:
+        panel_arrays.append(latest_policy)
+    max_h = max(int(array.shape[1]) for array in panel_arrays)
+    max_w = max(int(array.shape[2]) for array in panel_arrays)
+    panel_size = (max_w, max_h)
     rows: list[np.ndarray] = []
     for i, env_id in enumerate(env_ids):
+        delay_label = ""
+        if delay_indices is not None:
+            delay_label = f" d={int(delay_indices[i])}"
+            if delay_queue_size is not None:
+                delay_label += f"/{int(delay_queue_size)}"
         panels = [
-            _gray_to_panel(raw_window[i], label=f"env{env_id} raw window", size=panel_size),
+            _gray_to_panel(raw_window[i], label=f"env{env_id} raw window", panel_size=panel_size),
             _gray_to_panel(
                 raw_window[i] if noisy_window is None else noisy_window[i],
                 label="noisy window",
-                size=panel_size,
+                panel_size=panel_size,
             ),
         ]
         if policy_full is not None:
-            panels.append(_gray_to_panel(policy_full[i], label="policy full", size=panel_size))
-        panels.append(_gray_to_panel(policy[i], label="student crop", size=panel_size))
+            panels.append(_gray_to_panel(policy_full[i], label="policy full/latest", panel_size=panel_size))
+        if latest_policy is not None:
+            panels.append(
+                _gray_to_panel(
+                    latest_policy[i],
+                    label="latest input",
+                    panel_size=panel_size,
+                    resize=False,
+                )
+            )
+        panels.append(
+            _gray_to_panel(
+                policy[i],
+                label=f"policy input{delay_label}",
+                panel_size=panel_size,
+                resize=False,
+            )
+        )
         rows.append(np.concatenate(panels, axis=1))
     return np.concatenate(rows, axis=0)
 
@@ -123,6 +166,9 @@ def save_depth_debug(
     far: float,
     noisy_depth: torch.Tensor | None = None,
     policy_full_depth: torch.Tensor | None = None,
+    latest_policy_depth: torch.Tensor | None = None,
+    delay_indices: torch.Tensor | None = None,
+    delay_queue_size: int | None = None,
 ) -> dict[str, Path]:
     """Save raw/noisy metric depth, window visualizations, policy depth, and stats."""
 
@@ -136,6 +182,12 @@ def save_depth_debug(
     policy_full = None
     if policy_full_depth is not None:
         policy_full = depth_tensor_to_nchw(policy_full_depth).detach().float().cpu().numpy()[env_ids, 0]
+    latest_policy = None
+    if latest_policy_depth is not None:
+        latest_policy = depth_tensor_to_nchw(latest_policy_depth).detach().float().cpu().numpy()[env_ids, 0]
+    delay_idx_np = None
+    if delay_indices is not None:
+        delay_idx_np = delay_indices.detach().long().cpu().numpy()[env_ids]
     raw_window = np.nan_to_num((raw - near) / max(far - near, 1e-6), nan=0.0, posinf=1.0, neginf=0.0)
     raw_window = np.clip(raw_window, 0.0, 1.0)
     noisy_window = None
@@ -157,6 +209,12 @@ def save_depth_debug(
     }
     if policy_full is not None:
         arrays["policy_full_depth"] = policy_full
+    if latest_policy is not None:
+        arrays["latest_policy_depth"] = latest_policy
+    if delay_idx_np is not None:
+        arrays["delay_indices"] = delay_idx_np
+    if delay_queue_size is not None:
+        arrays["delay_queue_size"] = np.asarray(delay_queue_size, dtype=np.int32)
     if noisy is not None and noisy_window is not None:
         arrays["noisy_depth_m"] = noisy
         arrays["noisy_depth_window"] = noisy_window
@@ -174,6 +232,10 @@ def save_depth_debug(
         policy_full_path = prefix.with_name(prefix.name + "_policy_full_depth.png")
         _save_png(policy_full_path, policy_full)
         paths["policy_full_depth_png"] = policy_full_path
+    if latest_policy is not None:
+        latest_policy_path = prefix.with_name(prefix.name + "_latest_policy_depth.png")
+        _save_png(latest_policy_path, latest_policy)
+        paths["latest_policy_depth_png"] = latest_policy_path
     policy_path = prefix.with_name(prefix.name + "_policy_depth.png")
     _save_png(policy_path, policy)
     paths["policy_depth_png"] = policy_path
@@ -186,7 +248,10 @@ def save_depth_debug(
             raw_window=raw_window,
             noisy_window=noisy_window,
             policy_full=policy_full,
+            latest_policy=latest_policy,
             policy=policy,
+            delay_indices=delay_idx_np,
+            delay_queue_size=delay_queue_size,
         )
     ).save(review_path)
     paths["review_grid_png"] = review_path
@@ -202,10 +267,25 @@ def save_depth_debug(
                 if noisy is not None
                 else {}
             ),
+            **(
+                {
+                    "latest_policy_depth": _stats(latest_policy[i], near=0.0, far=1.0),
+                }
+                if latest_policy is not None
+                else {}
+            ),
             "policy_depth": _stats(policy[i], near=0.0, far=1.0),
             "policy_nonzero_frac": float((policy[i] > 0.0).mean()),
             "policy_sat_low_frac": float((policy[i] <= 1e-6).mean()),
             "policy_sat_high_frac": float((policy[i] >= 1.0 - 1e-6).mean()),
+            **(
+                {
+                    "delay_index": int(delay_idx_np[i]),
+                    "delay_queue_size": int(delay_queue_size),
+                }
+                if delay_idx_np is not None and delay_queue_size is not None
+                else {}
+            ),
         }
         for i, env_id in enumerate(env_ids)
     }

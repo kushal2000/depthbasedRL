@@ -209,6 +209,9 @@ class StudentObsCfg:
     camera_pos: tuple[float, float, float] = (0.0, -1.0, 1.0)
     camera_quat_wxyz: tuple[float, float, float, float] = (1.0, 0.0, 0.0, 0.0)
 
+    # Empty means use focal_length/horizontal_aperture. A 9-value tuple means
+    # use PinholeCameraCfg.from_intrinsic_matrix for this exact image size.
+    camera_intrinsic_matrix: tuple[float, ...] = ()
     focal_length: float = 24.0
     horizontal_aperture: float = 33.19737869997174
     focus_distance: float = 400.0
