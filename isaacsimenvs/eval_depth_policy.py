@@ -163,6 +163,7 @@ class DepthEvalViser:
         point_cloud: bool,
         point_stride: int,
         show_robot: bool,
+        start_paused: bool,
     ) -> None:
         import viser
         from viser.extras import ViserUrdf
@@ -172,6 +173,10 @@ class DepthEvalViser:
         self.env_id = int(env_id)
         self.point_cloud_enabled = bool(point_cloud)
         self.point_stride = max(1, int(point_stride))
+        self.paused = bool(start_paused)
+        self._single_step_requested = False
+        self._restart_requested = False
+        self._clear_stats_requested = False
         self.server = viser.ViserServer(host="0.0.0.0", port=port)
         self.server.scene.add_grid("/ground", width=2.0, height=2.0, cell_size=0.1)
 
@@ -180,13 +185,34 @@ class DepthEvalViser:
             client.camera.position = (0.9, -1.2, 0.9)
             client.camera.look_at = (0.0, 0.0, 0.45)
 
-        self.status = self.server.gui.add_markdown("**Depth eval:** starting")
-        self.metrics = self.server.gui.add_markdown("**Metrics:** --")
+        self.server.gui.add_markdown("# Depth Policy Eval")
+        with self.server.gui.add_folder("Episode Controls", expand_by_default=True):
+            self._run_pause_button = self.server.gui.add_button("Run" if self.paused else "Pause")
+            self._run_pause_button.on_click(lambda _: self._toggle_paused())
+            self._step_button = self.server.gui.add_button("Step Once")
+            self._step_button.on_click(lambda _: self._request_single_step())
+            self._restart_button = self.server.gui.add_button("Restart Eval")
+            self._restart_button.on_click(lambda _: self._request_restart())
+            self._clear_stats_button = self.server.gui.add_button("Clear Stats")
+            self._clear_stats_button.on_click(lambda _: self._request_clear_stats())
+            self.control_status = self.server.gui.add_markdown("**Controls:** --")
+
+        with self.server.gui.add_folder("Status", expand_by_default=True):
+            self.status = self.server.gui.add_markdown("**Depth eval:** starting")
+            self.metrics = self.server.gui.add_markdown("**Metrics:** --")
+
+        self._update_control_status()
 
         self.robot = None
         if show_robot:
             robot_urdf = REPO_ROOT / "assets/urdf/kuka_sharpa_description/iiwa14_left_sharpa_adjusted_restricted.urdf"
             if robot_urdf.exists():
+                self.robot_frame = self.server.scene.add_frame(
+                    "/robot",
+                    position=(0.0, 0.8, 0.0),
+                    wxyz=(1.0, 0.0, 0.0, 0.0),
+                    show_axes=False,
+                )
                 self.robot = ViserUrdf(self.server, robot_urdf, root_node_name="/robot")
             else:
                 print(f"[eval_depth_policy] robot URDF missing, skipping viser robot: {robot_urdf}", flush=True)
@@ -227,6 +253,52 @@ class DepthEvalViser:
             image=dummy,
         )
         self.point_cloud = None
+
+    def _update_control_status(self) -> None:
+        state = "paused" if self.paused else "running"
+        self.control_status.content = f"**Controls:** {state}"
+
+    def _toggle_paused(self) -> None:
+        self.paused = not self.paused
+        self._run_pause_button.name = "Run" if self.paused else "Pause"
+        self._update_control_status()
+
+    def _request_single_step(self) -> None:
+        self._single_step_requested = True
+        self.paused = True
+        self._run_pause_button.name = "Run"
+        self._update_control_status()
+
+    def _request_restart(self) -> None:
+        self._restart_requested = True
+        self._clear_stats_requested = True
+        self.paused = True
+        self._run_pause_button.name = "Run"
+        self.control_status.content = "**Controls:** restart requested"
+
+    def _request_clear_stats(self) -> None:
+        self._clear_stats_requested = True
+        self.control_status.content = "**Controls:** clear stats requested"
+
+    def consume_restart_requested(self) -> bool:
+        requested = self._restart_requested
+        self._restart_requested = False
+        if requested:
+            self._update_control_status()
+        return requested
+
+    def consume_clear_stats_requested(self) -> bool:
+        requested = self._clear_stats_requested
+        self._clear_stats_requested = False
+        return requested
+
+    def should_step(self) -> bool:
+        if not self.paused:
+            return True
+        if self._single_step_requested:
+            self._single_step_requested = False
+            return True
+        return False
 
     def _joint_pos(self) -> np.ndarray:
         env = self.env
@@ -618,6 +690,7 @@ def main() -> None:
     parser.add_argument("--viser_point_cloud", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--viser_point_stride", type=int, default=4)
     parser.add_argument("--viser_robot", action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument("--viser_start_paused", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--wandb", action="store_true")
     parser.add_argument("--wandb_project", default="depthbasedRL-isaacsim-distill")
     parser.add_argument("--wandb_group", default="")
@@ -784,6 +857,7 @@ def main() -> None:
             point_cloud=args.viser_point_cloud,
             point_stride=args.viser_point_stride,
             show_robot=args.viser_robot,
+            start_paused=args.viser_start_paused,
         )
         print(f"[eval_depth_policy] viser server: http://localhost:{args.viser_port}", flush=True)
 
@@ -803,9 +877,74 @@ def main() -> None:
     interval_start = time.perf_counter()
     last_step = 0
 
+    def clear_eval_stats() -> None:
+        nonlocal interval_action_loss
+        nonlocal interval_aux_loss
+        nonlocal interval_aux_pos_loss
+        nonlocal interval_aux_keypoint_loss
+        nonlocal interval_step_count
+        nonlocal interval_done_goal_idx
+        nonlocal interval_done_completion
+        nonlocal interval_done_count
+        nonlocal interval_start
+
+        episode_records.clear()
+        interval_action_loss = 0.0
+        interval_aux_loss = 0.0
+        interval_aux_pos_loss = 0.0
+        interval_aux_keypoint_loss = 0.0
+        interval_step_count = 0
+        interval_done_goal_idx = 0.0
+        interval_done_completion = 0.0
+        interval_done_count = 0
+        interval_start = time.perf_counter()
+        viewer_frames.clear()
+        depth_rollout_video_frames.clear()
+
+    def reset_all_envs() -> None:
+        nonlocal obs
+        nonlocal hidden
+        nonlocal episode_context
+
+        obs = teacher.env_reset(wrapped)
+        hidden = student.initial_state(inner.num_envs, inner.device)
+        episode_lengths.zero_()
+        episode_context = _make_episode_context(inner)
+
+    def update_live_viewer(policy_depth: torch.Tensor | None, predicted_pose: torch.Tensor | None) -> None:
+        if viser_viewer is None:
+            return
+        current_goal_idx = float(inner._successes.float().mean().detach().cpu().item())
+        recent_goal_idx = interval_done_goal_idx / max(interval_done_count, 1)
+        viser_viewer.update(
+            step=last_step,
+            completed_episodes=len(episode_records),
+            current_goal_idx=current_goal_idx,
+            recent_goal_idx=recent_goal_idx,
+            policy_depth=policy_depth,
+            predicted_object_pose_wxyz=predicted_pose,
+        )
+
     completed_ok = False
     try:
         for step in range(1, int(args.num_steps) + 1):
+            if viser_viewer is not None:
+                while not viser_viewer.should_step():
+                    if viser_viewer.consume_clear_stats_requested():
+                        clear_eval_stats()
+                    if viser_viewer.consume_restart_requested():
+                        reset_all_envs()
+                    update_live_viewer(
+                        policy_depth=getattr(inner, "_student_image_policy_input", None),
+                        predicted_pose=None,
+                    )
+                    time.sleep(max(float(args.viser_sleep_s), 1.0 / 30.0))
+
+                if viser_viewer.consume_clear_stats_requested():
+                    clear_eval_stats()
+                if viser_viewer.consume_restart_requested():
+                    reset_all_envs()
+
             last_step = step
             episode_lengths += 1
             with torch.no_grad():
@@ -881,14 +1020,7 @@ def main() -> None:
             recent_goal_idx = interval_done_goal_idx / max(interval_done_count, 1)
 
             if viser_viewer is not None and step % max(1, args.viser_update_interval) == 0:
-                viser_viewer.update(
-                    step=step,
-                    completed_episodes=len(episode_records),
-                    current_goal_idx=current_goal_idx,
-                    recent_goal_idx=recent_goal_idx,
-                    policy_depth=image,
-                    predicted_object_pose_wxyz=aux_info["pred_pose_wxyz"],
-                )
+                update_live_viewer(policy_depth=image, predicted_pose=aux_info["pred_pose_wxyz"])
                 if args.viser_sleep_s > 0.0:
                     time.sleep(float(args.viser_sleep_s))
 

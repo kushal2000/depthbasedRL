@@ -23,6 +23,10 @@ With live viser, camera frustums, and point cloud:
 SERVE_VISER=1 bash_scripts/14_eval_depth_policy_32c_L_defaultcam.sh
 ```
 
+The live Viser mode starts paused by default and exposes `Run`, `Step Once`,
+`Restart Eval`, and `Clear Stats` controls. Set `VISER_START_PAUSED=0` to start
+running immediately.
+
 The script defaults to:
 
 ```text

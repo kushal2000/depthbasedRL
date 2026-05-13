@@ -83,6 +83,9 @@ if [[ "${SERVE_VISER:-0}" == "1" ]]; then
     --viser_update_interval "${VISER_UPDATE_INTERVAL:-1}"
     --viser_point_stride "${VISER_POINT_STRIDE:-4}"
   )
+  if [[ "${VISER_START_PAUSED:-1}" == "0" || "${VISER_START_PAUSED:-1}" == "false" ]]; then
+    cmd+=(--no-viser_start_paused)
+  fi
 fi
 
 if [[ "${WANDB:-0}" == "1" ]]; then
