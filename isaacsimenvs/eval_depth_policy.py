@@ -881,6 +881,7 @@ def main() -> None:
     interval_step_count = 0
     interval_done_goal_idx = 0.0
     interval_done_completion = 0.0
+    interval_done_full_success = 0.0
     interval_done_count = 0
     interval_start = time.perf_counter()
     last_step = 0
@@ -893,6 +894,7 @@ def main() -> None:
         nonlocal interval_step_count
         nonlocal interval_done_goal_idx
         nonlocal interval_done_completion
+        nonlocal interval_done_full_success
         nonlocal interval_done_count
         nonlocal interval_start
 
@@ -904,6 +906,7 @@ def main() -> None:
         interval_step_count = 0
         interval_done_goal_idx = 0.0
         interval_done_completion = 0.0
+        interval_done_full_success = 0.0
         interval_done_count = 0
         interval_start = time.perf_counter()
         viewer_frames.clear()
@@ -1049,10 +1052,11 @@ def main() -> None:
                 episode_lengths[done_mask] = 0
                 _refresh_episode_context(inner, episode_context, done_mask.nonzero(as_tuple=False).squeeze(-1))
 
-            done_goal_idx, done_completion, done_count = _done_success_stats(inner, dones)
+            done_goal_idx, done_completion, done_full_success, done_count = _done_success_stats(inner, dones)
             if done_count:
                 interval_done_goal_idx += done_goal_idx * done_count
                 interval_done_completion += done_completion * done_count
+                interval_done_full_success += done_full_success * done_count
                 interval_done_count += done_count
 
             interval_action_loss += float(action_loss.mean().detach().cpu().item())
@@ -1070,6 +1074,7 @@ def main() -> None:
                 )
                 recent_goal_idx = interval_done_goal_idx / max(interval_done_count, 1)
                 recent_completion = interval_done_completion / max(interval_done_count, 1)
+                recent_full_success = interval_done_full_success / max(interval_done_count, 1)
                 completed_summary = _summary(episode_records, current_goal_idx, current_completion)
                 row = {
                     "step": step,
@@ -1088,6 +1093,7 @@ def main() -> None:
                     "current_goal_completion_ratio_avg": current_completion,
                     "recent_reset_goal_idx_avg": recent_goal_idx,
                     "recent_reset_goal_completion_ratio_avg": recent_completion,
+                    "recent_reset_full_success_rate": recent_full_success,
                     "recent_reset_count": interval_done_count,
                     "completed_episode_count": completed_summary["completed_episode_count"],
                     "completed_goal_idx_avg": completed_summary["completed_goal_idx_avg"],
@@ -1114,6 +1120,7 @@ def main() -> None:
                 interval_step_count = 0
                 interval_done_goal_idx = 0.0
                 interval_done_completion = 0.0
+                interval_done_full_success = 0.0
                 interval_done_count = 0
                 interval_start = time.perf_counter()
 

@@ -467,14 +467,20 @@ def _reset_hidden_for_done(hidden: torch.Tensor, dones: torch.Tensor) -> torch.T
     return hidden
 
 
-def _done_success_stats(env, dones: torch.Tensor) -> tuple[float, float, int]:
+def _done_success_stats(env, dones: torch.Tensor) -> tuple[float, float, float, int]:
     done = dones.reshape(-1).bool()
     count = int(done.sum().item())
     if count == 0:
-        return 0.0, 0.0, 0
+        return 0.0, 0.0, 0.0, 0
     successes = env._prev_episode_successes[done].float()
     max_goals = env.prev_episode_env_max_goals[done].clamp_min(1).float()
-    return float(successes.mean().item()), float((successes / max_goals).mean().item()), count
+    full_success_rate = (successes >= max_goals).float().mean()
+    return (
+        float(successes.mean().item()),
+        float((successes / max_goals).mean().item()),
+        float(full_success_rate.item()),
+        count,
+    )
 
 
 def _capture_viewer_if_needed(
@@ -911,6 +917,7 @@ def main() -> None:
     interval_step_count = 0
     interval_done_goal_idx = 0.0
     interval_done_completion = 0.0
+    interval_done_full_success = 0.0
     interval_done_count = 0
     interval_start = time.perf_counter()
 
@@ -963,10 +970,11 @@ def main() -> None:
 
         obs, reward, dones, infos = teacher.env_step(wrapped, action_for_env)
         hidden = _reset_hidden_for_done(hidden, dones)
-        done_goal_idx, done_completion, done_count = _done_success_stats(inner, dones)
+        done_goal_idx, done_completion, done_full_success, done_count = _done_success_stats(inner, dones)
         if done_count:
             interval_done_goal_idx += done_goal_idx * done_count
             interval_done_completion += done_completion * done_count
+            interval_done_full_success += done_full_success * done_count
             interval_done_count += done_count
 
         if (
@@ -1041,6 +1049,7 @@ def main() -> None:
             )
             recent_goal_idx = interval_done_goal_idx / max(interval_done_count, 1)
             recent_completion = interval_done_completion / max(interval_done_count, 1)
+            recent_full_success = interval_done_full_success / max(interval_done_count, 1)
             row = {
                 "step": step,
                 "mode": args.mode,
@@ -1057,6 +1066,7 @@ def main() -> None:
                 "current_goal_completion_ratio_avg": current_completion,
                 "recent_reset_goal_idx_avg": recent_goal_idx,
                 "recent_reset_goal_completion_ratio_avg": recent_completion,
+                "recent_reset_full_success_rate": recent_full_success,
                 "recent_reset_count": interval_done_count,
                 "env_steps_per_s": inner.num_envs * interval_step_count / elapsed,
             }
@@ -1076,6 +1086,7 @@ def main() -> None:
             interval_step_count = 0
             interval_done_goal_idx = 0.0
             interval_done_completion = 0.0
+            interval_done_full_success = 0.0
             interval_done_count = 0
             interval_start = time.perf_counter()
 
