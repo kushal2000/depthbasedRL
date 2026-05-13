@@ -30,20 +30,6 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_TEACHER_DIR = Path("/juno/u/kedia/depthbasedRL/train_dir/Apr28/isaacSim_PegInHole")
 
 
-def _quat_wxyz_to_matrix(quat: np.ndarray) -> np.ndarray:
-    quat = np.asarray(quat, dtype=np.float64)
-    quat = quat / max(float(np.linalg.norm(quat)), 1e-12)
-    w, x, y, z = quat
-    return np.array(
-        [
-            [1.0 - 2.0 * (y * y + z * z), 2.0 * (x * y - z * w), 2.0 * (x * z + y * w)],
-            [2.0 * (x * y + z * w), 1.0 - 2.0 * (x * x + z * z), 2.0 * (y * z - x * w)],
-            [2.0 * (x * z - y * w), 2.0 * (y * z + x * w), 1.0 - 2.0 * (x * x + y * y)],
-        ],
-        dtype=np.float32,
-    )
-
-
 def _depth_tensor_to_nchw(depth: torch.Tensor) -> torch.Tensor:
     from isaacsimenvs.distillation.depth_debug import depth_tensor_to_nchw
 
@@ -145,10 +131,9 @@ def _camera_pose_env_frame(env, env_id: int) -> tuple[np.ndarray, np.ndarray]:
 def _viser_frustum_image(image: np.ndarray) -> np.ndarray:
     """Convert an image array into Viser's camera-frustum texture orientation."""
 
-    # Viser frustums use the OpenCV +Y-down camera convention, but the texture
-    # plane displays NumPy image row 0 at the bottom. Flip the visual texture
-    # only; policy tensors and point-cloud unprojection keep the original image.
-    return np.ascontiguousarray(np.flipud(image))
+    # Keep the rendered image orientation exactly as the policy/debug videos see
+    # it. Only Viser display uses this helper; policy tensors are untouched.
+    return np.ascontiguousarray(image)
 
 
 def _object_urdf_path_for_env(env, env_id: int) -> Path:
@@ -391,20 +376,16 @@ class DepthEvalViser:
             self.full_frustum,
             image=_viser_frustum_image(full_img),
             k=full_k,
-            pos=cam_pos,
-            quat=cam_quat,
             scale=0.14,
         )
         self._update_frustum(
             self.policy_frustum,
             image=_viser_frustum_image(policy_img),
             k=crop_k,
-            pos=cam_pos,
-            quat=cam_quat,
             scale=0.10,
         )
         if self.point_cloud_enabled and raw_np is not None:
-            self._update_point_cloud(raw_np, full_k, full_img, cam_pos, cam_quat, near, far)
+            self._update_point_cloud(raw_np, full_k, full_img, near, far)
 
         self.status.content = f"**Depth eval:** step={step}, completed={completed_episodes}"
         self.metrics.content = (
@@ -412,43 +393,45 @@ class DepthEvalViser:
             f"recent_reset_goal_idx_avg={recent_goal_idx:.3f}"
         )
 
-    def _update_frustum(self, handle, *, image: np.ndarray, k: np.ndarray, pos: np.ndarray, quat: np.ndarray, scale: float):
+    def _update_frustum(self, handle, *, image: np.ndarray, k: np.ndarray, scale: float):
         height, width = image.shape[:2]
         fy = float(k[1, 1])
         handle.image = image
         handle.fov = float(2.0 * np.arctan(height / (2.0 * fy)))
         handle.aspect = float(width / height)
         handle.scale = float(scale)
-        handle.position = pos
-        handle.wxyz = quat
+        # These frustums are children of /student_camera, whose pose is already
+        # the actual rendered camera pose. Keep child transforms local-identity.
+        handle.position = (0.0, 0.0, 0.0)
+        handle.wxyz = (1.0, 0.0, 0.0, 0.0)
 
     def _update_point_cloud(
         self,
         depth_m: np.ndarray,
         k: np.ndarray,
         full_img: np.ndarray,
-        cam_pos: np.ndarray,
-        cam_quat: np.ndarray,
         near: float,
         far: float,
     ) -> None:
+        # Points are in the same OpenCV/ROS camera frame used by /student_camera:
+        # x right, y down, z forward. Keeping the cloud under /student_camera
+        # avoids manually reapplying the camera transform and prevents
+        # parent/child double-transform bugs.
         points_c = _points_from_depth(depth_m, k, self.point_stride)
         colors = full_img[:: self.point_stride, :: self.point_stride].reshape(-1, 3)
         finite = np.isfinite(points_c).all(axis=1)
         in_range = finite & (points_c[:, 2] >= max(0.01, near - 0.2)) & (points_c[:, 2] <= far + 0.5)
         points_c = points_c[in_range]
         colors = colors[in_range]
-        rot = _quat_wxyz_to_matrix(cam_quat)
-        points_w = (rot @ points_c.T).T + cam_pos
         if self.point_cloud is None:
             self.point_cloud = self.server.scene.add_point_cloud(
                 "/student_camera/point_cloud",
-                points=points_w,
+                points=points_c,
                 colors=colors,
-                point_size=0.003,
+                point_size=0.007,
             )
         else:
-            self.point_cloud.points = points_w
+            self.point_cloud.points = points_c
             self.point_cloud.colors = colors
 
 
