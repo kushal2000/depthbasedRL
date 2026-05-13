@@ -120,19 +120,35 @@ def _camera_pose_env_frame(env, env_id: int) -> tuple[np.ndarray, np.ndarray]:
     origin = _to_numpy(env.scene.env_origins[env_id]).astype(np.float32)
     data = camera.data
 
-    if hasattr(data, "pos_w"):
-        pos_w = _to_numpy(data.pos_w[env_id]).astype(np.float32)
-    else:
+    if hasattr(env, "_student_camera_current_pos_w") and hasattr(env, "_student_camera_current_quat_wxyz"):
         pos_w = _to_numpy(env._student_camera_current_pos_w[env_id]).astype(np.float32)
+        quat = env._student_camera_current_quat_wxyz[env_id : env_id + 1]
+        convention = str(env.cfg.student_obs.camera_convention).lower()
+        if convention != "ros":
+            from isaaclab.utils.math import convert_camera_frame_orientation_convention
 
-    if hasattr(data, "quat_w_ros"):
+            quat = convert_camera_frame_orientation_convention(quat, origin=convention, target="ros")
+        quat_wxyz = _to_numpy(quat[0]).astype(np.float32)
+    elif hasattr(data, "quat_w_ros"):
+        pos_w = _to_numpy(data.pos_w[env_id]).astype(np.float32)
         quat_wxyz = _to_numpy(data.quat_w_ros[env_id]).astype(np.float32)
     elif hasattr(data, "quat_w_world"):
+        pos_w = _to_numpy(data.pos_w[env_id]).astype(np.float32)
         quat_wxyz = _to_numpy(data.quat_w_world[env_id]).astype(np.float32)
     else:
+        pos_w = _to_numpy(env._student_camera_current_pos_w[env_id]).astype(np.float32)
         quat_wxyz = _to_numpy(env._student_camera_current_quat_wxyz[env_id]).astype(np.float32)
 
     return pos_w - origin, quat_wxyz
+
+
+def _viser_frustum_image(image: np.ndarray) -> np.ndarray:
+    """Convert an image array into Viser's camera-frustum texture orientation."""
+
+    # Viser frustums use the OpenCV +Y-down camera convention, but the texture
+    # plane displays NumPy image row 0 at the bottom. Flip the visual texture
+    # only; policy tensors and point-cloud unprojection keep the original image.
+    return np.ascontiguousarray(np.flipud(image))
 
 
 def _object_urdf_path_for_env(env, env_id: int) -> Path:
@@ -373,7 +389,7 @@ class DepthEvalViser:
 
         self._update_frustum(
             self.full_frustum,
-            image=full_img,
+            image=_viser_frustum_image(full_img),
             k=full_k,
             pos=cam_pos,
             quat=cam_quat,
@@ -381,7 +397,7 @@ class DepthEvalViser:
         )
         self._update_frustum(
             self.policy_frustum,
-            image=policy_img,
+            image=_viser_frustum_image(policy_img),
             k=crop_k,
             pos=cam_pos,
             quat=cam_quat,
