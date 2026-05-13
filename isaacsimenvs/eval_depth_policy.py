@@ -635,6 +635,12 @@ def main() -> None:
     parser.add_argument("--student_checkpoint_strict", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--student_input", choices=("camera", "teacher_obs"), default="camera")
     parser.add_argument("--student_arch", choices=("mono_transformer_recurrent", "mlp_recurrent"), default=None)
+    parser.add_argument(
+        "--student_module_mode",
+        choices=("eval", "train"),
+        default="eval",
+        help="Torch module mode for the student. Use 'train' to reproduce distill_depth.py's online rollout behavior.",
+    )
     parser.add_argument("--policy_source", choices=("student", "teacher"), default="student")
     parser.add_argument("--run_dir", type=Path, default=None)
     parser.add_argument("--num_envs", type=int, default=16)
@@ -836,7 +842,10 @@ def main() -> None:
         )
 
     _load_student_checkpoint(args.student_checkpoint, student, optimizer=None, strict=args.student_checkpoint_strict)
-    student.eval()
+    if args.student_module_mode == "eval":
+        student.eval()
+    else:
+        student.train()
     hidden = student.initial_state(inner.num_envs, inner.device)
     wandb_run = _init_wandb(args, run_dir)
 
