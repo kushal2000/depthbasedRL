@@ -49,6 +49,12 @@ SDK-confirmed opened resolution/FPS and left-camera intrinsics.
 13. `13_student_depth_policy_timing_60hz_nonblocking.sh [checkpoint]`
     Longer 60-second full-node timing run without debug image writes or joint commands.
 
+14. `14_eval_depth_policy_32c_L_defaultcam.sh [checkpoint]`
+    Isaac Sim depth-policy eval for the 32c L-peg checkpoint. It writes
+    `metrics.csv`, `episodes.csv`, `summary.json`, pose-viewer HTML, and depth
+    rollout/debug media. Set `SERVE_VISER=1` to add live viser visualization
+    with camera frustums and point cloud.
+
 Recommended student-policy test order:
 
 1. `01_zed_baseline_60hz_no_preprocess.sh`
@@ -57,6 +63,12 @@ Recommended student-policy test order:
 4. `12_student_depth_policy_save_debug_nonblocking.sh`
 5. `13_student_depth_policy_timing_60hz_nonblocking.sh`
 6. `08_student_depth_policy_publish_1s_nonblocking.sh`
+
+Depth-policy eval examples:
+
+- `bash_scripts/14_eval_depth_policy_32c_L_defaultcam.sh`
+- `SERVE_VISER=1 bash_scripts/14_eval_depth_policy_32c_L_defaultcam.sh`
+- `WANDB=1 NUM_ENVS=64 NUM_COMPLETED_EPISODES=256 bash_scripts/14_eval_depth_policy_32c_L_defaultcam.sh`
 
 The student-policy scripts default to
 `/move/u/tylerlum/github_repos/depthbasedRL/distillation_runs/10_juno_rot6d_medium_noise_camrand20mm2deg_256env_48h/checkpoints/student_latest.pt`
