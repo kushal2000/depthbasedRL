@@ -14,6 +14,7 @@ import math
 import os
 import sys
 import time
+from collections import deque
 from pathlib import Path
 
 import torch
@@ -467,18 +468,27 @@ def _reset_hidden_for_done(hidden: torch.Tensor, dones: torch.Tensor) -> torch.T
     return hidden
 
 
-def _done_success_stats(env, dones: torch.Tensor) -> tuple[float, float, float, int]:
+def _done_success_values(env, dones: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     done = dones.reshape(-1).bool()
-    count = int(done.sum().item())
-    if count == 0:
-        return 0.0, 0.0, 0.0, 0
+    if not done.any():
+        empty = torch.empty(0, dtype=torch.float32)
+        return empty, empty, empty
     successes = env._prev_episode_successes[done].float()
     max_goals = env.prev_episode_env_max_goals[done].clamp_min(1).float()
-    full_success_rate = (successes >= max_goals).float().mean()
+    completion = successes / max_goals
+    full_success = (successes >= max_goals).float()
+    return successes.detach().cpu(), completion.detach().cpu(), full_success.detach().cpu()
+
+
+def _done_success_stats(env, dones: torch.Tensor) -> tuple[float, float, float, int]:
+    successes, completion, full_success = _done_success_values(env, dones)
+    count = int(successes.numel())
+    if count == 0:
+        return 0.0, 0.0, 0.0, 0
     return (
         float(successes.mean().item()),
-        float((successes / max_goals).mean().item()),
-        float(full_success_rate.item()),
+        float(completion.mean().item()),
+        float(full_success.mean().item()),
         count,
     )
 
@@ -698,6 +708,12 @@ def main() -> None:
     parser.add_argument("--num_envs", type=int, default=16)
     parser.add_argument("--num_iters", type=int, default=2000)
     parser.add_argument("--log_interval", type=int, default=100)
+    parser.add_argument(
+        "--rolling_reset_window_size",
+        type=int,
+        default=1000,
+        help="Number of most recent completed episodes to use for rolling reset metrics.",
+    )
     parser.add_argument("--save_interval", type=int, default=1000)
     parser.add_argument("--learning_rate", type=float, default=1e-4)
     parser.add_argument("--action_loss_weight", type=float, default=1.0)
@@ -919,6 +935,7 @@ def main() -> None:
     interval_done_completion = 0.0
     interval_done_full_success = 0.0
     interval_done_count = 0
+    rolling_reset_window = deque(maxlen=max(1, int(args.rolling_reset_window_size)))
     interval_start = time.perf_counter()
 
     for local_step in range(args.num_iters):
@@ -970,12 +987,25 @@ def main() -> None:
 
         obs, reward, dones, infos = teacher.env_step(wrapped, action_for_env)
         hidden = _reset_hidden_for_done(hidden, dones)
-        done_goal_idx, done_completion, done_full_success, done_count = _done_success_stats(inner, dones)
+        done_goal_values, done_completion_values, done_full_success_values = _done_success_values(inner, dones)
+        done_count = int(done_goal_values.numel())
         if done_count:
-            interval_done_goal_idx += done_goal_idx * done_count
-            interval_done_completion += done_completion * done_count
-            interval_done_full_success += done_full_success * done_count
+            interval_done_goal_idx += float(done_goal_values.sum().item())
+            interval_done_completion += float(done_completion_values.sum().item())
+            interval_done_full_success += float(done_full_success_values.sum().item())
             interval_done_count += done_count
+            rolling_reset_window.extend(
+                (
+                    float(goal_idx),
+                    float(completion),
+                    float(full_success),
+                )
+                for goal_idx, completion, full_success in zip(
+                    done_goal_values.tolist(),
+                    done_completion_values.tolist(),
+                    done_full_success_values.tolist(),
+                )
+            )
 
         if (
             args.student_input == "camera"
@@ -1050,6 +1080,15 @@ def main() -> None:
             recent_goal_idx = interval_done_goal_idx / max(interval_done_count, 1)
             recent_completion = interval_done_completion / max(interval_done_count, 1)
             recent_full_success = interval_done_full_success / max(interval_done_count, 1)
+            rolling_count = len(rolling_reset_window)
+            if rolling_count:
+                rolling_goal_idx = sum(item[0] for item in rolling_reset_window) / rolling_count
+                rolling_completion = sum(item[1] for item in rolling_reset_window) / rolling_count
+                rolling_full_success = sum(item[2] for item in rolling_reset_window) / rolling_count
+            else:
+                rolling_goal_idx = 0.0
+                rolling_completion = 0.0
+                rolling_full_success = 0.0
             row = {
                 "step": step,
                 "mode": args.mode,
@@ -1068,12 +1107,18 @@ def main() -> None:
                 "recent_reset_goal_completion_ratio_avg": recent_completion,
                 "recent_reset_full_success_rate": recent_full_success,
                 "recent_reset_count": interval_done_count,
+                "rolling_reset_goal_idx_avg": rolling_goal_idx,
+                "rolling_reset_goal_completion_ratio_avg": rolling_completion,
+                "rolling_reset_full_success_rate": rolling_full_success,
+                "rolling_reset_count": rolling_count,
+                "rolling_reset_window_size": int(args.rolling_reset_window_size),
                 "env_steps_per_s": inner.num_envs * interval_step_count / elapsed,
             }
             print(
                 "[distill_depth] "
                 f"step={step} mode={args.mode} current_goal_idx={current_goal_idx:.2f} "
                 f"recent_reset_goal_idx={recent_goal_idx:.2f} recent_reset_count={interval_done_count} "
+                f"rolling_reset_goal_idx={rolling_goal_idx:.2f} rolling_reset_count={rolling_count} "
                 f"action_rmse={row['action_rmse']:.4f} aux_pos_rmse_cm={100.0 * row['aux_object_pos_rmse_m']:.2f} "
                 f"aux_kp_rmse_cm={100.0 * row['aux_object_keypoint_rmse_m']:.2f}",
                 flush=True,

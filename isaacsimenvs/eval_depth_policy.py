@@ -17,6 +17,7 @@ import os
 import random
 import sys
 import time
+from collections import deque
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -651,6 +652,12 @@ def main() -> None:
         action="store_true",
         help="Record only the first completed episode from each initial env and stop after all envs finish once.",
     )
+    parser.add_argument(
+        "--rolling_reset_window_size",
+        type=int,
+        default=1000,
+        help="Number of most recent completed episodes to use for rolling reset metrics.",
+    )
     parser.add_argument("--log_interval", type=int, default=100)
     parser.add_argument(
         "--aux_pose_mode",
@@ -743,7 +750,7 @@ def main() -> None:
         _capture_depth_rollout_frame,
         _capture_viewer_if_needed,
         _compute_aux_losses,
-        _done_success_stats,
+        _done_success_values,
         _init_wandb,
         _load_env_cfg,
         _load_student_checkpoint,
@@ -889,6 +896,7 @@ def main() -> None:
     interval_done_completion = 0.0
     interval_done_full_success = 0.0
     interval_done_count = 0
+    rolling_reset_window = deque(maxlen=max(1, int(args.rolling_reset_window_size)))
     interval_start = time.perf_counter()
     last_step = 0
 
@@ -906,6 +914,7 @@ def main() -> None:
 
         episode_records.clear()
         first_episode_recorded.zero_()
+        rolling_reset_window.clear()
         interval_action_loss = 0.0
         interval_aux_loss = 0.0
         interval_aux_pos_loss = 0.0
@@ -1067,12 +1076,25 @@ def main() -> None:
                 episode_lengths[done_mask] = 0
                 _refresh_episode_context(inner, episode_context, done_mask.nonzero(as_tuple=False).squeeze(-1))
 
-            done_goal_idx, done_completion, done_full_success, done_count = _done_success_stats(inner, record_dones)
+            done_goal_values, done_completion_values, done_full_success_values = _done_success_values(inner, record_dones)
+            done_count = int(done_goal_values.numel())
             if done_count:
-                interval_done_goal_idx += done_goal_idx * done_count
-                interval_done_completion += done_completion * done_count
-                interval_done_full_success += done_full_success * done_count
+                interval_done_goal_idx += float(done_goal_values.sum().item())
+                interval_done_completion += float(done_completion_values.sum().item())
+                interval_done_full_success += float(done_full_success_values.sum().item())
                 interval_done_count += done_count
+                rolling_reset_window.extend(
+                    (
+                        float(goal_idx),
+                        float(completion),
+                        float(full_success),
+                    )
+                    for goal_idx, completion, full_success in zip(
+                        done_goal_values.tolist(),
+                        done_completion_values.tolist(),
+                        done_full_success_values.tolist(),
+                    )
+                )
 
             interval_action_loss += float(action_loss.mean().detach().cpu().item())
             interval_aux_loss += float(aux_loss.mean().detach().cpu().item())
@@ -1090,6 +1112,15 @@ def main() -> None:
                 recent_goal_idx = interval_done_goal_idx / max(interval_done_count, 1)
                 recent_completion = interval_done_completion / max(interval_done_count, 1)
                 recent_full_success = interval_done_full_success / max(interval_done_count, 1)
+                rolling_count = len(rolling_reset_window)
+                if rolling_count:
+                    rolling_goal_idx = sum(item[0] for item in rolling_reset_window) / rolling_count
+                    rolling_completion = sum(item[1] for item in rolling_reset_window) / rolling_count
+                    rolling_full_success = sum(item[2] for item in rolling_reset_window) / rolling_count
+                else:
+                    rolling_goal_idx = 0.0
+                    rolling_completion = 0.0
+                    rolling_full_success = 0.0
                 completed_summary = _summary(episode_records, current_goal_idx, current_completion)
                 row = {
                     "step": step,
@@ -1110,6 +1141,11 @@ def main() -> None:
                     "recent_reset_goal_completion_ratio_avg": recent_completion,
                     "recent_reset_full_success_rate": recent_full_success,
                     "recent_reset_count": interval_done_count,
+                    "rolling_reset_goal_idx_avg": rolling_goal_idx,
+                    "rolling_reset_goal_completion_ratio_avg": rolling_completion,
+                    "rolling_reset_full_success_rate": rolling_full_success,
+                    "rolling_reset_count": rolling_count,
+                    "rolling_reset_window_size": int(args.rolling_reset_window_size),
                     "completed_episode_count": completed_summary["completed_episode_count"],
                     "completed_goal_idx_avg": completed_summary["completed_goal_idx_avg"],
                     "completed_goal_completion_ratio_avg": completed_summary[
@@ -1122,6 +1158,7 @@ def main() -> None:
                     "[eval_depth_policy] "
                     f"step={step} completed={len(episode_records)} "
                     f"current_goal_idx={current_goal_idx:.3f} recent_reset_goal_idx={recent_goal_idx:.3f} "
+                    f"rolling_reset_goal_idx={rolling_goal_idx:.3f} "
                     f"completed_goal_idx={row['completed_goal_idx_avg']:.3f} "
                     f"full_success={row['completed_full_success_rate']:.3f} "
                     f"action_rmse={row['action_rmse']:.4f}",
