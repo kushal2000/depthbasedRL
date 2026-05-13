@@ -646,6 +646,11 @@ def main() -> None:
     parser.add_argument("--num_envs", type=int, default=16)
     parser.add_argument("--num_steps", type=int, default=2000)
     parser.add_argument("--num_completed_episodes", type=int, default=0)
+    parser.add_argument(
+        "--one_episode_per_env",
+        action="store_true",
+        help="Record only the first completed episode from each initial env and stop after all envs finish once.",
+    )
     parser.add_argument("--log_interval", type=int, default=100)
     parser.add_argument(
         "--aux_pose_mode",
@@ -873,6 +878,7 @@ def main() -> None:
     depth_rollout_video_frames: list = []
     episode_lengths = torch.zeros(inner.num_envs, dtype=torch.long, device=inner.device)
     episode_context = _make_episode_context(inner)
+    first_episode_recorded = torch.zeros(inner.num_envs, dtype=torch.bool, device=inner.device)
     episode_records: list[EpisodeRecord] = []
     interval_action_loss = 0.0
     interval_aux_loss = 0.0
@@ -899,6 +905,7 @@ def main() -> None:
         nonlocal interval_start
 
         episode_records.clear()
+        first_episode_recorded.zero_()
         interval_action_loss = 0.0
         interval_aux_loss = 0.0
         interval_aux_pos_loss = 0.0
@@ -1038,21 +1045,29 @@ def main() -> None:
             obs, _, dones, _ = teacher.env_step(wrapped, action_for_env)
             hidden = _reset_hidden_for_done(hidden, dones)
 
+            done_mask = dones.reshape(-1).bool()
+            if args.one_episode_per_env:
+                record_done_mask = done_mask & ~first_episode_recorded
+                record_dones = record_done_mask.reshape_as(dones)
+            else:
+                record_done_mask = done_mask
+                record_dones = dones
             new_records = _episode_records_for_dones(
                 env=inner,
-                dones=dones,
+                dones=record_dones,
                 step=step,
                 episode_lengths=episode_lengths,
                 episode_context=episode_context,
                 start_index=len(episode_records),
             )
             episode_records.extend(new_records)
-            done_mask = dones.reshape(-1).bool()
+            if args.one_episode_per_env and record_done_mask.any():
+                first_episode_recorded[record_done_mask] = True
             if done_mask.any():
                 episode_lengths[done_mask] = 0
                 _refresh_episode_context(inner, episode_context, done_mask.nonzero(as_tuple=False).squeeze(-1))
 
-            done_goal_idx, done_completion, done_full_success, done_count = _done_success_stats(inner, dones)
+            done_goal_idx, done_completion, done_full_success, done_count = _done_success_stats(inner, record_dones)
             if done_count:
                 interval_done_goal_idx += done_goal_idx * done_count
                 interval_done_completion += done_completion * done_count
@@ -1130,6 +1145,9 @@ def main() -> None:
                     flush=True,
                 )
                 break
+            if args.one_episode_per_env and bool(first_episode_recorded.all().item()):
+                print("[eval_depth_policy] recorded one episode for every env", flush=True)
+                break
         completed_ok = True
 
     finally:
@@ -1167,6 +1185,7 @@ def main() -> None:
                 "policy_source": args.policy_source,
                 "num_envs": int(args.num_envs),
                 "num_steps_requested": int(args.num_steps),
+                "one_episode_per_env": bool(args.one_episode_per_env),
                 "depth_noise_profile": env_cfg.student_obs.depth_noise_profile,
                 "depth_noise_strength": float(env_cfg.student_obs.depth_noise_strength),
                 "student_camera_preset": args.student_camera_preset,
