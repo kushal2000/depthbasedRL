@@ -2,12 +2,12 @@
 
 Run these from anywhere; each script changes to the repository root first.
 
-ZED defaults for these scripts and the student policy node are `HD720 @ 60 Hz`
-with `NEURAL` depth and SDK retrieval directly at `160x90`. This is the
-recommended deployment default because the policy downsamples/crops heavily and
-fresh depth matters more than HD1080 source pixels. Use `HD1080 @ 30 Hz` only as
-a quality comparison or if HD720/60 is unstable. The scripts print the
-SDK-confirmed opened resolution/FPS and left-camera intrinsics.
+ZED defaults for the student policy node are `HD1080 @ 30 Hz` with `NEURAL`
+depth and SDK retrieval directly at `160x90`. This is the deployment default
+because it has looked more stable in real hardware testing. The standalone ZED
+timing/debug scripts are still configurable and may default to faster diagnostic
+modes. The scripts print the SDK-confirmed opened resolution/FPS and left-camera
+intrinsics.
 
 1. `01_zed_baseline_60hz_no_preprocess.sh`
    Baseline producer/consumer test at 60 Hz with no depth preprocessing.
