@@ -55,6 +55,27 @@ SDK-confirmed opened resolution/FPS and left-camera intrinsics.
     rollout/debug media. Set `SERVE_VISER=1` to add live viser visualization
     with camera frustums and point cloud.
 
+20. `20_student_depth_32c_dry_run_nonblocking.sh [checkpoint]`
+    Full 32c student policy dry run. Publishes object pose, but does not publish joint commands.
+
+21. `21_student_depth_32c_save_debug_nonblocking.sh [checkpoint]`
+    Same 32c dry run, plus raw/resized/windowed/cropped depth PNG/NPZ/mp4 debug output.
+
+22. `22_student_depth_32c_timing_60hz_nonblocking.sh [checkpoint]`
+    Longer 32c timing run without depth-video writes or joint commands.
+
+23. `23_student_depth_32c_warmup_hold_publish_nonblocking.sh [checkpoint]`
+    Publishes current sensed joint positions as hold targets during warmup only, then runs with policy joint commands disabled.
+
+24. `24_student_depth_32c_publish_0p25s_nonblocking.sh [checkpoint]`
+    Publishes 32c policy joint targets for 0.25 seconds, then keeps running without publishing.
+
+25. `25_student_depth_32c_publish_1s_nonblocking.sh [checkpoint]`
+    Publishes 32c policy joint targets for 1 second, then keeps running without publishing.
+
+26. `26_student_depth_32c_publish_continuous_nonblocking.sh [checkpoint]`
+    Publishes 32c policy joint targets continuously until Ctrl-C.
+
 Recommended student-policy test order:
 
 1. `01_zed_baseline_60hz_no_preprocess.sh`
@@ -63,6 +84,24 @@ Recommended student-policy test order:
 4. `12_student_depth_policy_save_debug_nonblocking.sh`
 5. `13_student_depth_policy_timing_60hz_nonblocking.sh`
 6. `08_student_depth_policy_publish_1s_nonblocking.sh`
+
+Recommended 32c real-world rollout order, progressively allowing more output:
+
+1. `20_student_depth_32c_dry_run_nonblocking.sh`
+2. `21_student_depth_32c_save_debug_nonblocking.sh`
+3. `22_student_depth_32c_timing_60hz_nonblocking.sh`
+4. `23_student_depth_32c_warmup_hold_publish_nonblocking.sh`
+5. `24_student_depth_32c_publish_0p25s_nonblocking.sh`
+6. `25_student_depth_32c_publish_1s_nonblocking.sh`
+7. `26_student_depth_32c_publish_continuous_nonblocking.sh`
+
+The `20+` scripts default to:
+
+`/move/u/tylerlum/github_repos/depthbasedRL/distillation_runs/32c_juno_a5000_L_defaultcam_q1_medium_noise_camrand20mm2deg/checkpoints/student_best.pt`
+
+The policy-publishing scripts default to `MAX_ARM_TARGET_DELTA_DEG=15`, which
+blocks publishing if any arm target is more than 15 degrees from the sensed
+current arm joint position. Override with `MAX_ARM_TARGET_DELTA_DEG=...`.
 
 Depth-policy eval examples:
 
@@ -81,6 +120,8 @@ Useful env overrides:
 - `DEBUG_DIR=./my_depth_debug bash_scripts/12_student_depth_policy_save_debug_nonblocking.sh`
 - `PUBLISH_DURATION_S=3 bash_scripts/08_student_depth_policy_publish_1s_nonblocking.sh`
 - `PUBLISH_DURATION_S=-1 bash_scripts/08_student_depth_policy_publish_1s_nonblocking.sh`
+- `PUBLISH_DURATION_S=0.5 bash_scripts/24_student_depth_32c_publish_0p25s_nonblocking.sh`
+- `MAX_ARM_TARGET_DELTA_DEG=10 bash_scripts/25_student_depth_32c_publish_1s_nonblocking.sh`
 
 HD1080 comparison example:
 
