@@ -447,6 +447,121 @@ def _compute_aux_losses(env, aux: dict[str, torch.Tensor], args) -> tuple[torch.
     }
 
 
+def _clone_aux_targets_from_env(env, args) -> dict[str, torch.Tensor]:
+    """Snapshot aux supervision targets for replaying a collected on-policy chunk."""
+
+    if args.aux_pose_mode == "none":
+        return {}
+    targets = {"object_pos": _object_pos_env_frame(env).detach().clone()}
+    if args.aux_pose_mode == "rot6d_keypoints":
+        targets["keypoint_offsets"] = _object_keypoint_offsets(env).detach().clone()
+        targets["object_keypoints"] = _object_keypoints_env_frame(env).detach().clone()
+    return targets
+
+
+def _compute_aux_losses_from_targets(
+    aux: dict[str, torch.Tensor],
+    targets: dict[str, torch.Tensor],
+    args,
+    *,
+    batch_size: int,
+    device: torch.device,
+) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
+    """Compute aux losses against stored targets instead of the live env state."""
+
+    zero = torch.zeros(batch_size, device=device)
+    if args.aux_pose_mode == "none":
+        return zero, {"pos_loss": zero, "keypoint_loss": zero}
+
+    pred_pos = aux["object_pos"]
+    target_pos = targets["object_pos"]
+    pos_loss = F.mse_loss(pred_pos, target_pos, reduction="none").mean(dim=1)
+    aux_loss = args.aux_object_pos_weight * pos_loss
+    keypoint_loss = zero
+
+    if args.aux_pose_mode == "rot6d_keypoints":
+        rot_matrix = _rot6d_to_matrix(aux["object_rot6d"])
+        pred_keypoints = _transform_keypoints(pred_pos, rot_matrix, targets["keypoint_offsets"])
+        keypoint_loss = F.mse_loss(pred_keypoints, targets["object_keypoints"], reduction="none").mean(dim=(1, 2))
+        aux_loss = aux_loss + args.aux_object_keypoint_weight * keypoint_loss
+    elif args.aux_pose_mode != "position":
+        raise ValueError(f"Unsupported aux_pose_mode: {args.aux_pose_mode!r}")
+
+    return aux_loss, {"pos_loss": pos_loss, "keypoint_loss": keypoint_loss}
+
+
+def _train_extra_epochs_on_replay_chunk(
+    *,
+    student,
+    optimizer,
+    replay_chunk: list[dict[str, torch.Tensor | dict[str, torch.Tensor]]],
+    args,
+    student_input: str,
+    device: torch.device,
+) -> int:
+    """Run extra supervised minibatch epochs over the collected on-policy chunk.
+
+    The live rollout still uses the student unchanged for ``optimizer_update_interval`` steps.
+    Extra epochs are only replayed after that chunk has been collected and the first online
+    gradient update has been applied.
+    """
+
+    extra_epochs = int(args.optimizer_epochs_per_update) - 1
+    if extra_epochs <= 0 or not replay_chunk:
+        return 0
+
+    hidden = torch.cat([item["hidden"] for item in replay_chunk], dim=0)
+    teacher_action = torch.cat([item["teacher_action"] for item in replay_chunk], dim=0)
+    aux_targets: dict[str, torch.Tensor] = {}
+    if args.aux_pose_mode != "none":
+        for key in replay_chunk[0]["aux_targets"].keys():
+            aux_targets[key] = torch.cat([item["aux_targets"][key] for item in replay_chunk], dim=0)
+
+    if student_input == "teacher_obs":
+        teacher_obs = torch.cat([item["teacher_obs"] for item in replay_chunk], dim=0)
+        image = None
+        proprio = None
+    else:
+        image = torch.cat([item["image"] for item in replay_chunk], dim=0)
+        proprio = torch.cat([item["proprio"] for item in replay_chunk], dim=0)
+        teacher_obs = None
+
+    num_samples = int(teacher_action.shape[0])
+    minibatch_size = int(args.optimizer_minibatch_size)
+    if minibatch_size <= 0:
+        minibatch_size = num_samples
+    minibatch_size = max(1, min(minibatch_size, num_samples))
+
+    optimizer_steps = 0
+    for _ in range(extra_epochs):
+        perm = torch.randperm(num_samples, device=device)
+        for start in range(0, num_samples, minibatch_size):
+            idx = perm[start : start + minibatch_size]
+            if student_input == "teacher_obs":
+                student_out, _ = student(teacher_obs[idx], hidden[idx])
+            else:
+                student_out, _ = student(image[idx], proprio[idx], hidden[idx])
+
+            action_loss = F.mse_loss(student_out.action, teacher_action[idx], reduction="none").mean(dim=1)
+            targets_mb = {key: value[idx] for key, value in aux_targets.items()}
+            aux_loss, _ = _compute_aux_losses_from_targets(
+                student_out.aux,
+                targets_mb,
+                args,
+                batch_size=int(idx.numel()),
+                device=device,
+            )
+            loss = args.action_loss_weight * action_loss.mean() + aux_loss.mean()
+
+            optimizer.zero_grad(set_to_none=True)
+            loss.backward()
+            torch.nn.utils.clip_grad_norm_(student.parameters(), 1.0)
+            optimizer.step()
+            optimizer_steps += 1
+
+    return optimizer_steps
+
+
 def _teacher_obs_tensor(obs) -> torch.Tensor:
     """Extract the policy observation tensor passed through the rl_games wrapper."""
     if isinstance(obs, torch.Tensor):
@@ -727,6 +842,39 @@ def main() -> None:
         help="When false, run the train_online code path but skip backward/optimizer updates.",
     )
     parser.add_argument(
+        "--optimizer_update_interval",
+        type=int,
+        default=1,
+        help=(
+            "For train_online, accumulate supervised gradients for this many on-policy env steps before "
+            "optimizer.step(). 1 preserves the original per-step online update behavior."
+        ),
+    )
+    parser.add_argument(
+        "--optimizer_warmup_steps",
+        type=int,
+        default=0,
+        help=(
+            "Number of local env steps to run the student before allowing optimizer updates. "
+            "These warmup states are not learned from unless covered by optimizer_update_interval afterward."
+        ),
+    )
+    parser.add_argument(
+        "--optimizer_epochs_per_update",
+        type=int,
+        default=1,
+        help=(
+            "Total supervised passes over each collected on-policy chunk. 1 preserves the original behavior; "
+            "values >1 replay the chunk for extra minibatch epochs after the first online update."
+        ),
+    )
+    parser.add_argument(
+        "--optimizer_minibatch_size",
+        type=int,
+        default=4096,
+        help="Minibatch size for extra replay epochs. <=0 uses the whole collected chunk.",
+    )
+    parser.add_argument(
         "--aux_pose_mode",
         choices=("none", "position", "rot6d_keypoints"),
         default="position",
@@ -811,6 +959,12 @@ def main() -> None:
 
     AppLauncher.add_app_launcher_args(parser)
     args = parser.parse_args()
+    if args.optimizer_update_interval < 1:
+        raise ValueError("--optimizer_update_interval must be >= 1")
+    if args.optimizer_warmup_steps < 0:
+        raise ValueError("--optimizer_warmup_steps must be >= 0")
+    if args.optimizer_epochs_per_update < 1:
+        raise ValueError("--optimizer_epochs_per_update must be >= 1")
     if args.seed is not None:
         random.seed(args.seed)
         np.random.seed(args.seed)
@@ -952,18 +1106,25 @@ def main() -> None:
     interval_done_completion = 0.0
     interval_done_full_success = 0.0
     interval_done_count = 0
+    interval_optimizer_update_count = 0
+    grad_accum_count = 0
+    replay_chunk: list[dict[str, torch.Tensor | dict[str, torch.Tensor]]] = []
     rolling_reset_window = deque(maxlen=max(1, int(args.rolling_reset_window_size)))
     interval_start = time.perf_counter()
 
     for local_step in range(args.num_iters):
         step = start_step + local_step + 1
+        hidden_input = hidden.detach()
         with torch.no_grad():
             teacher_action = teacher.get_action(obs, is_deterministic=args.deterministic_teacher)
 
         if args.student_input == "teacher_obs":
-            student_out, next_hidden = student(_teacher_obs_tensor(obs), hidden)
+            teacher_obs_input = _teacher_obs_tensor(obs)
+            student_out, next_hidden = student(teacher_obs_input, hidden)
             image = None
+            proprio = None
         else:
+            teacher_obs_input = None
             student_obs = inner.get_student_obs()
             image = student_obs["image"]
             proprio = student_obs["proprio"]
@@ -974,11 +1135,39 @@ def main() -> None:
         loss = args.action_loss_weight * action_loss.mean() + aux_loss.mean()
 
         if args.mode == "train_online":
-            if args.optimizer_step:
-                optimizer.zero_grad()
-                loss.backward()
-                torch.nn.utils.clip_grad_norm_(student.parameters(), 1.0)
-                optimizer.step()
+            allow_optimizer_update = args.optimizer_step and local_step >= args.optimizer_warmup_steps
+            if allow_optimizer_update:
+                if args.optimizer_epochs_per_update > 1:
+                    sample: dict[str, torch.Tensor | dict[str, torch.Tensor]] = {
+                        "hidden": hidden_input.detach().clone(),
+                        "teacher_action": teacher_action.detach().clone(),
+                        "aux_targets": _clone_aux_targets_from_env(inner, args),
+                    }
+                    if args.student_input == "teacher_obs":
+                        sample["teacher_obs"] = teacher_obs_input.detach().clone()
+                    else:
+                        sample["image"] = image.detach().clone()
+                        sample["proprio"] = proprio.detach().clone()
+                    replay_chunk.append(sample)
+                if grad_accum_count == 0:
+                    optimizer.zero_grad(set_to_none=True)
+                # Average gradients over the accumulation window so the effective LR is stable.
+                (loss / args.optimizer_update_interval).backward()
+                grad_accum_count += 1
+                if grad_accum_count >= args.optimizer_update_interval:
+                    torch.nn.utils.clip_grad_norm_(student.parameters(), 1.0)
+                    optimizer.step()
+                    grad_accum_count = 0
+                    interval_optimizer_update_count += 1
+                    interval_optimizer_update_count += _train_extra_epochs_on_replay_chunk(
+                        student=student,
+                        optimizer=optimizer,
+                        replay_chunk=replay_chunk,
+                        args=args,
+                        student_input=args.student_input,
+                        device=inner.device,
+                    )
+                    replay_chunk.clear()
             hidden = next_hidden.detach()
             action_for_env = student_action.detach()
         elif args.mode == "student_eval":
@@ -1111,6 +1300,11 @@ def main() -> None:
                 "step": step,
                 "mode": args.mode,
                 "optimizer_step": bool(args.optimizer_step),
+                "optimizer_update_interval": int(args.optimizer_update_interval),
+                "optimizer_warmup_steps": int(args.optimizer_warmup_steps),
+                "optimizer_epochs_per_update": int(args.optimizer_epochs_per_update),
+                "optimizer_minibatch_size": int(args.optimizer_minibatch_size),
+                "optimizer_updates": interval_optimizer_update_count,
                 "action_loss": interval_action_loss / max(interval_step_count, 1),
                 "action_rmse": math.sqrt(max(interval_action_loss / max(interval_step_count, 1), 0.0)),
                 "aux_loss": interval_aux_loss / max(interval_step_count, 1),
@@ -1152,6 +1346,7 @@ def main() -> None:
             interval_done_completion = 0.0
             interval_done_full_success = 0.0
             interval_done_count = 0
+            interval_optimizer_update_count = 0
             interval_start = time.perf_counter()
 
             selection_metric = recent_completion if row["recent_reset_count"] > 0 else current_completion
@@ -1161,6 +1356,21 @@ def main() -> None:
 
         if args.mode == "train_online" and step % args.save_interval == 0:
             _save_checkpoint(run_dir / "checkpoints" / "student_latest.pt", student, optimizer, step, best_metric)
+
+    if args.mode == "train_online" and args.optimizer_step and grad_accum_count > 0:
+        torch.nn.utils.clip_grad_norm_(student.parameters(), 1.0)
+        optimizer.step()
+        interval_optimizer_update_count += 1
+        _train_extra_epochs_on_replay_chunk(
+            student=student,
+            optimizer=optimizer,
+            replay_chunk=replay_chunk,
+            args=args,
+            student_input=args.student_input,
+            device=inner.device,
+        )
+        replay_chunk.clear()
+        optimizer.zero_grad(set_to_none=True)
 
     if viewer_frames:
         _capture_viewer_if_needed(
