@@ -11,7 +11,7 @@ CHECKPOINT="${1:-${DEFAULT_STUDENT_CHECKPOINT:-${DEFAULT_CHECKPOINT}}}"
 RUN_DURATION_S="${RUN_DURATION_S:--1}"
 PUBLISH_DURATION_S="${PUBLISH_DURATION_S:--1}"
 STATUS_INTERVAL_S="${STATUS_INTERVAL_S:-0.5}"
-MAX_ARM_TARGET_DELTA_DEG="${MAX_ARM_TARGET_DELTA_DEG:-15}"
+MAX_ARM_TARGET_DELTA_DEG="${MAX_ARM_TARGET_DELTA_DEG:-0}"
 
 if [[ ! -f "${CHECKPOINT}" ]]; then
   echo "Checkpoint not found: ${CHECKPOINT}" >&2
@@ -20,7 +20,7 @@ if [[ ! -f "${CHECKPOINT}" ]]; then
 fi
 
 echo "Continuous policy joint command publishing is enabled until Ctrl-C."
-echo "MAX_ARM_TARGET_DELTA_DEG=${MAX_ARM_TARGET_DELTA_DEG}; set <=0 to disable this guard."
+echo "MAX_ARM_TARGET_DELTA_DEG=${MAX_ARM_TARGET_DELTA_DEG}; default 0 disables this extra guard."
 
 python deployment/student_depth_policy_node_nonblocking.py \
   --checkpoint_path "${CHECKPOINT}" \

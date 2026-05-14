@@ -99,9 +99,10 @@ The `20+` scripts default to:
 
 `/move/u/tylerlum/github_repos/depthbasedRL/distillation_runs/32c_juno_a5000_L_defaultcam_q1_medium_noise_camrand20mm2deg/checkpoints/student_best.pt`
 
-The policy-publishing scripts default to `MAX_ARM_TARGET_DELTA_DEG=15`, which
-blocks publishing if any arm target is more than 15 degrees from the sensed
-current arm joint position. Override with `MAX_ARM_TARGET_DELTA_DEG=...`.
+The policy-publishing scripts default to `MAX_ARM_TARGET_DELTA_DEG=0`, matching
+the node default and disabling the extra arm-delta publish guard. Set
+`MAX_ARM_TARGET_DELTA_DEG=...` only if you explicitly want to block unexpectedly
+large arm target jumps during a cautious test.
 
 Depth-policy eval examples:
 
