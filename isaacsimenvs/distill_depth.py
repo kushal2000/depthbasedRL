@@ -12,11 +12,13 @@ import argparse
 import csv
 import math
 import os
+import random
 import sys
 import time
 from collections import deque
 from pathlib import Path
 
+import numpy as np
 import torch
 import torch.nn.functional as F
 import yaml
@@ -717,6 +719,13 @@ def main() -> None:
     parser.add_argument("--save_interval", type=int, default=1000)
     parser.add_argument("--learning_rate", type=float, default=1e-4)
     parser.add_argument("--action_loss_weight", type=float, default=1.0)
+    parser.add_argument("--seed", type=int, default=None)
+    parser.add_argument(
+        "--optimizer_step",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="When false, run the train_online code path but skip backward/optimizer updates.",
+    )
     parser.add_argument(
         "--aux_pose_mode",
         choices=("none", "position", "rot6d_keypoints"),
@@ -802,6 +811,12 @@ def main() -> None:
 
     AppLauncher.add_app_launcher_args(parser)
     args = parser.parse_args()
+    if args.seed is not None:
+        random.seed(args.seed)
+        np.random.seed(args.seed)
+        torch.manual_seed(args.seed)
+        if torch.cuda.is_available():
+            torch.cuda.manual_seed_all(args.seed)
     # Camera jobs need Isaac Lab's camera pipeline enabled. Teacher-observation
     # jobs do not, so keep them on the cheaper non-rendering path.
     args.enable_cameras = args.student_input == "camera"
@@ -819,6 +834,8 @@ def main() -> None:
     print(f"[distill_depth] run_dir={run_dir}", flush=True)
 
     env_cfg = _load_env_cfg(args.task, args.teacher_config, args.num_envs, args.sim_device)
+    if args.seed is not None and hasattr(env_cfg, "seed"):
+        env_cfg.seed = int(args.seed)
     if args.student_input == "teacher_obs":
         env_cfg.student_obs.image_enabled = False
     if args.force_scene_tol_combo is not None:
@@ -957,10 +974,11 @@ def main() -> None:
         loss = args.action_loss_weight * action_loss.mean() + aux_loss.mean()
 
         if args.mode == "train_online":
-            optimizer.zero_grad()
-            loss.backward()
-            torch.nn.utils.clip_grad_norm_(student.parameters(), 1.0)
-            optimizer.step()
+            if args.optimizer_step:
+                optimizer.zero_grad()
+                loss.backward()
+                torch.nn.utils.clip_grad_norm_(student.parameters(), 1.0)
+                optimizer.step()
             hidden = next_hidden.detach()
             action_for_env = student_action.detach()
         elif args.mode == "student_eval":
@@ -1092,6 +1110,7 @@ def main() -> None:
             row = {
                 "step": step,
                 "mode": args.mode,
+                "optimizer_step": bool(args.optimizer_step),
                 "action_loss": interval_action_loss / max(interval_step_count, 1),
                 "action_rmse": math.sqrt(max(interval_action_loss / max(interval_step_count, 1), 0.0)),
                 "aux_loss": interval_aux_loss / max(interval_step_count, 1),

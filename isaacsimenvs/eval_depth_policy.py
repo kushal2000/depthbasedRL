@@ -321,6 +321,11 @@ class DepthEvalViser:
         completed_episodes: int,
         current_goal_idx: float,
         recent_goal_idx: float,
+        recent_full_success: float,
+        recent_count: int,
+        rolling_goal_idx: float,
+        rolling_full_success: float,
+        rolling_count: int,
         policy_depth: torch.Tensor | None,
         predicted_object_pose_wxyz: torch.Tensor | None,
     ) -> None:
@@ -391,7 +396,12 @@ class DepthEvalViser:
         self.status.content = f"**Depth eval:** step={step}, completed={completed_episodes}"
         self.metrics.content = (
             f"**Metrics:** current_goal_idx_avg={current_goal_idx:.3f}, "
-            f"recent_reset_goal_idx_avg={recent_goal_idx:.3f}"
+            f"recent_reset_goal_idx_avg={recent_goal_idx:.3f}, "
+            f"recent_reset_full_success={recent_full_success:.3f}, "
+            f"recent_reset_count={recent_count}, "
+            f"rolling_reset_goal_idx_avg={rolling_goal_idx:.3f}, "
+            f"rolling_reset_full_success={rolling_full_success:.3f}, "
+            f"rolling_reset_count={rolling_count}"
         )
 
     def _update_frustum(self, handle, *, image: np.ndarray, k: np.ndarray, scale: float):
@@ -943,11 +953,24 @@ def main() -> None:
             return
         current_goal_idx = float(inner._successes.float().mean().detach().cpu().item())
         recent_goal_idx = interval_done_goal_idx / max(interval_done_count, 1)
+        recent_full_success = interval_done_full_success / max(interval_done_count, 1)
+        rolling_count = len(rolling_reset_window)
+        if rolling_count:
+            rolling_goal_idx = sum(item[0] for item in rolling_reset_window) / rolling_count
+            rolling_full_success = sum(item[2] for item in rolling_reset_window) / rolling_count
+        else:
+            rolling_goal_idx = 0.0
+            rolling_full_success = 0.0
         viser_viewer.update(
             step=last_step,
             completed_episodes=len(episode_records),
             current_goal_idx=current_goal_idx,
             recent_goal_idx=recent_goal_idx,
+            recent_full_success=recent_full_success,
+            recent_count=interval_done_count,
+            rolling_goal_idx=rolling_goal_idx,
+            rolling_full_success=rolling_full_success,
+            rolling_count=rolling_count,
             policy_depth=policy_depth,
             predicted_object_pose_wxyz=predicted_pose,
         )
@@ -1055,6 +1078,8 @@ def main() -> None:
             hidden = _reset_hidden_for_done(hidden, dones)
 
             done_mask = dones.reshape(-1).bool()
+            if first_episode_recorded.device != done_mask.device:
+                first_episode_recorded = first_episode_recorded.to(done_mask.device)
             if args.one_episode_per_env:
                 record_done_mask = done_mask & ~first_episode_recorded
                 record_dones = record_done_mask.reshape_as(dones)
