@@ -111,7 +111,7 @@ intrinsics.
     By default it runs in deployment mode: one construction reset only, no timeout/fall auto-reset while stepping, robot initialized to `deployment/home_robot.py`'s home pose, L-peg object URDF, object initialized from the deterministic task default/scene pose, and training reset/domain randomization disabled. Use `INITIAL_ROBOT_POSE=env_reset`, `OBJECT_INIT_MODE=env_reset`, `PEG_URDF=assets/urdf/peg_in_hole/peg/peg.urdf`, `DISABLE_ENV_RESETS=0`, or `ZERO_TRAINING_RANDOMIZATION=0` only when intentionally inspecting training-env behavior.
 
 41. `41_visualize_student_depth_rollout_recording.sh [recording.npz]`
-    Opens a recorded student-depth rollout NPZ in Viser. Defaults to `student_depth_ros_topic_publish_recording/2026-05-15_00-16-24_student_depth_rollout.npz` and `OBJECT_NAME=peg_L`.
+    Opens a recorded student-depth rollout NPZ in Viser. Defaults to `student_depth_ros_topic_publish_recording/2026-05-15_00-16-24_student_depth_rollout.npz` and `OBJECT_NAME=peg_L`. Set `FLIP_DEPTH_IMAGE_Y=1` only if inspecting an older recording that appears vertically flipped.
 
 Recommended student-policy test order:
 

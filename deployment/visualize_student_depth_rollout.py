@@ -45,8 +45,9 @@ def _policy_depth_to_rgb(policy_depth: np.ndarray, depth_format: str) -> np.ndar
     return np.repeat(gray[..., None], 3, axis=-1)
 
 
-def _viser_frustum_image(rgb: np.ndarray) -> np.ndarray:
-    return np.flipud(np.asarray(rgb))
+def _viser_frustum_image(rgb: np.ndarray, *, flip_y: bool) -> np.ndarray:
+    image = np.asarray(rgb)
+    return np.flipud(image) if flip_y else image
 
 
 @dataclass
@@ -65,6 +66,8 @@ class Args:
     """Viser camera-frame position, matching visualization_node.py by default."""
     camera_quat_wxyz: tuple[float, float, float, float] = DEFAULT_CAMERA_QUAT_WXYZ
     """Viser camera-frame orientation as wxyz, matching visualization_node.py by default."""
+    flip_depth_image_y: bool = False
+    """Flip the policy depth image vertically before displaying it in the Viser frustum."""
 
 
 def main() -> None:
@@ -148,7 +151,10 @@ def main() -> None:
                 updating_slider_from_code = False
         robot.update_cfg(q[frame_idx])
         robot_cmd.update_cfg(q_targets[frame_idx])
-        depth_frustum.image = _viser_frustum_image(_policy_depth_to_rgb(policy_depth[frame_idx], depth_format))
+        depth_frustum.image = _viser_frustum_image(
+            _policy_depth_to_rgb(policy_depth[frame_idx], depth_format),
+            flip_y=args.flip_depth_image_y,
+        )
         if pred_pos is not None and pred_quat is not None and np.isfinite(pred_pos[frame_idx]).all():
             pred_frame.position = tuple(np.asarray(pred_pos[frame_idx], dtype=np.float64) + np.array([0.0, 0.8, 0.0]))
             quat_xyzw = np.asarray(pred_quat[frame_idx], dtype=np.float64)
