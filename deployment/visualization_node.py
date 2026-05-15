@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import time
 from dataclasses import dataclass
+from pathlib import Path
+import sys
 from typing import Optional
 
 import numpy as np
@@ -15,6 +17,10 @@ from scipy.spatial.transform import Rotation as R
 from sensor_msgs.msg import CameraInfo, Image, JointState
 from termcolor import colored
 from viser.extras import ViserUrdf
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
 
 from dextoolbench.metadata import ALL_OBJECT_NAMES
 from dextoolbench.objects import NAME_TO_OBJECT

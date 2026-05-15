@@ -83,7 +83,9 @@ def _load_npz_depth(path: Path, args: argparse.Namespace) -> np.ndarray:
     array = np.asarray(data[key])
     if array.ndim >= 4:
         array = np.squeeze(array)
-    if key in ("policy_full_depth", "policy_crop") and args.input_units == "auto":
+    if args.input_units == "auto" and key in ("raw_depth_m", "resized_depth_m", "noisy_depth_m"):
+        input_units = "m"
+    elif args.input_units == "auto" and key in ("policy_full_depth", "policy_crop"):
         input_units = "normalized"
     else:
         input_units = args.input_units
