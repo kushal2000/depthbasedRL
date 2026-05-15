@@ -85,6 +85,7 @@ SHARPA_JOINT_STATE_TOPIC = "/sharpa/joint_states"
 IIWA_JOINT_CMD_TOPIC = "/iiwa/joint_cmd"
 SHARPA_JOINT_CMD_TOPIC = "/sharpa/joint_cmd"
 PREDICTED_OBJECT_POSE_TOPIC = "/robot_frame/predicted_object_pose"
+ACTUAL_OBJECT_POSE_TOPIC = "/robot_frame/current_object_pose"
 OBJECT_POSE_FRAME_ID = "robot_frame"
 PREDICTED_POSE_MODEL_FRAME = "env"
 
@@ -244,6 +245,23 @@ def pose_stamped_msg(
     msg.pose.orientation.z = float(quat_xyzw[2])
     msg.pose.orientation.w = float(quat_xyzw[3])
     return msg
+
+
+def pose_stamped_to_pos_quat_xyzw(msg: PoseStamped) -> tuple[np.ndarray, np.ndarray]:
+    pos = np.asarray(
+        [msg.pose.position.x, msg.pose.position.y, msg.pose.position.z],
+        dtype=np.float64,
+    )
+    quat_xyzw = np.asarray(
+        [
+            msg.pose.orientation.x,
+            msg.pose.orientation.y,
+            msg.pose.orientation.z,
+            msg.pose.orientation.w,
+        ],
+        dtype=np.float64,
+    )
+    return pos, quat_xyzw
 
 
 def infer_policy_kwargs(state_dict: dict[str, torch.Tensor]) -> tuple[dict, dict[str, int]]:
@@ -1045,6 +1063,9 @@ class StudentRolloutLogger:
         self.q_targets: list[np.ndarray] = []
         self.prev_targets: list[np.ndarray] = []
         self.published: list[bool] = []
+        self.raw_depth_m: list[np.ndarray] = []
+        self.resized_depth_m: list[np.ndarray] = []
+        self.policy_full_depth: list[np.ndarray] = []
         self.policy_depth: list[np.ndarray] = []
         self.crop_raw_depth_m: list[np.ndarray] = []
         self.depth_stamp_s: list[float] = []
@@ -1053,6 +1074,8 @@ class StudentRolloutLogger:
         self.depth_reused: list[bool] = []
         self.predicted_object_pos: list[np.ndarray] = []
         self.predicted_object_quat_xyzw: list[np.ndarray] = []
+        self.actual_object_pos: list[np.ndarray] = []
+        self.actual_object_quat_xyzw: list[np.ndarray] = []
 
     def _encode_depth(self, depth: np.ndarray) -> np.ndarray:
         if self.depth_format == "none":
@@ -1081,6 +1104,7 @@ class StudentRolloutLogger:
         depth_pub_to_callback_s: float | None,
         depth_reused: bool,
         predicted_pose: tuple[np.ndarray, np.ndarray] | None,
+        actual_pose: tuple[np.ndarray, np.ndarray] | None,
     ) -> None:
         if not self.enabled or step % self.every_n != 0:
             return
@@ -1097,6 +1121,9 @@ class StudentRolloutLogger:
         self.q_targets.append(q_targets.astype(np.float32, copy=True))
         self.prev_targets.append(prev_targets.astype(np.float32, copy=True))
         self.published.append(bool(published))
+        self.raw_depth_m.append(pipeline.raw_depth_m.astype(np.float16, copy=True))
+        self.resized_depth_m.append(pipeline.resized_depth_m.astype(np.float16, copy=True))
+        self.policy_full_depth.append(self._encode_depth(pipeline.policy_full_depth))
         self.policy_depth.append(self._encode_depth(pipeline.policy_crop))
         crop_raw = pipeline.resized_depth_m[CROP_Y0:CROP_Y1, CROP_X0:CROP_X1]
         self.crop_raw_depth_m.append(crop_raw.astype(np.float16, copy=True))
@@ -1113,6 +1140,13 @@ class StudentRolloutLogger:
             pos, quat = predicted_pose
             self.predicted_object_pos.append(pos.astype(np.float32, copy=True))
             self.predicted_object_quat_xyzw.append(quat.astype(np.float32, copy=True))
+        if actual_pose is None:
+            self.actual_object_pos.append(np.full(3, np.nan, dtype=np.float32))
+            self.actual_object_quat_xyzw.append(np.full(4, np.nan, dtype=np.float32))
+        else:
+            pos, quat = actual_pose
+            self.actual_object_pos.append(pos.astype(np.float32, copy=True))
+            self.actual_object_quat_xyzw.append(quat.astype(np.float32, copy=True))
 
     def save(self, *, checkpoint_path: Path | None = None) -> Path | None:
         if not self.enabled or self._saved:
@@ -1137,6 +1171,9 @@ class StudentRolloutLogger:
             q_targets=np.stack(self.q_targets),
             prev_targets=np.stack(self.prev_targets),
             published=np.asarray(self.published, dtype=bool),
+            raw_depth_m=np.stack(self.raw_depth_m),
+            resized_depth_m=np.stack(self.resized_depth_m),
+            policy_full_depth=np.stack(self.policy_full_depth),
             policy_depth=np.stack(self.policy_depth),
             policy_depth_format=np.asarray(self.depth_format),
             crop_raw_depth_m=np.stack(self.crop_raw_depth_m),
@@ -1146,6 +1183,8 @@ class StudentRolloutLogger:
             depth_reused=np.asarray(self.depth_reused, dtype=bool),
             predicted_object_pos=np.stack(self.predicted_object_pos),
             predicted_object_quat_xyzw=np.stack(self.predicted_object_quat_xyzw),
+            actual_object_pos=np.stack(self.actual_object_pos),
+            actual_object_quat_xyzw=np.stack(self.actual_object_quat_xyzw),
             checkpoint_path=np.asarray(str(checkpoint_path) if checkpoint_path is not None else ""),
             depth_near_m=np.asarray(DEPTH_NEAR_M, dtype=np.float32),
             depth_far_m=np.asarray(DEPTH_FAR_M, dtype=np.float32),
@@ -1194,6 +1233,7 @@ class StudentDepthPolicyNode:
         self.prev_targets: Optional[np.ndarray] = None
         self.latest_depth_msg: Optional[Image] = None
         self.latest_depth_receive_time: Optional[rospy.Time] = None
+        self.latest_actual_object_pose: tuple[np.ndarray, np.ndarray] | None = None
         self.zed_camera: Optional[ZedDepthCamera] = None
         self.bridge = None
         self.depth_sub = None
@@ -1236,6 +1276,12 @@ class StudentDepthPolicyNode:
 
         self.iiwa_sub = rospy.Subscriber(args.iiwa_joint_state_topic, JointState, self.iiwa_callback, queue_size=1)
         self.sharpa_sub = rospy.Subscriber(args.sharpa_joint_state_topic, JointState, self.sharpa_callback, queue_size=1)
+        self.actual_object_pose_sub = rospy.Subscriber(
+            args.actual_object_pose_topic,
+            PoseStamped,
+            self.actual_object_pose_callback,
+            queue_size=1,
+        )
         self.predicted_object_pose_pub = rospy.Publisher(args.object_pose_topic, PoseStamped, queue_size=1)
         self.iiwa_cmd_pub = rospy.Publisher(args.iiwa_joint_cmd_topic, JointState, queue_size=1)
         self.sharpa_cmd_pub = rospy.Publisher(args.sharpa_joint_cmd_topic, JointState, queue_size=1)
@@ -1295,6 +1341,8 @@ class StudentDepthPolicyNode:
                 f"Predicted object pose frame conversion: model_frame={args.predicted_pose_model_frame} "
                 f"publish_frame={args.object_pose_frame_id}"
             )
+        if self.rollout_logger.enabled:
+            info(f"Rollout recording actual object pose topic: {args.actual_object_pose_topic}")
 
     def _save_rollout_recording(self) -> None:
         self.rollout_logger.save(checkpoint_path=self.args.checkpoint_path)
@@ -1313,6 +1361,9 @@ class StudentDepthPolicyNode:
 
     def sharpa_callback(self, msg: JointState) -> None:
         self.latest_sharpa_joint_state = msg
+
+    def actual_object_pose_callback(self, msg: PoseStamped) -> None:
+        self.latest_actual_object_pose = pose_stamped_to_pos_quat_xyzw(msg)
 
     def _ready(self) -> bool:
         missing = []
@@ -1817,6 +1868,7 @@ class StudentDepthPolicyNode:
             depth_pub_to_callback_s=self.last_depth_pub_to_callback_s,
             depth_reused=self.depth_frame_reused,
             predicted_pose=predicted_pose,
+            actual_pose=self.latest_actual_object_pose,
         )
         self._print_status(pipeline, action[0], q_targets, prev_targets, published)
         self.loop_count += 1
@@ -1958,6 +2010,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--publish_object_pose", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--object_pose_topic", default=PREDICTED_OBJECT_POSE_TOPIC, help=argparse.SUPPRESS)
+    parser.add_argument("--actual_object_pose_topic", default=ACTUAL_OBJECT_POSE_TOPIC, help=argparse.SUPPRESS)
     parser.add_argument("--object_pose_frame_id", default=OBJECT_POSE_FRAME_ID, help=argparse.SUPPRESS)
     parser.add_argument(
         "--predicted_pose_model_frame",
