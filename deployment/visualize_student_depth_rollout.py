@@ -29,6 +29,10 @@ from isaacgymenvs.utils.utils import get_repo_root_dir
 import peg_in_hole.objects  # noqa: F401 - registers peg_L/L_peg
 from dextoolbench.objects import NAME_TO_OBJECT
 
+DEFAULT_CAMERA_FRAME = "/student_depth_camera"
+DEFAULT_CAMERA_POS_WORLD = (-0.5002050422666431, -0.6385715691360607, 1.0201893282998005)
+DEFAULT_CAMERA_QUAT_WXYZ = (-0.5314110448277682, 0.833810802683381, -0.14035163049226862, 0.051606846267884886)
+
 
 def _policy_depth_to_rgb(policy_depth: np.ndarray, depth_format: str) -> np.ndarray:
     depth = np.asarray(policy_depth)
@@ -57,6 +61,10 @@ class Args:
     """Playback FPS."""
     start_paused: bool = False
     """Start paused instead of playing immediately."""
+    camera_pos_world: tuple[float, float, float] = DEFAULT_CAMERA_POS_WORLD
+    """Viser camera-frame position, matching visualization_node.py by default."""
+    camera_quat_wxyz: tuple[float, float, float, float] = DEFAULT_CAMERA_QUAT_WXYZ
+    """Viser camera-frame orientation as wxyz, matching visualization_node.py by default."""
 
 
 def main() -> None:
@@ -103,9 +111,16 @@ def main() -> None:
     if args.object_name in NAME_TO_OBJECT:
         ViserUrdf(server, NAME_TO_OBJECT[args.object_name].urdf_path, root_node_name="/predicted_object")
 
-    depth_frame = server.scene.add_frame("/policy_depth", position=(0.45, -0.45, 1.0), show_axes=True)
+    server.scene.add_frame(
+        DEFAULT_CAMERA_FRAME,
+        position=tuple(args.camera_pos_world),
+        wxyz=tuple(args.camera_quat_wxyz),
+        show_axes=True,
+        axes_length=0.08,
+        axes_radius=0.002,
+    )
     depth_frustum = server.scene.add_camera_frustum(
-        "/policy_depth/image",
+        f"{DEFAULT_CAMERA_FRAME}/policy_depth",
         fov=0.7,
         aspect=float(policy_depth.shape[2]) / float(policy_depth.shape[1]),
         scale=0.25,
