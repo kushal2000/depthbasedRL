@@ -120,11 +120,17 @@ def main() -> None:
 
     paused = bool(args.start_paused)
     frame_idx = 0
+    updating_slider_from_code = False
 
-    def update(idx: int) -> None:
-        nonlocal frame_idx
+    def update(idx: int, *, sync_slider: bool = True) -> None:
+        nonlocal frame_idx, updating_slider_from_code
         frame_idx = int(np.clip(idx, 0, n - 1))
-        slider.value = frame_idx
+        if sync_slider and int(slider.value) != frame_idx:
+            updating_slider_from_code = True
+            try:
+                slider.value = frame_idx
+            finally:
+                updating_slider_from_code = False
         robot.update_cfg(q[frame_idx])
         robot_cmd.update_cfg(q_targets[frame_idx])
         depth_frustum.image = _viser_frustum_image(_policy_depth_to_rgb(policy_depth[frame_idx], depth_format))
@@ -141,7 +147,9 @@ def main() -> None:
 
     @slider.on_update
     def _(_) -> None:
-        update(int(slider.value))
+        if updating_slider_from_code:
+            return
+        update(int(slider.value), sync_slider=False)
 
     @pause_button.on_click
     def _(_) -> None:

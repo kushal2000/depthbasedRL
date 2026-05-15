@@ -110,6 +110,9 @@ intrinsics.
     IsaacSim ROS source node. It subscribes to joint commands, publishes simulated joint states/ground-truth object pose on `/robot_frame/current_object_pose`, and publishes IsaacSim depth every `DEPTH_EVERY_N` steps.
     By default it runs in deployment mode: one construction reset only, no timeout/fall auto-reset while stepping, robot initialized to `deployment/home_robot.py`'s home pose, L-peg object URDF, object initialized from the deterministic task default/scene pose, and training reset/domain randomization disabled. Use `INITIAL_ROBOT_POSE=env_reset`, `OBJECT_INIT_MODE=env_reset`, `PEG_URDF=assets/urdf/peg_in_hole/peg/peg.urdf`, `DISABLE_ENV_RESETS=0`, or `ZERO_TRAINING_RANDOMIZATION=0` only when intentionally inspecting training-env behavior.
 
+41. `41_visualize_student_depth_rollout_recording.sh [recording.npz]`
+    Opens a recorded student-depth rollout NPZ in Viser. Defaults to `student_depth_ros_topic_publish_recording/2026-05-15_00-16-24_student_depth_rollout.npz` and `OBJECT_NAME=peg_L`.
+
 Recommended student-policy test order:
 
 1. `01_zed_baseline_60hz_no_preprocess.sh`
