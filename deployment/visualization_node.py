@@ -63,6 +63,7 @@ NUM_HAND_JOINTS = 22
 
 BLUE_RGB = (0, 0, 255)
 GREEN_RGBA = (0, 255, 0, 0.5)
+LIGHT_BLUE_RGBA = (80, 200, 255, 0.55)
 BLACK_RGBA = (0, 0, 0, 1.0)
 
 AXES_LENGTH = 0.1
@@ -72,6 +73,8 @@ DEFAULT_DEPTH_FAR_M = 1.10
 DEFAULT_CAMERA_FRAME = "/student_depth_camera"
 DEFAULT_CAMERA_IMAGE_TOPIC = "/zed/zed_node/depth/depth_registered"
 DEFAULT_CAMERA_INFO_TOPIC = "/zed/zed_node/rgb/camera_info"
+DEFAULT_OBJECT_POSE_TOPIC = "/robot_frame/current_object_pose"
+DEFAULT_PREDICTED_OBJECT_POSE_TOPIC = "/robot_frame/predicted_object_pose"
 # Sim default student-camera pose in the world frame. This is only used for
 # optional depth debugging in Viser; object/robot visualization is unchanged.
 DEFAULT_CAMERA_POS_WORLD = (-0.5002050422666431, -0.6385715691360607, 1.0201893282998005)
@@ -178,6 +181,7 @@ class RosSnapshot:
     iiwa_joint_state: Optional[np.ndarray]
     sharpa_joint_state: Optional[np.ndarray]
     object_pose: Optional[np.ndarray]
+    predicted_object_pose: Optional[np.ndarray]
     goal_object_pose: Optional[np.ndarray]
     depth_image_m: Optional[np.ndarray]
     depth_stamp: Optional[rospy.Time]
@@ -191,6 +195,7 @@ class RosSnapshot:
             iiwa_joint_state=None,
             sharpa_joint_state=None,
             object_pose=None,
+            predicted_object_pose=None,
             goal_object_pose=None,
             depth_image_m=None,
             depth_stamp=None,
@@ -231,6 +236,13 @@ class RosSnapshot:
         else:
             object_pose = self.object_pose
 
+        if self.predicted_object_pose is None:
+            warn_every("predicted_object_pose is None", n_seconds=1.0)
+            predicted_object_pose = np.eye(4)
+            predicted_object_pose[:3, 3] = np.zeros(3) + 100  # Far away
+        else:
+            predicted_object_pose = self.predicted_object_pose
+
         if self.goal_object_pose is None:
             warn_every("goal_object_pose is None", n_seconds=1.0)
             goal_object_pose = np.eye(4)
@@ -244,6 +256,7 @@ class RosSnapshot:
             iiwa_joint_state=iiwa_joint_state,
             sharpa_joint_state=sharpa_joint_state,
             object_pose=object_pose,
+            predicted_object_pose=predicted_object_pose,
             goal_object_pose=goal_object_pose,
             depth_image_m=self.depth_image_m,
             depth_stamp=self.depth_stamp,
@@ -298,9 +311,15 @@ class VisualizationNode:
             queue_size=1,
         )
         self.object_pose_sub = rospy.Subscriber(
-            "/robot_frame/current_object_pose",
+            self.args.object_pose_topic,
             PoseStamped,
             self.object_pose_callback,
+            queue_size=1,
+        )
+        self.predicted_object_pose_sub = rospy.Subscriber(
+            self.args.predicted_object_pose_topic,
+            PoseStamped,
+            self.predicted_object_pose_callback,
             queue_size=1,
         )
         self.goal_object_pose_sub = rospy.Subscriber(
@@ -439,6 +458,20 @@ class VisualizationNode:
             root_node_name="/goal_object",
             mesh_color_override=GREEN_RGBA,
         )
+        self.predicted_object_viser = SERVER.scene.add_frame(
+            "/predicted_object",
+            position=FAR_AWAY_OBJECT_POSITION + np.array([0.4, 0.4, 0.4]),
+            wxyz=(1, 0, 0, 0),
+            show_axes=True,
+            axes_length=AXES_LENGTH,
+            axes_radius=AXES_RADIUS,
+        )
+        self.predicted_object_urdf_viser = ViserUrdf(
+            SERVER,
+            object_urdf,
+            root_node_name="/predicted_object",
+            mesh_color_override=LIGHT_BLUE_RGBA,
+        )
 
         # Set the robot to a default pose
         DEFAULT_ARM_Q = np.zeros(NUM_ARM_JOINTS)
@@ -491,6 +524,14 @@ class VisualizationNode:
 
     def object_pose_callback(self, msg: PoseStamped):
         """ "Callback to update the current object pose."""
+        self.ros_snapshot.object_pose = self._pose_stamped_to_matrix(msg)
+
+    def predicted_object_pose_callback(self, msg: PoseStamped):
+        """Callback to update the student-predicted object pose."""
+        self.ros_snapshot.predicted_object_pose = self._pose_stamped_to_matrix(msg)
+
+    @staticmethod
+    def _pose_stamped_to_matrix(msg: PoseStamped) -> np.ndarray:
         msg = msg.pose
         xyz = np.array([msg.position.x, msg.position.y, msg.position.z])
         quat_xyzw = np.array(
@@ -504,7 +545,7 @@ class VisualizationNode:
         latest_pose = np.eye(4)
         latest_pose[:3, 3] = xyz
         latest_pose[:3, :3] = R.from_quat(quat_xyzw).as_matrix()
-        self.ros_snapshot.object_pose = latest_pose
+        return latest_pose
 
     def goal_object_pose_callback(self, msg: Pose):
         """ "Callback to update the goal object pose."""
@@ -583,6 +624,7 @@ class VisualizationNode:
         iiwa_joint_state = ros_snapshot.iiwa_joint_state
         sharpa_joint_state = ros_snapshot.sharpa_joint_state
         object_pose = ros_snapshot.object_pose
+        predicted_object_pose = ros_snapshot.predicted_object_pose
         goal_object_pose = ros_snapshot.goal_object_pose
 
         assert iiwa_joint_cmd is not None
@@ -590,6 +632,7 @@ class VisualizationNode:
         assert iiwa_joint_state is not None
         assert sharpa_joint_state is not None
         assert object_pose is not None
+        assert predicted_object_pose is not None
         assert goal_object_pose is not None
 
         # Command Robot: Set the commanded joint positions
@@ -607,6 +650,14 @@ class VisualizationNode:
         object_quat_xyzw = R.from_matrix(T_W_O[:3, :3]).as_quat()
         self.object_viser.position = object_pos
         self.object_viser.wxyz = object_quat_xyzw[[3, 0, 1, 2]]
+
+        # Update the student-predicted object pose.
+        T_R_P = predicted_object_pose
+        T_W_P = T_W_R @ T_R_P
+        predicted_object_pos = T_W_P[:3, 3]
+        predicted_object_quat_xyzw = R.from_matrix(T_W_P[:3, :3]).as_quat()
+        self.predicted_object_viser.position = predicted_object_pos
+        self.predicted_object_viser.wxyz = predicted_object_quat_xyzw[[3, 0, 1, 2]]
 
         # Update the goal object pose
         # Goal object pose is in camera frame = C frame
@@ -665,6 +716,10 @@ class VisualizationNode:
 class VisualizationNodeArgs:
     object_name: str = "claw_hammer"
     f"""The name of the object to visualize. Options: {", ".join(VISUALIZATION_OBJECT_NAMES)}"""
+    object_pose_topic: str = DEFAULT_OBJECT_POSE_TOPIC
+    """Ground-truth/current object pose topic, usually from IsaacSim or real perception."""
+    predicted_object_pose_topic: str = DEFAULT_PREDICTED_OBJECT_POSE_TOPIC
+    """Student auxiliary predicted object pose topic."""
     load_depth_image: bool = False
     """If true, subscribe to the depth image topic and show it as a Viser camera frustum."""
     load_point_cloud: bool = False

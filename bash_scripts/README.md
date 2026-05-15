@@ -29,7 +29,7 @@ intrinsics.
    Saves raw metric depth arrays plus window/crop PNGs to `./zed_nonblocking_debug`.
 
 7. `07_student_depth_policy_dry_run_nonblocking.sh [checkpoint]`
-   Runs the full nonblocking student policy node for 30 seconds without publishing joint commands. This still publishes the predicted object pose to `/robot_frame/current_object_pose`.
+   Runs the full nonblocking student policy node for 30 seconds without publishing joint commands. This still publishes the predicted object pose to `/robot_frame/predicted_object_pose`.
 
 8. `08_student_depth_policy_publish_1s_nonblocking.sh [checkpoint]`
    Runs the full nonblocking student policy node until Ctrl-C by default and publishes joint targets for `PUBLISH_DURATION_S` seconds. The default is one second.
@@ -56,7 +56,7 @@ intrinsics.
     with camera frustums and point cloud.
 
 20. `20_student_depth_32c_dry_run_nonblocking.sh [checkpoint]`
-    Full 32c student policy dry run. Publishes object pose, but does not publish joint commands.
+    Full 32c student policy dry run. Publishes predicted object pose, but does not publish joint commands.
 
 21. `21_student_depth_32c_save_debug_nonblocking.sh [checkpoint]`
     Same 32c dry run, plus raw/resized/windowed/cropped depth PNG/NPZ/mp4 debug output.
@@ -86,7 +86,7 @@ intrinsics.
     Publishes a fixed or replayed metric depth image on `/zed/zed_node/depth/depth_registered` plus optional CameraInfo. Supports `.npz`, `.npy`, image files, and mp4/avi/mov.
 
 33. `33_depth_debug_student_ros_topic_dry_run.sh [checkpoint]`
-    Runs the student policy against the fake ROS depth topic and fake robot, publishes predicted object pose, does not publish joint commands, and records a rollout NPZ on shutdown.
+    Runs the student policy against the fake ROS depth topic and fake robot, publishes predicted object pose to `/robot_frame/predicted_object_pose`, does not publish joint commands, and records a rollout NPZ on shutdown.
 
 34. `34_depth_debug_student_ros_topic_publish_3s.sh [checkpoint]`
     Same as 33, but publishes joint commands for `PUBLISH_DURATION_S=3` seconds by default.
@@ -107,7 +107,7 @@ intrinsics.
     IsaacSim benchmark with student depth rendered every `DEPTH_EVERY_N` control steps. Default is 4.
 
 40. `40_isaac_depth_ros_node_render_every_4.sh`
-    IsaacSim ROS source node. It subscribes to joint commands, publishes simulated joint states/object pose, and publishes IsaacSim depth every `DEPTH_EVERY_N` steps.
+    IsaacSim ROS source node. It subscribes to joint commands, publishes simulated joint states/ground-truth object pose on `/robot_frame/current_object_pose`, and publishes IsaacSim depth every `DEPTH_EVERY_N` steps.
     By default it runs in deployment mode: one construction reset only, no timeout/fall auto-reset while stepping, robot initialized to `deployment/home_robot.py`'s home pose, object initialized from the deterministic task default/scene pose, and training reset/domain randomization disabled. Use `INITIAL_ROBOT_POSE=env_reset`, `OBJECT_INIT_MODE=env_reset`, `DISABLE_ENV_RESETS=0`, or `ZERO_TRAINING_RANDOMIZATION=0` only when intentionally inspecting training-env behavior.
 
 Recommended student-policy test order:

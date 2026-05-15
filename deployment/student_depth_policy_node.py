@@ -84,7 +84,7 @@ IIWA_JOINT_STATE_TOPIC = "/iiwa/joint_states"
 SHARPA_JOINT_STATE_TOPIC = "/sharpa/joint_states"
 IIWA_JOINT_CMD_TOPIC = "/iiwa/joint_cmd"
 SHARPA_JOINT_CMD_TOPIC = "/sharpa/joint_cmd"
-OBJECT_POSE_TOPIC = "/robot_frame/current_object_pose"
+PREDICTED_OBJECT_POSE_TOPIC = "/robot_frame/predicted_object_pose"
 OBJECT_POSE_FRAME_ID = "robot_frame"
 PREDICTED_POSE_MODEL_FRAME = "env"
 
@@ -1236,7 +1236,7 @@ class StudentDepthPolicyNode:
 
         self.iiwa_sub = rospy.Subscriber(args.iiwa_joint_state_topic, JointState, self.iiwa_callback, queue_size=1)
         self.sharpa_sub = rospy.Subscriber(args.sharpa_joint_state_topic, JointState, self.sharpa_callback, queue_size=1)
-        self.object_pose_pub = rospy.Publisher(args.object_pose_topic, PoseStamped, queue_size=1)
+        self.predicted_object_pose_pub = rospy.Publisher(args.object_pose_topic, PoseStamped, queue_size=1)
         self.iiwa_cmd_pub = rospy.Publisher(args.iiwa_joint_cmd_topic, JointState, queue_size=1)
         self.sharpa_cmd_pub = rospy.Publisher(args.sharpa_joint_cmd_topic, JointState, queue_size=1)
 
@@ -1285,9 +1285,9 @@ class StudentDepthPolicyNode:
             else:
                 info("Joint safety: targets clipped to full URDF limits; arm delta guard is disabled.")
         if "object_rot6d" in self.aux_heads:
-            info(f"Object pose publishing mode: full pose from object_pos + object_rot6d to {args.object_pose_topic}")
+            info(f"Predicted object pose publishing mode: full pose from object_pos + object_rot6d to {args.object_pose_topic}")
         elif "object_pos" in self.aux_heads:
-            info(f"Object pose publishing mode: object_pos with fallback quat {tuple(args.position_only_quat_xyzw)}")
+            info(f"Predicted object pose publishing mode: object_pos with fallback quat {tuple(args.position_only_quat_xyzw)}")
         else:
             warn("Checkpoint has no object_pos aux head; object pose publishing will only warn.")
         if args.publish_object_pose:
@@ -1494,7 +1494,7 @@ class StudentDepthPolicyNode:
             warn_every("Policy checkpoint has no object_pos aux head; cannot publish object pose.", 5.0)
             return
         pos, quat_xyzw = pose
-        self.object_pose_pub.publish(
+        self.predicted_object_pose_pub.publish(
             pose_stamped_msg(
                 pos=pos,
                 quat_xyzw=quat_xyzw,
@@ -1957,7 +1957,7 @@ def parse_args() -> argparse.Namespace:
         help="If non-negative, stop the policy loop after this many seconds after warmup.",
     )
     parser.add_argument("--publish_object_pose", action=argparse.BooleanOptionalAction, default=True)
-    parser.add_argument("--object_pose_topic", default=OBJECT_POSE_TOPIC, help=argparse.SUPPRESS)
+    parser.add_argument("--object_pose_topic", default=PREDICTED_OBJECT_POSE_TOPIC, help=argparse.SUPPRESS)
     parser.add_argument("--object_pose_frame_id", default=OBJECT_POSE_FRAME_ID, help=argparse.SUPPRESS)
     parser.add_argument(
         "--predicted_pose_model_frame",
