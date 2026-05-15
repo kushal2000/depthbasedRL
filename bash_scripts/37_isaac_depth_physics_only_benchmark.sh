@@ -8,6 +8,7 @@ BENCHMARK_WARMUP_STEPS="${BENCHMARK_WARMUP_STEPS:-10}"
 STATUS_INTERVAL_S="${STATUS_INTERVAL_S:-2}"
 INITIAL_ROBOT_POSE="${INITIAL_ROBOT_POSE:-deployment_home}"
 OBJECT_INIT_MODE="${OBJECT_INIT_MODE:-default}"
+PEG_URDF="${PEG_URDF:-assets/urdf/peg_in_hole/peg_L/peg_L.urdf}"
 EXTRA_ARGS=()
 if [[ "${DEPLOYMENT_MODE:-1}" == "0" ]]; then EXTRA_ARGS+=(--no-deployment_mode); fi
 if [[ "${DISABLE_ENV_RESETS:-1}" == "0" ]]; then EXTRA_ARGS+=(--no-disable_env_resets); fi
@@ -23,6 +24,7 @@ if [[ -n "${OBJECT_INIT_ORIENTATION_MODE:-}" ]]; then EXTRA_ARGS+=(--object_init
   --num_steps "${NUM_STEPS}" \
   --initial_robot_pose "${INITIAL_ROBOT_POSE}" \
   --object_init_mode "${OBJECT_INIT_MODE}" \
+  --peg_urdf "${PEG_URDF}" \
   --benchmark_warmup_steps "${BENCHMARK_WARMUP_STEPS}" \
   --status_interval_s "${STATUS_INTERVAL_S}" \
   --headless \
