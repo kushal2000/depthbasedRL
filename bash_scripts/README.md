@@ -195,6 +195,7 @@ IsaacSim deployment-mode overrides:
 - `OBJECT_INIT_MODE=default` is the default. For peg-in-hole this uses the scene-file start pose with no added init noise and scene orientation; for generic SimToolReal it uses the deterministic table-centered object pose.
 - `OBJECT_INIT_MODE=fixed OBJECT_INIT_POSE_WXYZ="0 0 0.63 1 0 0 0" ...` writes a fixed env-local IsaacSim object pose after the construction reset.
 - `OBJECT_INIT_MODE=randomized OBJECT_INIT_POSITION_NOISE_M="0.01 0.01 0" OBJECT_INIT_YAW_NOISE_DEG=5 ...` enables startup object init randomization. Because deployment mode disables auto-resets, this is sampled at the construction reset and then stays continuous.
+- `DEPLOYMENT_MODE=0` restores the pre-deployment-mode node path from these wrappers.
 - `DISABLE_ENV_RESETS=0` allows the training env to auto-reset on timeout/fall/hand-far/max-success. Leave it unset for fake-real deployment simulation.
 - `ZERO_TRAINING_RANDOMIZATION=0` restores training-style reset/domain-randomization settings from the teacher config. Leave it unset for fake-real deployment simulation.
 

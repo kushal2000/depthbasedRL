@@ -9,6 +9,7 @@ STATUS_INTERVAL_S="${STATUS_INTERVAL_S:-2}"
 INITIAL_ROBOT_POSE="${INITIAL_ROBOT_POSE:-deployment_home}"
 OBJECT_INIT_MODE="${OBJECT_INIT_MODE:-default}"
 EXTRA_ARGS=()
+if [[ "${DEPLOYMENT_MODE:-1}" == "0" ]]; then EXTRA_ARGS+=(--no-deployment_mode); fi
 if [[ "${DISABLE_ENV_RESETS:-1}" == "0" ]]; then EXTRA_ARGS+=(--no-disable_env_resets); fi
 if [[ "${ZERO_TRAINING_RANDOMIZATION:-1}" == "0" ]]; then EXTRA_ARGS+=(--no-zero_training_randomization); fi
 if [[ -n "${OBJECT_INIT_POSE_WXYZ:-}" ]]; then EXTRA_ARGS+=(--object_init_pose_wxyz ${OBJECT_INIT_POSE_WXYZ}); fi
