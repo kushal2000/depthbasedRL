@@ -35,7 +35,7 @@ if str(REPO_ROOT) not in sys.path:
 
 DEFAULT_TEACHER_DIR = Path("/juno/u/kedia/depthbasedRL/train_dir/Apr28/isaacSim_PegInHole")
 DEFAULT_FFS_REPO_ROOT = Path("/home/tylerlum/github_repos/Fast-FoundationStereo")
-DEFAULT_FFS_MODEL = DEFAULT_FFS_REPO_ROOT / "weights/20-30-48/model_best_bp2_serialize.pth"
+DEFAULT_FFS_MODEL = DEFAULT_FFS_REPO_ROOT / "weights/23-36-37/model_best_bp2_serialize.pth"
 DEPTH_TOPIC = "/zed/zed_node/depth/depth_registered"
 CAMERA_INFO_TOPIC = "/zed/zed_node/rgb/camera_info"
 IIWA_JOINT_STATE_TOPIC = "/iiwa/joint_states"
@@ -91,6 +91,15 @@ def _student_camera_k(cfg) -> np.ndarray:
         [[fx, 0.0, (width - 1.0) * 0.5], [0.0, fy, (height - 1.0) * 0.5], [0.0, 0.0, 1.0]],
         dtype=np.float32,
     )
+
+
+def _scale_camera_k(camera_k: np.ndarray, *, x_scale: float, y_scale: float) -> np.ndarray:
+    scaled = np.asarray(camera_k, dtype=np.float32).copy()
+    scaled[0, 0] *= float(x_scale)
+    scaled[0, 2] *= float(x_scale)
+    scaled[1, 1] *= float(y_scale)
+    scaled[1, 2] *= float(y_scale)
+    return scaled
 
 
 def _default_object_pose_wxyz(env_cfg) -> tuple[float, float, float, float, float, float, float]:
@@ -276,9 +285,21 @@ class IsaacDepthEnvNode:
         self.loop_ms = deque(maxlen=512)
         self.last_status_time = time.time()
         self.camera_k = _student_camera_k(inner.cfg.student_obs) if args.enable_depth else None
+        self.publish_camera_k = self.camera_k
+        if (
+            self.camera_k is not None
+            and args.depth_render_backend == "ffs_stereo"
+            and args.ffs_downsample_to_policy_res
+        ):
+            self.publish_camera_k = _scale_camera_k(
+                self.camera_k,
+                x_scale=float(args.ffs_publish_width) / float(args.ffs_stereo_width),
+                y_scale=float(args.ffs_publish_height) / float(args.ffs_stereo_height),
+            )
         self.right_camera = None
         self.ffs_depth = None
         self.ffs_debug_dir = Path(args.ffs_debug_dir) if args.ffs_debug_dir else None
+        self.depth_compare_dir = Path(args.depth_compare_dir) if args.depth_compare_dir else None
 
         if args.enable_depth and args.depth_render_backend == "ffs_stereo":
             if inner.num_envs != 1:
@@ -297,6 +318,7 @@ class IsaacDepthEnvNode:
                 baseline_m=args.ffs_baseline_m,
                 valid_iters=args.ffs_valid_iters,
                 max_disp=args.ffs_max_disp,
+                engine_dir=args.ffs_engine_dir,
                 device=str(args.ffs_device),
                 hiera=args.ffs_hiera,
                 optimize_build_volume=args.ffs_optimize_build_volume,
@@ -486,6 +508,31 @@ class IsaacDepthEnvNode:
         right_rgb = _to_numpy(right[0, ..., :3]).astype(np.uint8, copy=False)
         depth_m = self.ffs_depth.infer_depth(left_rgb, right_rgb, fx_px=float(self.camera_k[0, 0]))
 
+        isaac_depth_m = None
+        if self.depth_compare_dir is not None:
+            direct_depth = self.inner.student_camera.data.output.get("distance_to_image_plane")
+            if direct_depth is None:
+                raise RuntimeError(
+                    "--depth_compare_dir requires the left student camera to render distance_to_image_plane. "
+                    "This should be enabled automatically for FFS comparison runs."
+                )
+            if direct_depth.dim() == 4 and direct_depth.shape[-1] == 1:
+                direct_depth = direct_depth[0, ..., 0]
+            elif direct_depth.dim() == 3:
+                direct_depth = direct_depth[0]
+            else:
+                raise RuntimeError(f"Unsupported direct Isaac depth shape: {tuple(direct_depth.shape)}")
+            isaac_depth_m = _to_numpy(direct_depth).astype(np.float32, copy=False)
+            compare_every = int(self.args.depth_compare_every_n)
+            if compare_every > 0 and self.step_idx % compare_every == 0:
+                self._write_depth_compare_debug(
+                    left_rgb=left_rgb,
+                    right_rgb=right_rgb,
+                    isaac_depth_m=isaac_depth_m,
+                    ffs_depth_m=depth_m,
+                    disparity=self.ffs_depth.last_disparity,
+                )
+
         debug_every = int(self.args.ffs_debug_every_n)
         if self.ffs_debug_dir is not None and debug_every > 0 and self.step_idx % debug_every == 0:
             from deployment.isaac.fast_foundation_stereo_backend import write_stereo_debug
@@ -498,7 +545,57 @@ class IsaacDepthEnvNode:
                 disparity=self.ffs_depth.last_disparity,
                 depth_m=depth_m,
             )
+        if self.args.ffs_downsample_to_policy_res:
+            import cv2
+
+            depth_m = cv2.resize(
+                depth_m,
+                (int(self.args.ffs_publish_width), int(self.args.ffs_publish_height)),
+                interpolation=cv2.INTER_AREA,
+            )
         return depth_m.astype(np.float32, copy=False)
+
+    def _write_depth_compare_debug(
+        self,
+        *,
+        left_rgb: np.ndarray,
+        right_rgb: np.ndarray,
+        isaac_depth_m: np.ndarray,
+        ffs_depth_m: np.ndarray,
+        disparity: np.ndarray | None,
+    ) -> None:
+        if self.depth_compare_dir is None:
+            return
+        from deployment.isaac.fast_foundation_stereo_backend import _colorize
+
+        import cv2
+
+        out_dir = self.depth_compare_dir
+        out_dir.mkdir(parents=True, exist_ok=True)
+        prefix = out_dir / f"step_{self.step_idx:08d}"
+        diff_m = ffs_depth_m.astype(np.float32) - isaac_depth_m.astype(np.float32)
+        np.savez_compressed(
+            f"{prefix}.npz",
+            left_rgb=left_rgb,
+            right_rgb=right_rgb,
+            isaac_depth_m=isaac_depth_m,
+            ffs_depth_m=ffs_depth_m,
+            diff_m=diff_m,
+            abs_diff_m=np.abs(diff_m),
+            disparity=disparity,
+            camera_k=self.camera_k,
+        )
+        isaac_vis = _colorize(isaac_depth_m, low=0.4, high=1.2)
+        ffs_vis = _colorize(ffs_depth_m, low=0.4, high=1.2)
+        diff_vis = _colorize(np.clip(np.abs(diff_m), 0.0, 0.20), low=0.0, high=0.20)
+        top = np.concatenate([left_rgb[..., :3], right_rgb[..., :3]], axis=1)
+        bottom = np.concatenate([isaac_vis, ffs_vis, diff_vis], axis=1)
+        # Pad the stereo row to the same width as the three-panel depth row.
+        if top.shape[1] < bottom.shape[1]:
+            pad = np.zeros((top.shape[0], bottom.shape[1] - top.shape[1], 3), dtype=top.dtype)
+            top = np.concatenate([top, pad], axis=1)
+        grid = np.concatenate([top[:, : bottom.shape[1]], bottom], axis=0)
+        cv2.imwrite(f"{prefix}_compare_grid.png", cv2.cvtColor(grid, cv2.COLOR_RGB2BGR))
 
     def _render_depth(self) -> np.ndarray:
         from isaacsimenvs.tasks.simtoolreal.utils.scene_utils import read_student_camera_image
@@ -534,9 +631,9 @@ class IsaacDepthEnvNode:
         ros = self.ros
         msg = _make_depth_msg(depth_m, ros.rospy, ros.Image, frame_id=self.args.depth_frame_id)
         self.depth_pub.publish(msg)
-        if self.camera_info_pub is not None and self.camera_k is not None:
+        if self.camera_info_pub is not None and self.publish_camera_k is not None:
             info_msg = _make_camera_info_msg(
-                self.camera_k,
+                self.publish_camera_k,
                 depth_m.shape[0],
                 depth_m.shape[1],
                 ros.rospy,
@@ -650,6 +747,39 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--ffs_repo_root", type=Path, default=DEFAULT_FFS_REPO_ROOT)
     parser.add_argument("--ffs_model_path", type=Path, default=DEFAULT_FFS_MODEL)
     parser.add_argument(
+        "--ffs_engine_dir",
+        type=Path,
+        default=None,
+        help="Optional TensorRT engine directory containing feature_runner.engine, post_runner.engine, and onnx.yaml.",
+    )
+    parser.add_argument(
+        "--ffs_stereo_width",
+        type=int,
+        default=384,
+        help="Rendered left/right RGB width for Fast-FoundationStereo. Must be divisible by 32.",
+    )
+    parser.add_argument(
+        "--ffs_stereo_height",
+        type=int,
+        default=224,
+        help="Rendered left/right RGB height for Fast-FoundationStereo. Must be divisible by 32.",
+    )
+    parser.add_argument(
+        "--ffs_downsample_to_policy_res",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Downsample FFS metric depth before publishing so the ROS policy path receives 160x90-like depth.",
+    )
+    parser.add_argument("--ffs_publish_width", type=int, default=160)
+    parser.add_argument("--ffs_publish_height", type=int, default=90)
+    parser.add_argument(
+        "--ffs_render_quality",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Use quality/DLAA/denoiser render settings for FFS stereo RGB.",
+    )
+    parser.add_argument("--ffs_samples_per_pixel", type=int, default=16)
+    parser.add_argument(
         "--ffs_baseline_m",
         type=float,
         default=0.12,
@@ -664,6 +794,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--ffs_zfar_m", type=float, default=10.0)
     parser.add_argument("--ffs_debug_dir", type=Path, default=None)
     parser.add_argument("--ffs_debug_every_n", type=int, default=30)
+    parser.add_argument(
+        "--depth_compare_dir",
+        type=Path,
+        default=None,
+        help="Optional debug directory for paired direct Isaac depth vs FFS stereo depth comparisons.",
+    )
+    parser.add_argument("--depth_compare_every_n", type=int, default=30)
     parser.add_argument("--camera_pose_randomization_profile", default=None)
     parser.add_argument("--camera_pose_randomization_mode", default=None)
     parser.add_argument("--camera_pos_noise_m", type=float, nargs=3, default=None)
@@ -790,8 +927,29 @@ def main() -> None:
         if args.camera_rot_noise_deg is not None:
             env_cfg.student_obs.camera_rot_noise_deg = tuple(float(v) for v in args.camera_rot_noise_deg)
         if args.depth_render_backend == "ffs_stereo":
-            env_cfg.student_obs.image_modality = "rgb"
+            if args.ffs_stereo_width % 32 != 0 or args.ffs_stereo_height % 32 != 0:
+                raise ValueError(
+                    "Fast-FoundationStereo stereo capture resolution must be divisible by 32, "
+                    f"got {args.ffs_stereo_width}x{args.ffs_stereo_height}."
+                )
+            env_cfg.student_obs.image_modality = "rgbd" if args.depth_compare_dir is not None else "rgb"
+            env_cfg.student_obs.image_width = int(args.ffs_stereo_width)
+            env_cfg.student_obs.image_height = int(args.ffs_stereo_height)
             env_cfg.student_obs.ffs_stereo_right_camera_enabled = True
+            if args.ffs_render_quality:
+                render_cfg = env_cfg.sim.render
+                render_cfg.rendering_mode = "quality"
+                render_cfg.antialiasing_mode = "DLAA"
+                render_cfg.enable_dl_denoiser = True
+                render_cfg.samples_per_pixel = int(args.ffs_samples_per_pixel)
+                for attr in (
+                    "enable_direct_lighting",
+                    "enable_reflections",
+                    "enable_global_illumination",
+                    "enable_shadows",
+                ):
+                    if hasattr(render_cfg, attr):
+                        setattr(render_cfg, attr, True)
         if args.peg_urdf is not None:
             env_cfg.assets.peg_urdf = args.peg_urdf
             env_cfg.assets.object_name = Path(args.peg_urdf).stem
@@ -815,6 +973,10 @@ def main() -> None:
                 f"depth_noise_profile={env_cfg.student_obs.depth_noise_profile} "
                 f"published_depth_source={args.published_depth_source} "
                 f"ffs_baseline_m={args.ffs_baseline_m if args.depth_render_backend == 'ffs_stereo' else 'n/a'} "
+                f"ffs_stereo={f'{args.ffs_stereo_width}x{args.ffs_stereo_height}' if args.depth_render_backend == 'ffs_stereo' else 'n/a'} "
+                f"ffs_downsample={args.ffs_downsample_to_policy_res if args.depth_render_backend == 'ffs_stereo' else 'n/a'} "
+                f"ffs_engine={str(args.ffs_engine_dir) if args.ffs_engine_dir else '(pytorch)'} "
+                f"ffs_render_quality={args.ffs_render_quality if args.depth_render_backend == 'ffs_stereo' else 'n/a'} "
                 f"camera_rand={env_cfg.student_obs.camera_pose_randomization_profile} "
                 f"camera_pos_noise_m={env_cfg.student_obs.camera_pos_noise_m} "
                 f"camera_rot_noise_deg={env_cfg.student_obs.camera_rot_noise_deg}",

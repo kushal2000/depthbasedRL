@@ -29,6 +29,7 @@ class FastFoundationStereoDepth:
         baseline_m: float,
         valid_iters: int = 4,
         max_disp: int = 192,
+        engine_dir: str | Path | None = None,
         device: str = "cuda",
         hiera: bool = False,
         optimize_build_volume: str = "pytorch1",
@@ -40,15 +41,18 @@ class FastFoundationStereoDepth:
         self.baseline_m = float(baseline_m)
         self.valid_iters = int(valid_iters)
         self.max_disp = int(max_disp)
+        self.engine_dir = Path(engine_dir).expanduser().resolve() if engine_dir else None
         self.device = torch.device(device)
         self.hiera = bool(hiera)
         self.optimize_build_volume = str(optimize_build_volume)
         self.remove_invisible = bool(remove_invisible)
         self.zfar_m = float(zfar_m)
+        self.backend = "pytorch"
+        self._trt_image_size_hw: tuple[int, int] | None = None
 
         if not self.repo_root.exists():
             raise FileNotFoundError(f"Fast-FoundationStereo repo not found: {self.repo_root}")
-        if not self.model_path.exists():
+        if self.engine_dir is None and not self.model_path.exists():
             raise FileNotFoundError(f"Fast-FoundationStereo checkpoint not found: {self.model_path}")
         if self.baseline_m <= 0.0:
             raise ValueError(f"baseline_m must be positive, got {self.baseline_m}")
@@ -68,8 +72,45 @@ class FastFoundationStereoDepth:
 
         self._InputPadder = InputPadder
         self._amp_dtype = AMP_DTYPE
-        self.model = self._load_model()
+        if self.engine_dir is not None:
+            self.model = self._load_trt_model()
+            self.backend = "tensorrt"
+        else:
+            self.model = self._load_model()
         self.last_disparity: np.ndarray | None = None
+
+    @staticmethod
+    def _resolve_onnx_cfg_path(engine_dir: Path) -> Path:
+        candidates = (engine_dir / "onnx.yaml", engine_dir.parent / "onnx.yaml")
+        for path in candidates:
+            if path.exists():
+                return path
+        raise FileNotFoundError(f"onnx.yaml not found for FFS TensorRT engine. Looked in: {candidates}")
+
+    def _load_trt_model(self):
+        if self.engine_dir is None:
+            raise RuntimeError("engine_dir is not set")
+        feature_engine = self.engine_dir / "feature_runner.engine"
+        post_engine = self.engine_dir / "post_runner.engine"
+        if not feature_engine.exists() or not post_engine.exists():
+            raise FileNotFoundError(
+                f"Expected TensorRT engines at {feature_engine} and {post_engine}. "
+                "Build them with Fast-FoundationStereo scripts/make_onnx.py and build_trt_engine.py."
+            )
+        cfg_path = self._resolve_onnx_cfg_path(self.engine_dir)
+        with cfg_path.open("r") as f:
+            cfg = yaml.safe_load(f)
+        cfg["valid_iters"] = self.valid_iters
+        cfg["max_disp"] = self.max_disp
+        args = OmegaConf.create(cfg)
+        image_size = tuple(int(v) for v in args.image_size)
+        if len(image_size) != 2:
+            raise ValueError(f"FFS TensorRT onnx.yaml image_size must be [H, W], got {image_size}")
+        self._trt_image_size_hw = image_size
+
+        from core.foundation_stereo import TrtRunner
+
+        return TrtRunner(args, str(feature_engine), str(post_engine))
 
     def _load_model(self):
         cfg_path = self.model_path.parent / "cfg.yaml"
@@ -107,21 +148,33 @@ class FastFoundationStereoDepth:
         height, width = left_rgb.shape[:2]
         left = torch.as_tensor(left_rgb, device=self.device).float()[None].permute(0, 3, 1, 2)
         right = torch.as_tensor(right_rgb, device=self.device).float()[None].permute(0, 3, 1, 2)
-        padder = self._InputPadder(left.shape, divis_by=32, force_square=False)
-        left, right = padder.pad(left, right)
 
-        with torch.amp.autocast("cuda", enabled=self.device.type == "cuda", dtype=self._amp_dtype):
-            if self.hiera:
-                disp = self.model.run_hierachical(left, right, iters=self.valid_iters, test_mode=True, small_ratio=0.5)
-            else:
-                disp = self.model.forward(
-                    left,
-                    right,
-                    iters=self.valid_iters,
-                    test_mode=True,
-                    optimize_build_volume=self.optimize_build_volume,
+        if self.backend == "tensorrt":
+            if self._trt_image_size_hw != (height, width):
+                raise ValueError(
+                    "FFS TensorRT engine image size does not match rendered stereo images: "
+                    f"engine={self._trt_image_size_hw}, images={(height, width)}. "
+                    "Use an engine built for the capture resolution."
                 )
-        disp = padder.unpad(disp.float())
+            disp = self.model.forward(left.contiguous(), right.contiguous()).float()
+        else:
+            padder = self._InputPadder(left.shape, divis_by=32, force_square=False)
+            left, right = padder.pad(left, right)
+
+            with torch.amp.autocast("cuda", enabled=self.device.type == "cuda", dtype=self._amp_dtype):
+                if self.hiera:
+                    disp = self.model.run_hierachical(
+                        left, right, iters=self.valid_iters, test_mode=True, small_ratio=0.5
+                    )
+                else:
+                    disp = self.model.forward(
+                        left,
+                        right,
+                        iters=self.valid_iters,
+                        test_mode=True,
+                        optimize_build_volume=self.optimize_build_volume,
+                    )
+            disp = padder.unpad(disp.float())
         disp_np = disp.detach().cpu().numpy().reshape(height, width).clip(0.0, None)
 
         if self.remove_invisible:
