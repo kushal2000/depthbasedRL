@@ -125,6 +125,12 @@ intrinsics.
 45. `45_isaac_depth_ros_clean_no_camrand.sh`
     Clean raw metric depth and fixed nominal student-camera pose.
 
+46. `46_isaac_depth_ros_no_noise_camrand40mm4deg.sh`
+    Clean raw metric depth with stronger 40 mm / 4 deg startup camera-pose randomization.
+
+47. `47_isaac_depth_ros_heavy_noise_no_camrand.sh`
+    Strong/obvious metric depth noise with fixed nominal student-camera pose. Publishes the noisy metric depth.
+
 Recommended student-policy test order:
 
 1. `01_zed_baseline_60hz_no_preprocess.sh`
@@ -195,7 +201,7 @@ IsaacSim-backed fake-real pipeline:
 4. Terminal D: `RUN_DURATION_S=30 bash_scripts/33_depth_debug_student_ros_topic_dry_run.sh`
 5. Terminal E, if you want the student to drive IsaacSim: `RUN_DURATION_S=30 PUBLISH_DURATION_S=10 bash_scripts/34_depth_debug_student_ros_topic_publish_3s.sh`
 
-Swap Terminal B for scripts 43, 44, or 45 to isolate whether performance changes are caused by depth noise, camera-pose randomization, or both. The wrappers default to `DEPTH_EVERY_N=2`; override it if you want a different simulated camera rate.
+Swap Terminal B for scripts 43, 44, 45, 46, or 47 to isolate whether performance changes are caused by depth noise, camera-pose randomization, or both. The wrappers default to `DEPTH_EVERY_N=2`; override it if you want a different simulated camera rate.
 
 Benchmark render frequency before running the full loop:
 
