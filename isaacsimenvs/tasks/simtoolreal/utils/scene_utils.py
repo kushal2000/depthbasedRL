@@ -494,6 +494,7 @@ def setup_student_camera(env) -> None:
     """
     cfg = getattr(env.cfg, "student_obs", None)
     env.student_camera = None
+    env.student_camera_right = None
     if cfg is None or not cfg.enabled or not cfg.image_enabled:
         return
 
@@ -557,6 +558,23 @@ def setup_student_camera(env) -> None:
     )
     env.student_camera = camera_cls(cfg=camera_cfg)
     env.scene.sensors["student_camera"] = env.student_camera
+    if bool(getattr(cfg, "ffs_stereo_right_camera_enabled", False)):
+        right_camera_cfg = camera_cfg_cls(
+            prim_path="/World/envs/env_.*/StudentCameraRight",
+            update_period=0,
+            update_latest_camera_pose=True,
+            height=int(cfg.image_height),
+            width=int(cfg.image_width),
+            data_types=["rgb"],
+            spawn=camera_spawn_cfg,
+            offset=camera_cfg_cls.OffsetCfg(
+                pos=tuple(float(x) for x in cfg.camera_pos),
+                rot=tuple(float(x) for x in cfg.camera_quat_wxyz),
+                convention=str(cfg.camera_convention),
+            ),
+        )
+        env.student_camera_right = camera_cls(cfg=right_camera_cfg)
+        env.scene.sensors["student_camera_right"] = env.student_camera_right
     base_pos = torch.tensor(
         tuple(float(x) for x in cfg.camera_pos),
         device=env.device,
@@ -576,7 +594,8 @@ def setup_student_camera(env) -> None:
         t0,
         f"registered student camera backend={backend} "
         f"modality={cfg.image_modality} "
-        f"size={int(cfg.image_width)}x{int(cfg.image_height)}",
+        f"size={int(cfg.image_width)}x{int(cfg.image_height)} "
+        f"ffs_stereo_right={bool(getattr(cfg, 'ffs_stereo_right_camera_enabled', False))}",
     )
 
 

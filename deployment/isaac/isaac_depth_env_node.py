@@ -34,6 +34,8 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 DEFAULT_TEACHER_DIR = Path("/juno/u/kedia/depthbasedRL/train_dir/Apr28/isaacSim_PegInHole")
+DEFAULT_FFS_REPO_ROOT = Path("/home/tylerlum/github_repos/Fast-FoundationStereo")
+DEFAULT_FFS_MODEL = DEFAULT_FFS_REPO_ROOT / "weights/20-30-48/model_best_bp2_serialize.pth"
 DEPTH_TOPIC = "/zed/zed_node/depth/depth_registered"
 CAMERA_INFO_TOPIC = "/zed/zed_node/rgb/camera_info"
 IIWA_JOINT_STATE_TOPIC = "/iiwa/joint_states"
@@ -62,6 +64,14 @@ def _to_numpy(value: Any) -> np.ndarray:
     if hasattr(value, "cpu"):
         value = value.cpu()
     return np.asarray(value)
+
+
+def _quat_rotate_wxyz(quat: torch.Tensor, vec: torch.Tensor) -> torch.Tensor:
+    """Rotate vectors by wxyz quaternions."""
+    q_vec = quat[..., 1:4]
+    q_w = quat[..., 0:1]
+    t = 2.0 * torch.cross(q_vec, vec, dim=-1)
+    return vec + q_w * t + torch.cross(q_vec, t, dim=-1)
 
 
 def _student_camera_k(cfg) -> np.ndarray:
@@ -266,6 +276,33 @@ class IsaacDepthEnvNode:
         self.loop_ms = deque(maxlen=512)
         self.last_status_time = time.time()
         self.camera_k = _student_camera_k(inner.cfg.student_obs) if args.enable_depth else None
+        self.right_camera = None
+        self.ffs_depth = None
+        self.ffs_debug_dir = Path(args.ffs_debug_dir) if args.ffs_debug_dir else None
+
+        if args.enable_depth and args.depth_render_backend == "ffs_stereo":
+            if inner.num_envs != 1:
+                raise ValueError("FFS stereo ROS backend currently supports num_envs=1 only.")
+            self.right_camera = getattr(inner, "student_camera_right", None)
+            if self.right_camera is None:
+                raise RuntimeError(
+                    "FFS stereo backend requires scene_utils.setup_student_camera() to create "
+                    "inner.student_camera_right. Check env_cfg.student_obs.ffs_stereo_right_camera_enabled."
+                )
+            from deployment.isaac.fast_foundation_stereo_backend import FastFoundationStereoDepth
+
+            self.ffs_depth = FastFoundationStereoDepth(
+                repo_root=args.ffs_repo_root,
+                model_path=args.ffs_model_path,
+                baseline_m=args.ffs_baseline_m,
+                valid_iters=args.ffs_valid_iters,
+                max_disp=args.ffs_max_disp,
+                device=str(args.ffs_device),
+                hiera=args.ffs_hiera,
+                optimize_build_volume=args.ffs_optimize_build_volume,
+                remove_invisible=args.ffs_remove_invisible,
+                zfar_m=args.ffs_zfar_m,
+            )
 
         self.env.reset()
         if getattr(args, "resolved_object_init_pose_wxyz", None) is not None:
@@ -408,11 +445,68 @@ class IsaacDepthEnvNode:
         msg.pose.orientation.w = float(quat_xyzw[3])
         self.object_pose_pub.publish(msg)
 
+    def _sync_ffs_right_camera_pose(self) -> None:
+        from isaacsimenvs.tasks.simtoolreal.utils.scene_utils import _maybe_initialize_student_camera_pose
+
+        if self.right_camera is None:
+            raise RuntimeError("FFS right camera has not been created.")
+        _maybe_initialize_student_camera_pose(self.inner)
+        left_pos = self.inner._student_camera_current_pos_w
+        left_quat = self.inner._student_camera_current_quat_wxyz
+        baseline = torch.zeros_like(left_pos)
+        baseline[:, 0] = float(self.args.ffs_baseline_m)
+        right_pos = left_pos + _quat_rotate_wxyz(left_quat, baseline)
+
+        view = getattr(self.right_camera, "_view", None)
+        if view is not None and hasattr(view, "_sync_usd_on_fabric_write"):
+            view._sync_usd_on_fabric_write = True
+        self.right_camera.set_world_poses(
+            positions=right_pos,
+            orientations=left_quat,
+            env_ids=torch.arange(self.inner.num_envs, device=self.device, dtype=torch.long),
+            convention=str(self.inner.cfg.student_obs.camera_convention),
+        )
+
+    def _render_ffs_stereo_depth(self) -> np.ndarray:
+        if self.ffs_depth is None:
+            raise RuntimeError("FFS depth backend is not initialized.")
+        self._sync_ffs_right_camera_pose()
+        self.inner.sim.render()
+        dt = float(getattr(self.inner, "physics_dt", self.inner.cfg.sim.dt))
+        self.inner.student_camera.update(dt, force_recompute=True)
+        self.right_camera.update(dt, force_recompute=True)
+
+        left = self.inner.student_camera.data.output.get("rgb")
+        right = self.right_camera.data.output.get("rgb")
+        if left is None or right is None:
+            left_keys = list(self.inner.student_camera.data.output.keys())
+            right_keys = list(self.right_camera.data.output.keys())
+            raise RuntimeError(f"FFS stereo RGB missing. left={left_keys}, right={right_keys}")
+        left_rgb = _to_numpy(left[0, ..., :3]).astype(np.uint8, copy=False)
+        right_rgb = _to_numpy(right[0, ..., :3]).astype(np.uint8, copy=False)
+        depth_m = self.ffs_depth.infer_depth(left_rgb, right_rgb, fx_px=float(self.camera_k[0, 0]))
+
+        debug_every = int(self.args.ffs_debug_every_n)
+        if self.ffs_debug_dir is not None and debug_every > 0 and self.step_idx % debug_every == 0:
+            from deployment.isaac.fast_foundation_stereo_backend import write_stereo_debug
+
+            write_stereo_debug(
+                self.ffs_debug_dir,
+                step_idx=self.step_idx,
+                left_rgb=left_rgb,
+                right_rgb=right_rgb,
+                disparity=self.ffs_depth.last_disparity,
+                depth_m=depth_m,
+            )
+        return depth_m.astype(np.float32, copy=False)
+
     def _render_depth(self) -> np.ndarray:
         from isaacsimenvs.tasks.simtoolreal.utils.scene_utils import read_student_camera_image
 
         if not self.args.enable_depth:
             raise RuntimeError("Depth rendering requested with --no-enable_depth")
+        if self.args.depth_render_backend == "ffs_stereo":
+            return self._render_ffs_stereo_depth()
         read_student_camera_image(self.inner)
         source = str(self.args.published_depth_source).lower()
         if source == "raw":
@@ -542,11 +636,34 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--depth_noise_profile", default="off")
     parser.add_argument("--depth_noise_strength", type=float, default=None)
     parser.add_argument(
+        "--depth_render_backend",
+        choices=("isaac_depth", "ffs_stereo"),
+        default="isaac_depth",
+        help="Depth source: direct Isaac metric depth, or Fast-FoundationStereo from rendered left/right RGB.",
+    )
+    parser.add_argument(
         "--published_depth_source",
         choices=("raw", "noisy"),
         default="raw",
         help="Which metric depth image to publish on ROS. Use noisy to test the same pre-window metric noise used in training.",
     )
+    parser.add_argument("--ffs_repo_root", type=Path, default=DEFAULT_FFS_REPO_ROOT)
+    parser.add_argument("--ffs_model_path", type=Path, default=DEFAULT_FFS_MODEL)
+    parser.add_argument(
+        "--ffs_baseline_m",
+        type=float,
+        default=0.12,
+        help="Synthetic stereo baseline in meters. ZED1 is approximately 0.12m.",
+    )
+    parser.add_argument("--ffs_valid_iters", type=int, default=4)
+    parser.add_argument("--ffs_max_disp", type=int, default=192)
+    parser.add_argument("--ffs_device", default="cuda")
+    parser.add_argument("--ffs_hiera", action="store_true")
+    parser.add_argument("--ffs_optimize_build_volume", default="pytorch1")
+    parser.add_argument("--ffs_remove_invisible", action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument("--ffs_zfar_m", type=float, default=10.0)
+    parser.add_argument("--ffs_debug_dir", type=Path, default=None)
+    parser.add_argument("--ffs_debug_every_n", type=int, default=30)
     parser.add_argument("--camera_pose_randomization_profile", default=None)
     parser.add_argument("--camera_pose_randomization_mode", default=None)
     parser.add_argument("--camera_pos_noise_m", type=float, nargs=3, default=None)
@@ -672,6 +789,9 @@ def main() -> None:
             env_cfg.student_obs.camera_pos_noise_m = tuple(float(v) for v in args.camera_pos_noise_m)
         if args.camera_rot_noise_deg is not None:
             env_cfg.student_obs.camera_rot_noise_deg = tuple(float(v) for v in args.camera_rot_noise_deg)
+        if args.depth_render_backend == "ffs_stereo":
+            env_cfg.student_obs.image_modality = "rgb"
+            env_cfg.student_obs.ffs_stereo_right_camera_enabled = True
         if args.peg_urdf is not None:
             env_cfg.assets.peg_urdf = args.peg_urdf
             env_cfg.assets.object_name = Path(args.peg_urdf).stem
@@ -691,8 +811,10 @@ def main() -> None:
                 f"zero_training_randomization={args.zero_training_randomization} "
                 f"initial_robot_pose={args.initial_robot_pose} "
                 f"object_init={object_pose_note} "
+                f"depth_backend={args.depth_render_backend} "
                 f"depth_noise_profile={env_cfg.student_obs.depth_noise_profile} "
                 f"published_depth_source={args.published_depth_source} "
+                f"ffs_baseline_m={args.ffs_baseline_m if args.depth_render_backend == 'ffs_stereo' else 'n/a'} "
                 f"camera_rand={env_cfg.student_obs.camera_pose_randomization_profile} "
                 f"camera_pos_noise_m={env_cfg.student_obs.camera_pos_noise_m} "
                 f"camera_rot_noise_deg={env_cfg.student_obs.camera_rot_noise_deg}",
