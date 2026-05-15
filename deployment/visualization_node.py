@@ -75,6 +75,8 @@ DEFAULT_CAMERA_IMAGE_TOPIC = "/zed/zed_node/depth/depth_registered"
 DEFAULT_CAMERA_INFO_TOPIC = "/zed/zed_node/rgb/camera_info"
 DEFAULT_OBJECT_POSE_TOPIC = "/robot_frame/current_object_pose"
 DEFAULT_PREDICTED_OBJECT_POSE_TOPIC = "/robot_frame/predicted_object_pose"
+DEFAULT_POLICY_FULL_DEPTH_TOPIC = "/student_depth_policy/policy_full_depth"
+DEFAULT_POLICY_CROP_DEPTH_TOPIC = "/student_depth_policy/policy_crop_depth"
 # Sim default student-camera pose in the world frame. This is only used for
 # optional depth debugging in Viser; object/robot visualization is unchanged.
 DEFAULT_CAMERA_POS_WORLD = (-0.5002050422666431, -0.6385715691360607, 1.0201893282998005)
@@ -142,6 +144,12 @@ def _depth_to_rgb(depth_m: np.ndarray, near_m: float, far_m: float) -> np.ndarra
     return rgb
 
 
+def _normalized_depth_to_rgb(depth: np.ndarray) -> np.ndarray:
+    normalized = np.clip(np.asarray(depth, dtype=np.float32), 0.0, 1.0)
+    gray = (255.0 * (1.0 - normalized)).astype(np.uint8)
+    return np.repeat(gray[..., None], 3, axis=-1)
+
+
 def _viser_frustum_image(rgb: np.ndarray, *, flip_y: bool) -> np.ndarray:
     image = np.asarray(rgb)
     return np.flipud(image) if flip_y else image
@@ -186,6 +194,10 @@ class RosSnapshot:
     depth_image_m: Optional[np.ndarray]
     depth_stamp: Optional[rospy.Time]
     camera_K: Optional[np.ndarray]
+    policy_full_depth: Optional[np.ndarray]
+    policy_full_depth_stamp: Optional[rospy.Time]
+    policy_crop_depth: Optional[np.ndarray]
+    policy_crop_depth_stamp: Optional[rospy.Time]
 
     @classmethod
     def make_with_nones(cls) -> RosSnapshot:
@@ -200,6 +212,10 @@ class RosSnapshot:
             depth_image_m=None,
             depth_stamp=None,
             camera_K=None,
+            policy_full_depth=None,
+            policy_full_depth_stamp=None,
+            policy_crop_depth=None,
+            policy_crop_depth_stamp=None,
         )
 
     def make_copy_with_defaults(self) -> RosSnapshot:
@@ -261,6 +277,10 @@ class RosSnapshot:
             depth_image_m=self.depth_image_m,
             depth_stamp=self.depth_stamp,
             camera_K=self.camera_K,
+            policy_full_depth=self.policy_full_depth,
+            policy_full_depth_stamp=self.policy_full_depth_stamp,
+            policy_crop_depth=self.policy_crop_depth,
+            policy_crop_depth_stamp=self.policy_crop_depth_stamp,
         )
 
 
@@ -269,7 +289,11 @@ class VisualizationNode:
         self.args = args
         self.depth_frustum = None
         self.depth_point_cloud = None
+        self.policy_full_frustum = None
+        self.policy_crop_frustum = None
         self._last_depth_stamp = None
+        self._last_policy_full_depth_stamp = None
+        self._last_policy_crop_depth_stamp = None
 
         # ROS setup
         rospy.init_node("visualization_node")
@@ -344,6 +368,23 @@ class VisualizationNode:
             info(
                 f"Subscribing to depth_topic={self.args.depth_topic} "
                 f"camera_info_topic={self.args.camera_info_topic}"
+            )
+        if self.args.load_policy_depth_image:
+            self.policy_full_depth_sub = rospy.Subscriber(
+                self.args.policy_full_depth_topic,
+                Image,
+                self.policy_full_depth_callback,
+                queue_size=1,
+            )
+            self.policy_crop_depth_sub = rospy.Subscriber(
+                self.args.policy_crop_depth_topic,
+                Image,
+                self.policy_crop_depth_callback,
+                queue_size=1,
+            )
+            info(
+                f"Subscribing to policy depth topics full={self.args.policy_full_depth_topic} "
+                f"crop={self.args.policy_crop_depth_topic}"
             )
 
     def initialize_viser(self, object_name: str):
@@ -482,7 +523,7 @@ class VisualizationNode:
         self.robot_viser.update_cfg(DEFAULT_Q)
         self.robot_cmd_viser.update_cfg(DEFAULT_Q)
 
-        if self.args.load_depth_image or self.args.load_point_cloud:
+        if self.args.load_depth_image or self.args.load_point_cloud or self.args.load_policy_depth_image:
             self.camera_frame = SERVER.scene.add_frame(
                 DEFAULT_CAMERA_FRAME,
                 position=tuple(self.args.camera_pos_world),
@@ -491,19 +532,41 @@ class VisualizationNode:
                 axes_length=0.08,
                 axes_radius=0.002,
             )
-            self.depth_frustum = SERVER.scene.add_camera_frustum(
-                f"{DEFAULT_CAMERA_FRAME}/depth_image",
-                fov=0.7,
-                aspect=16.0 / 9.0,
-                scale=0.25,
-                image=np.zeros((90, 160, 3), dtype=np.uint8),
-            )
+            if self.args.load_depth_image or self.args.load_point_cloud:
+                self.depth_frustum = SERVER.scene.add_camera_frustum(
+                    f"{DEFAULT_CAMERA_FRAME}/raw_depth_window",
+                    fov=0.7,
+                    aspect=16.0 / 9.0,
+                    scale=0.25,
+                    line_width=2.0,
+                    color=(0, 0, 0),
+                    image=np.zeros((90, 160, 3), dtype=np.uint8),
+                )
             if self.args.load_point_cloud:
                 self.depth_point_cloud = SERVER.scene.add_point_cloud(
                     f"{DEFAULT_CAMERA_FRAME}/point_cloud",
                     points=np.empty((0, 3), dtype=np.float32),
                     colors=np.empty((0, 3), dtype=np.uint8),
                     point_size=self.args.point_size,
+                )
+            if self.args.load_policy_depth_image:
+                self.policy_full_frustum = SERVER.scene.add_camera_frustum(
+                    f"{DEFAULT_CAMERA_FRAME}/policy_full_depth",
+                    fov=0.7,
+                    aspect=16.0 / 9.0,
+                    scale=0.17,
+                    line_width=2.0,
+                    color=(120, 120, 120),
+                    image=np.zeros((90, 160, 3), dtype=np.uint8),
+                )
+                self.policy_crop_frustum = SERVER.scene.add_camera_frustum(
+                    f"{DEFAULT_CAMERA_FRAME}/policy_crop",
+                    fov=0.7,
+                    aspect=1.0,
+                    scale=0.12,
+                    line_width=2.0,
+                    color=(25, 75, 255),
+                    image=np.zeros((70, 70, 3), dtype=np.uint8),
                 )
 
     def iiwa_joint_cmd_callback(self, msg: JointState):
@@ -575,28 +638,73 @@ class VisualizationNode:
         """Callback to update camera intrinsics for optional point-cloud visualization."""
         self.ros_snapshot.camera_K = np.asarray(msg.K, dtype=np.float64).reshape(3, 3)
 
+    @staticmethod
+    def _decode_normalized_image(msg: Image) -> np.ndarray:
+        encoding = msg.encoding.lower()
+        if encoding in ("32fc1", "type_32fc1"):
+            image = np.frombuffer(msg.data, dtype=np.float32).reshape(msg.height, msg.width)
+        elif encoding in ("8uc1", "mono8"):
+            image = np.frombuffer(msg.data, dtype=np.uint8).reshape(msg.height, msg.width).astype(np.float32) / 255.0
+        else:
+            raise ValueError(f"Unsupported normalized depth encoding={msg.encoding!r}; expected 32FC1 or mono8.")
+        image = np.nan_to_num(image, nan=1.0, posinf=1.0, neginf=0.0)
+        return np.clip(image, 0.0, 1.0)
+
+    def policy_full_depth_callback(self, msg: Image):
+        try:
+            self.ros_snapshot.policy_full_depth = self._decode_normalized_image(msg)
+            self.ros_snapshot.policy_full_depth_stamp = msg.header.stamp
+        except Exception as exc:
+            warn_every(f"Failed to decode policy full depth image: {exc}", n_seconds=2.0, key="policy_full_depth_decode")
+
+    def policy_crop_depth_callback(self, msg: Image):
+        try:
+            self.ros_snapshot.policy_crop_depth = self._decode_normalized_image(msg)
+            self.ros_snapshot.policy_crop_depth_stamp = msg.header.stamp
+        except Exception as exc:
+            warn_every(f"Failed to decode policy crop depth image: {exc}", n_seconds=2.0, key="policy_crop_depth_decode")
+
     def update_depth_viser(self):
-        if not (self.args.load_depth_image or self.args.load_point_cloud):
+        if not (self.args.load_depth_image or self.args.load_point_cloud or self.args.load_policy_depth_image):
             return
 
         depth = self.ros_snapshot.depth_image_m
-        if depth is None:
+        if depth is None and (self.args.load_depth_image or self.args.load_point_cloud):
             warn_every("depth_image is None", n_seconds=2.0)
-            return
-        if self.ros_snapshot.depth_stamp is not None and self.ros_snapshot.depth_stamp == self._last_depth_stamp:
-            return
-        self._last_depth_stamp = self.ros_snapshot.depth_stamp
+        elif depth is not None and self.ros_snapshot.depth_stamp != self._last_depth_stamp:
+            self._last_depth_stamp = self.ros_snapshot.depth_stamp
+            rgb = _depth_to_rgb(depth, self.args.depth_near_m, self.args.depth_far_m)
+            if self.depth_frustum is not None:
+                self.depth_frustum.image = _viser_frustum_image(rgb, flip_y=self.args.flip_depth_image_y)
+                K = self.ros_snapshot.camera_K
+                h, w = depth.shape
+                self.depth_frustum.aspect = float(w) / float(h)
+                if K is not None and float(K[0, 0]) > 0.0:
+                    self.depth_frustum.fov = 2.0 * np.arctan2(float(h), 2.0 * float(K[1, 1]))
 
-        rgb = _depth_to_rgb(depth, self.args.depth_near_m, self.args.depth_far_m)
-        if self.depth_frustum is not None:
-            self.depth_frustum.image = _viser_frustum_image(rgb, flip_y=self.args.flip_depth_image_y)
-            K = self.ros_snapshot.camera_K
-            h, w = depth.shape
-            self.depth_frustum.aspect = float(w) / float(h)
-            if K is not None and float(K[0, 0]) > 0.0:
-                self.depth_frustum.fov = 2.0 * np.arctan2(float(h), 2.0 * float(K[1, 1]))
+        if self.args.load_policy_depth_image:
+            policy_full = self.ros_snapshot.policy_full_depth
+            if (
+                policy_full is not None
+                and self.policy_full_frustum is not None
+                and self.ros_snapshot.policy_full_depth_stamp != self._last_policy_full_depth_stamp
+            ):
+                self._last_policy_full_depth_stamp = self.ros_snapshot.policy_full_depth_stamp
+                full_rgb = _normalized_depth_to_rgb(policy_full)
+                self.policy_full_frustum.image = _viser_frustum_image(full_rgb, flip_y=self.args.flip_depth_image_y)
+                self.policy_full_frustum.aspect = float(full_rgb.shape[1]) / float(full_rgb.shape[0])
+            policy_crop = self.ros_snapshot.policy_crop_depth
+            if (
+                policy_crop is not None
+                and self.policy_crop_frustum is not None
+                and self.ros_snapshot.policy_crop_depth_stamp != self._last_policy_crop_depth_stamp
+            ):
+                self._last_policy_crop_depth_stamp = self.ros_snapshot.policy_crop_depth_stamp
+                crop_rgb = _normalized_depth_to_rgb(policy_crop)
+                self.policy_crop_frustum.image = _viser_frustum_image(crop_rgb, flip_y=self.args.flip_depth_image_y)
+                self.policy_crop_frustum.aspect = float(crop_rgb.shape[1]) / float(crop_rgb.shape[0])
 
-        if self.args.load_point_cloud and self.depth_point_cloud is not None:
+        if self.args.load_point_cloud and self.depth_point_cloud is not None and depth is not None:
             K = self.ros_snapshot.camera_K
             if K is None:
                 warn_every(
@@ -724,10 +832,16 @@ class VisualizationNodeArgs:
     """If true, subscribe to the depth image topic and show it as a Viser camera frustum."""
     load_point_cloud: bool = False
     """If true, also build a point cloud from the depth topic and CameraInfo intrinsics."""
+    load_policy_depth_image: bool = False
+    """If true, show the student node's normalized full policy depth and 70x70 policy crop."""
     depth_topic: str = DEFAULT_CAMERA_IMAGE_TOPIC
     """ROS depth image topic. Supports 32FC1 meters and 16UC1 millimeters."""
     camera_info_topic: str = DEFAULT_CAMERA_INFO_TOPIC
     """ROS CameraInfo topic used for frustum FOV and optional point cloud projection."""
+    policy_full_depth_topic: str = DEFAULT_POLICY_FULL_DEPTH_TOPIC
+    """Normalized full 160x90 policy-depth debug topic from student_depth_policy_node.py."""
+    policy_crop_depth_topic: str = DEFAULT_POLICY_CROP_DEPTH_TOPIC
+    """Normalized 70x70 policy-crop debug topic from student_depth_policy_node.py."""
     depth_units: str = "auto"
     """Depth units: auto, m, or mm."""
     depth_near_m: float = DEFAULT_DEPTH_NEAR_M

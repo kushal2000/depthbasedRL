@@ -86,6 +86,8 @@ IIWA_JOINT_CMD_TOPIC = "/iiwa/joint_cmd"
 SHARPA_JOINT_CMD_TOPIC = "/sharpa/joint_cmd"
 PREDICTED_OBJECT_POSE_TOPIC = "/robot_frame/predicted_object_pose"
 ACTUAL_OBJECT_POSE_TOPIC = "/robot_frame/current_object_pose"
+POLICY_FULL_DEPTH_TOPIC = "/student_depth_policy/policy_full_depth"
+POLICY_CROP_DEPTH_TOPIC = "/student_depth_policy/policy_crop_depth"
 OBJECT_POSE_FRAME_ID = "robot_frame"
 PREDICTED_POSE_MODEL_FRAME = "env"
 
@@ -244,6 +246,22 @@ def pose_stamped_msg(
     msg.pose.orientation.y = float(quat_xyzw[1])
     msg.pose.orientation.z = float(quat_xyzw[2])
     msg.pose.orientation.w = float(quat_xyzw[3])
+    return msg
+
+
+def float32_image_msg(image: np.ndarray, *, stamp: rospy.Time, frame_id: str) -> Image:
+    image = np.ascontiguousarray(np.asarray(image, dtype=np.float32))
+    if image.ndim != 2:
+        raise ValueError(f"Expected single-channel image with shape (H, W), got {image.shape}")
+    msg = Image()
+    msg.header.stamp = stamp
+    msg.header.frame_id = frame_id
+    msg.height = int(image.shape[0])
+    msg.width = int(image.shape[1])
+    msg.encoding = "32FC1"
+    msg.is_bigendian = 0
+    msg.step = int(image.shape[1] * image.dtype.itemsize)
+    msg.data = image.tobytes()
     return msg
 
 
@@ -1237,6 +1255,8 @@ class StudentDepthPolicyNode:
         self.zed_camera: Optional[ZedDepthCamera] = None
         self.bridge = None
         self.depth_sub = None
+        self.policy_full_depth_pub = None
+        self.policy_crop_depth_pub = None
         self.latest_iiwa_joint_state: Optional[JointState] = None
         self.latest_sharpa_joint_state: Optional[JointState] = None
         self.loop_count = 0
@@ -1283,6 +1303,9 @@ class StudentDepthPolicyNode:
             queue_size=1,
         )
         self.predicted_object_pose_pub = rospy.Publisher(args.object_pose_topic, PoseStamped, queue_size=1)
+        if args.publish_debug_policy_depth:
+            self.policy_full_depth_pub = rospy.Publisher(args.policy_full_depth_topic, Image, queue_size=1)
+            self.policy_crop_depth_pub = rospy.Publisher(args.policy_crop_depth_topic, Image, queue_size=1)
         self.iiwa_cmd_pub = rospy.Publisher(args.iiwa_joint_cmd_topic, JointState, queue_size=1)
         self.sharpa_cmd_pub = rospy.Publisher(args.sharpa_joint_cmd_topic, JointState, queue_size=1)
 
@@ -1343,6 +1366,11 @@ class StudentDepthPolicyNode:
             )
         if self.rollout_logger.enabled:
             info(f"Rollout recording actual object pose topic: {args.actual_object_pose_topic}")
+        if args.publish_debug_policy_depth:
+            info(
+                "Publishing normalized debug policy depth images on "
+                f"{args.policy_full_depth_topic} and {args.policy_crop_depth_topic}"
+            )
 
     def _save_rollout_recording(self) -> None:
         self.rollout_logger.save(checkpoint_path=self.args.checkpoint_path)
@@ -1552,6 +1580,20 @@ class StudentDepthPolicyNode:
                 frame_id=self.args.object_pose_frame_id,
                 stamp=stamp,
             )
+        )
+
+    def _publish_debug_policy_depth(self, pipeline: DepthPipelineOutput) -> None:
+        if not self.args.publish_debug_policy_depth:
+            return
+        if self.policy_full_depth_pub is None or self.policy_crop_depth_pub is None:
+            return
+        stamp = rospy.Time.now()
+        frame_id = self.args.policy_depth_frame_id
+        self.policy_full_depth_pub.publish(
+            float32_image_msg(pipeline.policy_full_depth, stamp=stamp, frame_id=frame_id)
+        )
+        self.policy_crop_depth_pub.publish(
+            float32_image_msg(pipeline.policy_crop, stamp=stamp, frame_id=frame_id)
         )
 
     def _should_publish_joints(self) -> bool:
@@ -1839,6 +1881,7 @@ class StudentDepthPolicyNode:
         self._set_prev_targets_after_step(q=q, q_targets=q_targets, published=published)
         t_targets_done = time.time()
         self._publish_predicted_pose(output.aux, stamp, predicted_pose=predicted_pose)
+        self._publish_debug_policy_depth(pipeline)
         t_pose_done = time.time()
         t_step_done = time.time()
         self.last_step_timing_ms = {
@@ -2012,6 +2055,18 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--object_pose_topic", default=PREDICTED_OBJECT_POSE_TOPIC, help=argparse.SUPPRESS)
     parser.add_argument("--actual_object_pose_topic", default=ACTUAL_OBJECT_POSE_TOPIC, help=argparse.SUPPRESS)
     parser.add_argument("--object_pose_frame_id", default=OBJECT_POSE_FRAME_ID, help=argparse.SUPPRESS)
+    parser.add_argument(
+        "--publish_debug_policy_depth",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help=(
+            "Publish normalized policy depth images for live Viser debugging. "
+            "Keep disabled for real deployment unless needed because it adds ROS image traffic."
+        ),
+    )
+    parser.add_argument("--policy_full_depth_topic", default=POLICY_FULL_DEPTH_TOPIC, help=argparse.SUPPRESS)
+    parser.add_argument("--policy_crop_depth_topic", default=POLICY_CROP_DEPTH_TOPIC, help=argparse.SUPPRESS)
+    parser.add_argument("--policy_depth_frame_id", default="student_depth_policy", help=argparse.SUPPRESS)
     parser.add_argument(
         "--predicted_pose_model_frame",
         choices=("env", "robot_frame"),

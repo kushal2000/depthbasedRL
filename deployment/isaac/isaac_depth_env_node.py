@@ -414,8 +414,14 @@ class IsaacDepthEnvNode:
         if not self.args.enable_depth:
             raise RuntimeError("Depth rendering requested with --no-enable_depth")
         read_student_camera_image(self.inner)
-        raw = self.inner._student_depth_raw_m[0, 0]
-        return _to_numpy(raw).astype(np.float32)
+        source = str(self.args.published_depth_source).lower()
+        if source == "raw":
+            depth = self.inner._student_depth_raw_m[0, 0]
+        elif source == "noisy":
+            depth = self.inner._student_depth_noisy_m[0, 0]
+        else:
+            raise ValueError(f"Unsupported --published_depth_source={self.args.published_depth_source!r}")
+        return _to_numpy(depth).astype(np.float32)
 
     def _publish_depth_if_due(self) -> None:
         if not self.args.enable_depth:
@@ -534,6 +540,17 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--depth_publish_every_n", type=int, default=1)
     parser.add_argument("--student_camera_preset", default="default")
     parser.add_argument("--depth_noise_profile", default="off")
+    parser.add_argument("--depth_noise_strength", type=float, default=None)
+    parser.add_argument(
+        "--published_depth_source",
+        choices=("raw", "noisy"),
+        default="raw",
+        help="Which metric depth image to publish on ROS. Use noisy to test the same pre-window metric noise used in training.",
+    )
+    parser.add_argument("--camera_pose_randomization_profile", default=None)
+    parser.add_argument("--camera_pose_randomization_mode", default=None)
+    parser.add_argument("--camera_pos_noise_m", type=float, nargs=3, default=None)
+    parser.add_argument("--camera_rot_noise_deg", type=float, nargs=3, default=None)
     parser.add_argument("--peg_urdf", default=None)
     parser.add_argument("--peg_goal_mode", default=None)
     parser.add_argument("--object_init_orientation_mode", default=None)
@@ -645,6 +662,16 @@ def main() -> None:
             env_cfg.reset.reset_dof_vel_random_interval = 0.0
         _apply_student_camera_preset(env_cfg, args.student_camera_preset)
         env_cfg.student_obs.depth_noise_profile = args.depth_noise_profile
+        if args.depth_noise_strength is not None:
+            env_cfg.student_obs.depth_noise_strength = float(args.depth_noise_strength)
+        if args.camera_pose_randomization_profile is not None:
+            env_cfg.student_obs.camera_pose_randomization_profile = args.camera_pose_randomization_profile
+        if args.camera_pose_randomization_mode is not None:
+            env_cfg.student_obs.camera_pose_randomization_mode = args.camera_pose_randomization_mode
+        if args.camera_pos_noise_m is not None:
+            env_cfg.student_obs.camera_pos_noise_m = tuple(float(v) for v in args.camera_pos_noise_m)
+        if args.camera_rot_noise_deg is not None:
+            env_cfg.student_obs.camera_rot_noise_deg = tuple(float(v) for v in args.camera_rot_noise_deg)
         if args.peg_urdf is not None:
             env_cfg.assets.peg_urdf = args.peg_urdf
             env_cfg.assets.object_name = Path(args.peg_urdf).stem
@@ -665,7 +692,10 @@ def main() -> None:
                 f"initial_robot_pose={args.initial_robot_pose} "
                 f"object_init={object_pose_note} "
                 f"depth_noise_profile={env_cfg.student_obs.depth_noise_profile} "
-                f"camera_rand={env_cfg.student_obs.camera_pose_randomization_profile}",
+                f"published_depth_source={args.published_depth_source} "
+                f"camera_rand={env_cfg.student_obs.camera_pose_randomization_profile} "
+                f"camera_pos_noise_m={env_cfg.student_obs.camera_pos_noise_m} "
+                f"camera_rot_noise_deg={env_cfg.student_obs.camera_rot_noise_deg}",
                 flush=True,
             )
 

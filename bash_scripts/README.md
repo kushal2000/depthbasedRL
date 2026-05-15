@@ -86,13 +86,13 @@ intrinsics.
     Publishes a fixed or replayed metric depth image on `/zed/zed_node/depth/depth_registered` plus optional CameraInfo. Supports `.npz`, `.npy`, image files, and mp4/avi/mov.
 
 33. `33_depth_debug_student_ros_topic_dry_run.sh [checkpoint]`
-    Runs the student policy against the fake ROS depth topic and fake robot, publishes predicted object pose to `/robot_frame/predicted_object_pose`, does not publish joint commands, and records a rollout NPZ on shutdown.
+    Runs the student policy against the fake ROS depth topic and fake robot, publishes predicted object pose to `/robot_frame/predicted_object_pose`, does not publish joint commands, publishes normalized policy-depth debug topics by default, and records a rollout NPZ on shutdown.
 
 34. `34_depth_debug_student_ros_topic_publish_3s.sh [checkpoint]`
     Same as 33, but publishes joint commands for `PUBLISH_DURATION_S=3` seconds by default.
 
 35. `35_depth_debug_visualization_with_depth.sh`
-    Runs the listener-only Viser visualization with optional live depth image display. Set `LOAD_POINT_CLOUD=1` to also show a point cloud when CameraInfo is available.
+    Runs the listener-only Viser visualization with live raw depth plus normalized policy-depth frustums. Set `LOAD_POINT_CLOUD=1` to also show a point cloud when CameraInfo is available, or `LOAD_POLICY_DEPTH_IMAGE=0` to hide the student-policy input frustums.
 
 36. `36_home_robot_local.sh`
     Runs `deployment/home_robot.py` in the localhost-only debug ROS environment. This publishes `/iiwa/joint_cmd` and `/sharpa/joint_cmd`, so only use it with the fake robot unless you intentionally override the ROS environment for hardware.
@@ -112,6 +112,18 @@ intrinsics.
 
 41. `41_visualize_student_depth_rollout_recording.sh [recording.npz]`
     Opens a recorded student-depth rollout NPZ in Viser. Defaults to `student_depth_ros_topic_publish_recording/2026-05-15_00-16-24_student_depth_rollout.npz` and `OBJECT_NAME=peg_L`. Set `FLIP_DEPTH_IMAGE_Y=1` only if inspecting an older recording that appears vertically flipped.
+
+42. `42_isaac_depth_ros_train_settings_noise_camrand.sh`
+    IsaacSim ROS source with medium metric depth noise and 20 mm / 2 deg startup camera-pose randomization. Publishes the noisy metric depth image so the ROS student node receives the train-style depth-noise condition.
+
+43. `43_isaac_depth_ros_no_noise_camrand.sh`
+    Same 20 mm / 2 deg startup camera-pose randomization, but publishes clean raw metric depth.
+
+44. `44_isaac_depth_ros_noise_no_camrand.sh`
+    Medium metric depth noise, but fixed nominal student-camera pose.
+
+45. `45_isaac_depth_ros_clean_no_camrand.sh`
+    Clean raw metric depth and fixed nominal student-camera pose.
 
 Recommended student-policy test order:
 
@@ -178,10 +190,12 @@ bash_scripts/36_home_robot_local.sh
 IsaacSim-backed fake-real pipeline:
 
 1. Terminal A: `bash_scripts/30_depth_debug_roscore_local.sh`
-2. Terminal B: `DEPTH_EVERY_N=4 bash_scripts/40_isaac_depth_ros_node_render_every_4.sh`
+2. Terminal B: `bash_scripts/42_isaac_depth_ros_train_settings_noise_camrand.sh`
 3. Terminal C: `bash_scripts/35_depth_debug_visualization_with_depth.sh`
 4. Terminal D: `RUN_DURATION_S=30 bash_scripts/33_depth_debug_student_ros_topic_dry_run.sh`
 5. Terminal E, if you want the student to drive IsaacSim: `RUN_DURATION_S=30 PUBLISH_DURATION_S=10 bash_scripts/34_depth_debug_student_ros_topic_publish_3s.sh`
+
+Swap Terminal B for scripts 43, 44, or 45 to isolate whether performance changes are caused by depth noise, camera-pose randomization, or both. The wrappers default to `DEPTH_EVERY_N=2`; override it if you want a different simulated camera rate.
 
 Benchmark render frequency before running the full loop:
 

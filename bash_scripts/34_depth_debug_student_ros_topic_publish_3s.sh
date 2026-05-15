@@ -11,6 +11,11 @@ CHECKPOINT="${1:-${DEFAULT_STUDENT_CHECKPOINT:-${DEFAULT_CHECKPOINT}}}"
 RUN_DURATION_S="${RUN_DURATION_S:-10}"
 PUBLISH_DURATION_S="${PUBLISH_DURATION_S:-3}"
 RECORD_DIR="${RECORD_DIR:-./student_depth_ros_topic_publish_recording}"
+PUBLISH_DEBUG_POLICY_DEPTH="${PUBLISH_DEBUG_POLICY_DEPTH:-1}"
+EXTRA_ARGS=()
+if [[ "${PUBLISH_DEBUG_POLICY_DEPTH}" == "1" ]]; then
+  EXTRA_ARGS+=(--publish_debug_policy_depth)
+fi
 
 if [[ ! -f "${CHECKPOINT}" ]]; then
   echo "Checkpoint not found: ${CHECKPOINT}" >&2
@@ -25,4 +30,5 @@ python deployment/student_depth_policy_node_nonblocking.py \
   --publish_joint_commands \
   --publish_joint_commands_duration_s "${PUBLISH_DURATION_S}" \
   --record_rollout_dir "${RECORD_DIR}" \
-  --record_depth_format uint8
+  --record_depth_format uint8 \
+  "${EXTRA_ARGS[@]}"

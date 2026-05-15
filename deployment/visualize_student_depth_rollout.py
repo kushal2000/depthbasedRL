@@ -32,6 +32,8 @@ from dextoolbench.objects import NAME_TO_OBJECT
 DEFAULT_CAMERA_FRAME = "/student_depth_camera"
 DEFAULT_CAMERA_POS_WORLD = (-0.5002050422666431, -0.6385715691360607, 1.0201893282998005)
 DEFAULT_CAMERA_QUAT_WXYZ = (-0.5314110448277682, 0.833810802683381, -0.14035163049226862, 0.051606846267884886)
+DEFAULT_DEPTH_NEAR_M = 0.70
+DEFAULT_DEPTH_FAR_M = 1.10
 LIGHT_BLUE_RGBA = (80, 200, 255, 0.55)
 ORANGE_RGB = (255, 145, 0)
 WORLD_T_ROBOT_POS_M = np.asarray([0.0, 0.8, 0.0], dtype=np.float64)
@@ -46,6 +48,16 @@ def _policy_depth_to_rgb(policy_depth: np.ndarray, depth_format: str) -> np.ndar
     normalized = np.clip(normalized, 0.0, 1.0)
     gray = (255.0 * (1.0 - normalized)).astype(np.uint8)
     return np.repeat(gray[..., None], 3, axis=-1)
+
+
+def _metric_depth_to_rgb(depth_m: np.ndarray, near_m: float, far_m: float) -> np.ndarray:
+    depth = np.asarray(depth_m, dtype=np.float32)
+    valid = np.isfinite(depth) & (depth > 0.0)
+    normalized = np.clip((depth - near_m) / max(far_m - near_m, 1e-6), 0.0, 1.0)
+    gray = (255.0 * (1.0 - normalized)).astype(np.uint8)
+    rgb = np.repeat(gray[..., None], 3, axis=-1)
+    rgb[~valid] = np.array([30, 30, 30], dtype=np.uint8)
+    return rgb
 
 
 def _viser_frustum_image(rgb: np.ndarray, *, flip_y: bool) -> np.ndarray:
@@ -88,8 +100,13 @@ def main() -> None:
         prev_targets = q_targets
     actions = data["actions"]
     published = _npz_get(data, "published")
+    raw_depth_m = _npz_get(data, "raw_depth_m")
+    resized_depth_m = _npz_get(data, "resized_depth_m")
+    policy_full_depth = _npz_get(data, "policy_full_depth")
     policy_depth = data["policy_depth"]
     depth_format = str(np.asarray(data["policy_depth_format"]).item())
+    depth_near_m = float(np.asarray(data["depth_near_m"]).item()) if "depth_near_m" in data.files else DEFAULT_DEPTH_NEAR_M
+    depth_far_m = float(np.asarray(data["depth_far_m"]).item()) if "depth_far_m" in data.files else DEFAULT_DEPTH_FAR_M
     time_s = data["time_s"]
     pred_pos = _npz_get(data, "predicted_object_pos")
     pred_quat = _npz_get(data, "predicted_object_quat_xyzw")
@@ -161,18 +178,53 @@ def main() -> None:
         axes_length=0.08,
         axes_radius=0.002,
     )
-    depth_frustum = server.scene.add_camera_frustum(
-        f"{DEFAULT_CAMERA_FRAME}/policy_depth",
+    raw_depth_shape = (
+        raw_depth_m.shape[1:3]
+        if raw_depth_m is not None
+        else (policy_depth.shape[1], policy_depth.shape[2])
+    )
+    raw_depth_frustum = server.scene.add_camera_frustum(
+        f"{DEFAULT_CAMERA_FRAME}/raw_depth_window",
+        fov=0.7,
+        aspect=float(raw_depth_shape[1]) / float(raw_depth_shape[0]),
+        scale=0.24,
+        line_width=2.0,
+        color=(0, 0, 0),
+        image=np.zeros((raw_depth_shape[0], raw_depth_shape[1], 3), dtype=np.uint8),
+    )
+    resized_depth_frustum = server.scene.add_camera_frustum(
+        f"{DEFAULT_CAMERA_FRAME}/resized_depth_window",
+        fov=0.7,
+        aspect=16.0 / 9.0,
+        scale=0.19,
+        line_width=2.0,
+        color=ORANGE_RGB,
+        image=np.zeros((90, 160, 3), dtype=np.uint8),
+    )
+    policy_full_frustum = server.scene.add_camera_frustum(
+        f"{DEFAULT_CAMERA_FRAME}/policy_full_depth",
+        fov=0.7,
+        aspect=16.0 / 9.0,
+        scale=0.15,
+        line_width=2.0,
+        color=(120, 120, 120),
+        image=np.zeros((90, 160, 3), dtype=np.uint8),
+    )
+    policy_crop_frustum = server.scene.add_camera_frustum(
+        f"{DEFAULT_CAMERA_FRAME}/policy_crop",
         fov=0.7,
         aspect=float(policy_depth.shape[2]) / float(policy_depth.shape[1]),
-        scale=0.25,
+        scale=0.11,
+        line_width=2.0,
+        color=(25, 75, 255),
         image=np.zeros((policy_depth.shape[1], policy_depth.shape[2], 3), dtype=np.uint8),
     )
 
     server.gui.add_markdown("# Student Depth Rollout Recording")
     server.gui.add_markdown(
         "Robot: black=current state, blue=output PD target, orange=previous target. "
-        "Object: normal=actual pose, light blue=student predicted pose."
+        "Object: normal=actual pose, light blue=student predicted pose. "
+        "Depth frustums: black=raw metric window, orange=resized metric window, gray=full policy window, blue=policy crop."
     )
     with server.gui.add_folder("Playback", expand_by_default=True):
         slider = server.gui.add_slider("Frame", min=0, max=max(0, n - 1), step=1, initial_value=0)
@@ -195,7 +247,21 @@ def main() -> None:
         robot.update_cfg(q[frame_idx])
         robot_pd_target.update_cfg(q_targets[frame_idx])
         robot_prev_target.update_cfg(prev_targets[frame_idx])
-        depth_frustum.image = _viser_frustum_image(
+        if raw_depth_m is not None:
+            raw_img = _metric_depth_to_rgb(raw_depth_m[frame_idx], depth_near_m, depth_far_m)
+            raw_depth_frustum.image = _viser_frustum_image(raw_img, flip_y=args.flip_depth_image_y)
+            raw_depth_frustum.aspect = float(raw_img.shape[1]) / float(raw_img.shape[0])
+        if resized_depth_m is not None:
+            resized_img = _metric_depth_to_rgb(resized_depth_m[frame_idx], depth_near_m, depth_far_m)
+            resized_depth_frustum.image = _viser_frustum_image(resized_img, flip_y=args.flip_depth_image_y)
+            resized_depth_frustum.aspect = float(resized_img.shape[1]) / float(resized_img.shape[0])
+        if policy_full_depth is not None:
+            policy_full_frustum.image = _viser_frustum_image(
+                _policy_depth_to_rgb(policy_full_depth[frame_idx], depth_format),
+                flip_y=args.flip_depth_image_y,
+            )
+            policy_full_frustum.aspect = float(policy_full_depth.shape[2]) / float(policy_full_depth.shape[1])
+        policy_crop_frustum.image = _viser_frustum_image(
             _policy_depth_to_rgb(policy_depth[frame_idx], depth_format),
             flip_y=args.flip_depth_image_y,
         )
