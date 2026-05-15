@@ -53,6 +53,7 @@ DEPLOYMENT_HOME_ARM_Q = np.asarray(
     dtype=np.float32,
 )
 ZERO_HAND_Q = np.zeros(N_HAND, dtype=np.float32)
+DEPLOYMENT_EPISODE_LENGTH_S = 1.0e6
 
 
 def _to_numpy(value: Any) -> np.ndarray:
@@ -80,6 +81,128 @@ def _student_camera_k(cfg) -> np.ndarray:
         [[fx, 0.0, (width - 1.0) * 0.5], [0.0, fy, (height - 1.0) * 0.5], [0.0, 0.0, 1.0]],
         dtype=np.float32,
     )
+
+
+def _default_object_pose_wxyz(env_cfg) -> tuple[float, float, float, float, float, float, float]:
+    """Default generic SimToolReal object pose in env-local IsaacSim coordinates."""
+    return (
+        0.0,
+        0.0,
+        float(env_cfg.reset.table_reset_z + env_cfg.reset.table_object_z_offset),
+        1.0,
+        0.0,
+        0.0,
+        0.0,
+    )
+
+
+def _zero_training_randomization(env_cfg) -> None:
+    """Turn off reset/DR knobs that make the sim differ from a real continuous robot."""
+    reset = env_cfg.reset
+    reset.reset_dof_pos_random_interval_arm = 0.0
+    reset.reset_dof_pos_random_interval_fingers = 0.0
+    reset.reset_dof_vel_random_interval = 0.0
+    reset.reset_position_noise_x = 0.0
+    reset.reset_position_noise_y = 0.0
+    reset.reset_position_noise_z = 0.0
+    reset.table_reset_z_range = 0.0
+
+    dr = env_cfg.domain_randomization
+    dr.use_obs_delay = False
+    dr.use_action_delay = False
+    dr.use_object_state_delay_noise = False
+    dr.object_state_xyz_noise_std = 0.0
+    dr.object_state_rotation_noise_degrees = 0.0
+    dr.joint_velocity_obs_noise_std = 0.0
+    dr.force_scale = 0.0
+    dr.torque_scale = 0.0
+    dr.force_prob_range = (1.0e-12, 1.0e-12)
+    dr.torque_prob_range = (1.0e-12, 1.0e-12)
+    dr.object_scale_noise_multiplier_range = (1.0, 1.0)
+
+    student_obs = env_cfg.student_obs
+    student_obs.use_camera_delay = False
+    student_obs.camera_delay_max = 0
+    student_obs.use_student_obs_delay = False
+    student_obs.student_obs_delay_max = 0
+    student_obs.camera_pose_randomization_profile = "off"
+    student_obs.camera_pose_randomization_mode = "startup"
+
+
+def _apply_object_init_cfg(args: argparse.Namespace, env_cfg) -> tuple[float, ...] | None:
+    """Configure deterministic or randomized object init.
+
+    Returns a resolved pose for node-side manual writing when a fixed pose is
+    requested. Peg-in-hole has its own scene-file reset path, so a fixed pose
+    must be written after the env reset.
+    """
+    mode = str(args.object_init_mode).lower()
+    if mode == "env_reset":
+        return None
+
+    has_peg_cfg = hasattr(env_cfg, "peg_in_hole")
+    if has_peg_cfg:
+        pih = env_cfg.peg_in_hole
+        if mode == "default":
+            pih.object_init_position_noise_xy = (0.0, 0.0)
+            pih.object_init_position_noise_z = 0.0
+            pih.object_init_orientation_mode = "scene"
+        elif mode == "randomized":
+            noise = tuple(float(v) for v in args.object_init_position_noise_m)
+            pih.object_init_position_noise_xy = (noise[0], noise[1])
+            pih.object_init_position_noise_z = noise[2]
+            if args.object_init_orientation_mode is not None:
+                pih.object_init_orientation_mode = args.object_init_orientation_mode
+            elif args.object_init_yaw_noise_deg > 0.0:
+                pih.object_init_orientation_mode = "yaw_only"
+                pih.object_init_yaw_range_degrees = float(args.object_init_yaw_noise_deg)
+        elif mode == "fixed":
+            if args.object_init_pose_wxyz is None:
+                raise ValueError(
+                    "--object_init_mode fixed requires --object_init_pose_wxyz x y z qw qx qy qz"
+                )
+            return tuple(float(v) for v in args.object_init_pose_wxyz)
+        else:
+            raise ValueError(f"Unsupported --object_init_mode={args.object_init_mode!r}")
+        return None
+
+    if mode == "default":
+        env_cfg.reset.fixed_start_pose = _default_object_pose_wxyz(env_cfg)
+    elif mode == "randomized":
+        noise = tuple(float(v) for v in args.object_init_position_noise_m)
+        env_cfg.reset.fixed_start_pose = None
+        env_cfg.reset.reset_position_noise_x = noise[0]
+        env_cfg.reset.reset_position_noise_y = noise[1]
+        env_cfg.reset.reset_position_noise_z = noise[2]
+        if args.object_init_orientation_mode is not None:
+            env_cfg.reset.object_orientation_mode = args.object_init_orientation_mode
+        elif args.object_init_yaw_noise_deg > 0.0:
+            env_cfg.reset.object_orientation_mode = "yaw_only"
+            env_cfg.reset.object_yaw_range_degrees = float(args.object_init_yaw_noise_deg)
+    elif mode == "fixed":
+        if args.object_init_pose_wxyz is None:
+            raise ValueError(
+                "--object_init_mode fixed requires --object_init_pose_wxyz x y z qw qx qy qz"
+            )
+        env_cfg.reset.fixed_start_pose = tuple(float(v) for v in args.object_init_pose_wxyz)
+    else:
+        raise ValueError(f"Unsupported --object_init_mode={args.object_init_mode!r}")
+    return None
+
+
+def _install_no_reset_done_wrapper(inner) -> None:
+    """Keep reward/success bookkeeping, but prevent DirectRLEnv auto-resets."""
+    original_get_dones = inner._get_dones
+
+    def _get_dones_no_reset():
+        original_get_dones()
+        zeros = torch.zeros(inner.num_envs, dtype=torch.bool, device=inner.device)
+        inner._termination_reasons = getattr(inner, "_termination_reasons", {})
+        inner._termination_reasons["deployment_no_reset"] = torch.ones_like(zeros)
+        return zeros, zeros
+
+    inner._deployment_original_get_dones = original_get_dones
+    inner._get_dones = _get_dones_no_reset
 
 
 def _fmt_stats(values: deque[float]) -> str:
@@ -145,6 +268,8 @@ class IsaacDepthEnvNode:
         self.camera_k = _student_camera_k(inner.cfg.student_obs) if args.enable_depth else None
 
         self.env.reset()
+        if getattr(args, "resolved_object_init_pose_wxyz", None) is not None:
+            self._write_object_pose_local_wxyz(args.resolved_object_init_pose_wxyz)
         q_canon = self._initial_pose_canon()
         if q_canon is not None:
             self._write_joint_state_canon(q_canon)
@@ -216,6 +341,20 @@ class IsaacDepthEnvNode:
         self.inner.robot.write_joint_state_to_sim(q_lab, qd_lab, env_ids=env_ids)
         self.inner._prev_targets[:] = q_lab
         self.inner._cur_targets[:] = q_lab
+
+    def _write_object_pose_local_wxyz(self, pose_wxyz: tuple[float, ...]) -> None:
+        pose_wxyz_np = np.asarray(pose_wxyz, dtype=np.float32)
+        if pose_wxyz_np.shape != (7,):
+            raise ValueError(f"Expected object pose shape (7,), got {pose_wxyz_np.shape}")
+        env_ids = torch.arange(self.inner.num_envs, device=self.device, dtype=torch.long)
+        pose = torch.as_tensor(pose_wxyz_np, device=self.device, dtype=torch.float32).view(1, 7)
+        pose = pose.expand(self.inner.num_envs, -1).clone()
+        pose[:, :3] += self.inner.scene.env_origins[env_ids]
+        self.inner.object.write_root_pose_to_sim(pose, env_ids=env_ids)
+        self.inner.object.write_root_velocity_to_sim(
+            torch.zeros(self.inner.num_envs, 6, device=self.device), env_ids=env_ids
+        )
+        self.inner._object_init_z[:] = pose_wxyz_np[2]
 
     def _write_replay_target(self, target_canon: np.ndarray) -> None:
         target = torch.as_tensor(target_canon, device=self.device, dtype=torch.float32).view(1, -1)
@@ -399,6 +538,55 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--peg_goal_mode", default=None)
     parser.add_argument("--object_init_orientation_mode", default=None)
     parser.add_argument(
+        "--deployment_mode",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Apply fake-real deployment defaults: deterministic resets, no training DR, and no auto-reset while stepping.",
+    )
+    parser.add_argument(
+        "--disable_env_resets",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Prevent timeout/fall/success-driven automatic env resets after the initial construction reset.",
+    )
+    parser.add_argument(
+        "--zero_training_randomization",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Zero robot/object/table reset noise and dynamics/observation domain randomization.",
+    )
+    parser.add_argument(
+        "--object_init_mode",
+        choices=("default", "fixed", "randomized", "env_reset"),
+        default="default",
+        help=(
+            "Object init source. default uses the deterministic task default/scene pose; fixed uses "
+            "--object_init_pose_wxyz; randomized applies the provided init noise once at startup because resets are off."
+        ),
+    )
+    parser.add_argument(
+        "--object_init_pose_wxyz",
+        type=float,
+        nargs=7,
+        default=None,
+        metavar=("X", "Y", "Z", "QW", "QX", "QY", "QZ"),
+        help="Fixed env-local IsaacSim object pose. This is not robot_frame; pose is before adding scene.env_origins.",
+    )
+    parser.add_argument(
+        "--object_init_position_noise_m",
+        type=float,
+        nargs=3,
+        default=(0.0, 0.0, 0.0),
+        metavar=("X", "Y", "Z"),
+        help="Half-width position noise for --object_init_mode randomized.",
+    )
+    parser.add_argument(
+        "--object_init_yaw_noise_deg",
+        type=float,
+        default=0.0,
+        help="Yaw-only orientation noise for --object_init_mode randomized when no explicit orientation mode is provided.",
+    )
+    parser.add_argument(
         "--initial_robot_pose",
         choices=("deployment_home", "sim_default", "env_reset"),
         default="deployment_home",
@@ -443,7 +631,15 @@ def main() -> None:
         env_cfg = _load_env_cfg(args.task, args.teacher_config, args.num_envs, args.sim_device)
         env_cfg.scene.num_envs = int(args.num_envs)
         env_cfg.student_obs.image_enabled = bool(args.enable_depth)
-        if args.initial_robot_pose != "env_reset":
+        if args.deployment_mode and args.zero_training_randomization:
+            _zero_training_randomization(env_cfg)
+        if args.deployment_mode and args.disable_env_resets:
+            env_cfg.episode_length_s = DEPLOYMENT_EPISODE_LENGTH_S
+            env_cfg.termination.max_consecutive_successes = 0
+        args.resolved_object_init_pose_wxyz = None
+        if args.deployment_mode:
+            args.resolved_object_init_pose_wxyz = _apply_object_init_cfg(args, env_cfg)
+        elif args.initial_robot_pose != "env_reset":
             env_cfg.reset.reset_dof_pos_random_interval_arm = 0.0
             env_cfg.reset.reset_dof_pos_random_interval_fingers = 0.0
             env_cfg.reset.reset_dof_vel_random_interval = 0.0
@@ -454,11 +650,29 @@ def main() -> None:
             env_cfg.assets.object_name = Path(args.peg_urdf).stem
         if args.peg_goal_mode is not None:
             env_cfg.peg_in_hole.goal_mode = args.peg_goal_mode
-        if args.object_init_orientation_mode is not None:
+        if args.object_init_orientation_mode is not None and hasattr(env_cfg, "peg_in_hole"):
             env_cfg.peg_in_hole.object_init_orientation_mode = args.object_init_orientation_mode
+        if args.deployment_mode:
+            object_pose_note = (
+                "manual_fixed_pose"
+                if args.resolved_object_init_pose_wxyz is not None
+                else args.object_init_mode
+            )
+            print(
+                "[isaac_depth_env_node] deployment config: "
+                f"disable_env_resets={args.disable_env_resets} "
+                f"zero_training_randomization={args.zero_training_randomization} "
+                f"initial_robot_pose={args.initial_robot_pose} "
+                f"object_init={object_pose_note} "
+                f"depth_noise_profile={env_cfg.student_obs.depth_noise_profile} "
+                f"camera_rand={env_cfg.student_obs.camera_pose_randomization_profile}",
+                flush=True,
+            )
 
         env = gym.make(args.task, cfg=env_cfg)
         inner = env.unwrapped
+        if args.deployment_mode and args.disable_env_resets:
+            _install_no_reset_done_wrapper(inner)
         ros = None if args.benchmark else _import_ros()
         node = IsaacDepthEnvNode(args, env, inner, ros)
         node.run()

@@ -108,7 +108,7 @@ intrinsics.
 
 40. `40_isaac_depth_ros_node_render_every_4.sh`
     IsaacSim ROS source node. It subscribes to joint commands, publishes simulated joint states/object pose, and publishes IsaacSim depth every `DEPTH_EVERY_N` steps.
-    By default it initializes the robot to `deployment/home_robot.py`'s home pose and disables robot reset randomization. Use `INITIAL_ROBOT_POSE=env_reset` to inspect the raw training-env reset distribution.
+    By default it runs in deployment mode: one construction reset only, no timeout/fall auto-reset while stepping, robot initialized to `deployment/home_robot.py`'s home pose, object initialized from the deterministic task default/scene pose, and training reset/domain randomization disabled. Use `INITIAL_ROBOT_POSE=env_reset`, `OBJECT_INIT_MODE=env_reset`, `DISABLE_ENV_RESETS=0`, or `ZERO_TRAINING_RANDOMIZATION=0` only when intentionally inspecting training-env behavior.
 
 Recommended student-policy test order:
 
@@ -188,6 +188,15 @@ bash_scripts/38_isaac_depth_render_every_step_benchmark.sh
 DEPTH_EVERY_N=4 bash_scripts/39_isaac_depth_render_every_4_benchmark.sh
 DEPTH_EVERY_N=8 bash_scripts/39_isaac_depth_render_every_4_benchmark.sh
 ```
+
+IsaacSim deployment-mode overrides:
+
+- `INITIAL_ROBOT_POSE=deployment_home` is the default and matches `deployment/home_robot.py`; use `sim_default` to inspect the raw IsaacSim asset default or `env_reset` to leave the env reset state untouched.
+- `OBJECT_INIT_MODE=default` is the default. For peg-in-hole this uses the scene-file start pose with no added init noise and scene orientation; for generic SimToolReal it uses the deterministic table-centered object pose.
+- `OBJECT_INIT_MODE=fixed OBJECT_INIT_POSE_WXYZ="0 0 0.63 1 0 0 0" ...` writes a fixed env-local IsaacSim object pose after the construction reset.
+- `OBJECT_INIT_MODE=randomized OBJECT_INIT_POSITION_NOISE_M="0.01 0.01 0" OBJECT_INIT_YAW_NOISE_DEG=5 ...` enables startup object init randomization. Because deployment mode disables auto-resets, this is sampled at the construction reset and then stays continuous.
+- `DISABLE_ENV_RESETS=0` allows the training env to auto-reset on timeout/fall/hand-far/max-success. Leave it unset for fake-real deployment simulation.
+- `ZERO_TRAINING_RANDOMIZATION=0` restores training-style reset/domain-randomization settings from the teacher config. Leave it unset for fake-real deployment simulation.
 
 The IsaacSim scripts source `bash_scripts/isaacsim_ros_env.sh`: this keeps ROS
 on localhost, uses the IsaacSim Python for Isaac Lab, and prepends the ROS
