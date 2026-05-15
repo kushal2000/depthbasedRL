@@ -94,6 +94,9 @@ intrinsics.
 35. `35_depth_debug_visualization_with_depth.sh`
     Runs the listener-only Viser visualization with optional live depth image display. Set `LOAD_POINT_CLOUD=1` to also show a point cloud when CameraInfo is available.
 
+36. `36_home_robot_local.sh`
+    Runs `deployment/home_robot.py` in the localhost-only debug ROS environment. This publishes `/iiwa/joint_cmd` and `/sharpa/joint_cmd`, so only use it with the fake robot unless you intentionally override the ROS environment for hardware.
+
 Recommended student-policy test order:
 
 1. `01_zed_baseline_60hz_no_preprocess.sh`
@@ -149,6 +152,12 @@ Local fake-ROS safety/debug sequence:
 3. Terminal C: `bash_scripts/32_depth_debug_fake_depth_from_file.sh /path/to/depth.npz`
 4. Terminal D: `bash_scripts/35_depth_debug_visualization_with_depth.sh`
 5. Terminal E: `RUN_DURATION_S=30 bash_scripts/33_depth_debug_student_ros_topic_dry_run.sh`
+
+To home the fake robot in this localhost setup:
+
+```bash
+bash_scripts/36_home_robot_local.sh
+```
 
 All `30+` scripts source `bash_scripts/depth_deploy_debug_env.sh`, activate
 `${DEPTH_DEPLOY_CONDA_ENV:-simtoolreal_ros_env}`, and force localhost ROS
