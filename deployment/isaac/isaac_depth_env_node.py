@@ -47,6 +47,12 @@ N_HAND = 22
 N_ACTIONS = 29
 IIWA_JOINT_NAMES = [f"iiwa_joint_{idx}" for idx in range(1, N_ARM + 1)]
 SHARPA_JOINT_NAMES = [f"joint_{idx}.0" for idx in range(N_HAND)]
+SIM_DEFAULT_ARM_Q = np.asarray([-1.571, 1.571, 0.0, 1.376, 0.0, 1.485, 1.308], dtype=np.float32)
+DEPLOYMENT_HOME_ARM_Q = np.asarray(
+    [-1.571, 1.571 - np.deg2rad(10.0), 0.0, 1.376 + np.deg2rad(10.0), 0.0, 1.485, 1.308],
+    dtype=np.float32,
+)
+ZERO_HAND_Q = np.zeros(N_HAND, dtype=np.float32)
 
 
 def _to_numpy(value: Any) -> np.ndarray:
@@ -139,7 +145,11 @@ class IsaacDepthEnvNode:
         self.camera_k = _student_camera_k(inner.cfg.student_obs) if args.enable_depth else None
 
         self.env.reset()
-        q_canon, _ = self._joint_state_canon()
+        q_canon = self._initial_pose_canon()
+        if q_canon is not None:
+            self._write_joint_state_canon(q_canon)
+        else:
+            q_canon, _ = self._joint_state_canon()
         self.latest_target_canon = q_canon.copy()
         self._write_replay_target(q_canon)
 
@@ -184,6 +194,28 @@ class IsaacDepthEnvNode:
         q = _to_numpy(self.inner.robot.data.joint_pos[0, perm]).astype(np.float32)
         qd = _to_numpy(self.inner.robot.data.joint_vel[0, perm]).astype(np.float32)
         return q, qd
+
+    def _initial_pose_canon(self) -> np.ndarray | None:
+        mode = str(self.args.initial_robot_pose).lower()
+        if mode == "env_reset":
+            return None
+        if mode == "sim_default":
+            return np.concatenate([SIM_DEFAULT_ARM_Q, ZERO_HAND_Q]).astype(np.float32)
+        if mode == "deployment_home":
+            return np.concatenate([DEPLOYMENT_HOME_ARM_Q, ZERO_HAND_Q]).astype(np.float32)
+        raise ValueError(f"Unsupported --initial_robot_pose={self.args.initial_robot_pose!r}")
+
+    def _write_joint_state_canon(self, q_canon: np.ndarray) -> None:
+        q_canon = np.asarray(q_canon, dtype=np.float32)
+        if q_canon.shape != (N_ACTIONS,):
+            raise ValueError(f"Expected canonical q shape {(N_ACTIONS,)}, got {q_canon.shape}")
+        q_lab = torch.as_tensor(q_canon, device=self.device, dtype=torch.float32).view(1, -1)[:, self.inner._perm_canon_to_lab]
+        q_lab = q_lab.expand(self.inner.num_envs, -1).clone()
+        qd_lab = torch.zeros_like(q_lab)
+        env_ids = torch.arange(self.inner.num_envs, device=self.device, dtype=torch.long)
+        self.inner.robot.write_joint_state_to_sim(q_lab, qd_lab, env_ids=env_ids)
+        self.inner._prev_targets[:] = q_lab
+        self.inner._cur_targets[:] = q_lab
 
     def _write_replay_target(self, target_canon: np.ndarray) -> None:
         target = torch.as_tensor(target_canon, device=self.device, dtype=torch.float32).view(1, -1)
@@ -366,6 +398,15 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--peg_urdf", default=None)
     parser.add_argument("--peg_goal_mode", default=None)
     parser.add_argument("--object_init_orientation_mode", default=None)
+    parser.add_argument(
+        "--initial_robot_pose",
+        choices=("deployment_home", "sim_default", "env_reset"),
+        default="deployment_home",
+        help=(
+            "Initial robot joint pose. deployment_home matches deployment/home_robot.py; "
+            "sim_default matches the IsaacSim training asset default; env_reset leaves the randomized env reset untouched."
+        ),
+    )
     parser.add_argument("--status_interval_s", type=float, default=2.0)
     parser.add_argument("--depth_topic", default=DEPTH_TOPIC)
     parser.add_argument("--camera_info_topic", default=CAMERA_INFO_TOPIC)
@@ -402,6 +443,10 @@ def main() -> None:
         env_cfg = _load_env_cfg(args.task, args.teacher_config, args.num_envs, args.sim_device)
         env_cfg.scene.num_envs = int(args.num_envs)
         env_cfg.student_obs.image_enabled = bool(args.enable_depth)
+        if args.initial_robot_pose != "env_reset":
+            env_cfg.reset.reset_dof_pos_random_interval_arm = 0.0
+            env_cfg.reset.reset_dof_pos_random_interval_fingers = 0.0
+            env_cfg.reset.reset_dof_vel_random_interval = 0.0
         _apply_student_camera_preset(env_cfg, args.student_camera_preset)
         env_cfg.student_obs.depth_noise_profile = args.depth_noise_profile
         if args.peg_urdf is not None:

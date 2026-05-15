@@ -108,6 +108,7 @@ intrinsics.
 
 40. `40_isaac_depth_ros_node_render_every_4.sh`
     IsaacSim ROS source node. It subscribes to joint commands, publishes simulated joint states/object pose, and publishes IsaacSim depth every `DEPTH_EVERY_N` steps.
+    By default it initializes the robot to `deployment/home_robot.py`'s home pose and disables robot reset randomization. Use `INITIAL_ROBOT_POSE=env_reset` to inspect the raw training-env reset distribution.
 
 Recommended student-policy test order:
 
