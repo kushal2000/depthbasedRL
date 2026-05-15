@@ -75,6 +75,8 @@ class FakeRobotNode:
 
         self.iiwa_joint_q = self._initial_arm_q(args)
         self.sharpa_joint_q = self._initial_hand_q(args)
+        self.initial_iiwa_joint_q = self.iiwa_joint_q.copy()
+        self.initial_sharpa_joint_q = self.sharpa_joint_q.copy()
         self.iiwa_joint_qd = np.zeros(NUM_ARM_JOINTS, dtype=np.float64)
         self.sharpa_joint_qd = np.zeros(NUM_HAND_JOINTS, dtype=np.float64)
 
@@ -188,7 +190,9 @@ class FakeRobotNode:
             "[fake_robot_node] "
             f"iiwa_cmd={self.iiwa_joint_cmd is not None} sharpa_cmd={self.sharpa_joint_cmd is not None} "
             f"iiwa_delta_norm={np.linalg.norm((self.iiwa_joint_cmd if self.iiwa_joint_cmd is not None else self.iiwa_joint_q) - self.iiwa_joint_q):.4f} "
-            f"sharpa_delta_norm={np.linalg.norm((self.sharpa_joint_cmd if self.sharpa_joint_cmd is not None else self.sharpa_joint_q) - self.sharpa_joint_q):.4f}"
+            f"sharpa_delta_norm={np.linalg.norm((self.sharpa_joint_cmd if self.sharpa_joint_cmd is not None else self.sharpa_joint_q) - self.sharpa_joint_q):.4f} "
+            f"iiwa_from_start={np.linalg.norm(self.iiwa_joint_q - self.initial_iiwa_joint_q):.4f} "
+            f"sharpa_from_start={np.linalg.norm(self.sharpa_joint_q - self.initial_sharpa_joint_q):.4f}"
         )
 
     def run(self) -> None:
