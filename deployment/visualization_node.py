@@ -139,9 +139,9 @@ def _depth_to_rgb(depth_m: np.ndarray, near_m: float, far_m: float) -> np.ndarra
     return rgb
 
 
-def _viser_frustum_image(rgb: np.ndarray) -> np.ndarray:
-    # Viser frustum images use an image-plane convention opposite from OpenCV.
-    return np.flipud(np.asarray(rgb))
+def _viser_frustum_image(rgb: np.ndarray, *, flip_y: bool) -> np.ndarray:
+    image = np.asarray(rgb)
+    return np.flipud(image) if flip_y else image
 
 
 def _points_from_depth(
@@ -548,7 +548,7 @@ class VisualizationNode:
 
         rgb = _depth_to_rgb(depth, self.args.depth_near_m, self.args.depth_far_m)
         if self.depth_frustum is not None:
-            self.depth_frustum.image = _viser_frustum_image(rgb)
+            self.depth_frustum.image = _viser_frustum_image(rgb, flip_y=self.args.flip_depth_image_y)
             K = self.ros_snapshot.camera_K
             h, w = depth.shape
             self.depth_frustum.aspect = float(w) / float(h)
@@ -689,6 +689,8 @@ class VisualizationNodeArgs:
     """Maximum number of point-cloud points shown."""
     point_size: float = 0.006
     """Viser point-cloud point size."""
+    flip_depth_image_y: bool = False
+    """Flip depth image vertically before displaying in the Viser frustum."""
 
 
 def main():
