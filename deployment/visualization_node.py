@@ -12,7 +12,7 @@ import tyro
 import viser
 from geometry_msgs.msg import Pose, PoseStamped
 from scipy.spatial.transform import Rotation as R
-from sensor_msgs.msg import JointState
+from sensor_msgs.msg import CameraInfo, Image, JointState
 from termcolor import colored
 from viser.extras import ViserUrdf
 
@@ -61,6 +61,15 @@ BLACK_RGBA = (0, 0, 0, 1.0)
 
 AXES_LENGTH = 0.1
 AXES_RADIUS = 0.001
+DEFAULT_DEPTH_NEAR_M = 0.70
+DEFAULT_DEPTH_FAR_M = 1.10
+DEFAULT_CAMERA_FRAME = "/student_depth_camera"
+DEFAULT_CAMERA_IMAGE_TOPIC = "/zed/zed_node/depth/depth_registered"
+DEFAULT_CAMERA_INFO_TOPIC = "/zed/zed_node/rgb/camera_info"
+# Sim default student-camera pose in the world frame. This is only used for
+# optional depth debugging in Viser; object/robot visualization is unchanged.
+DEFAULT_CAMERA_POS_WORLD = (-0.5002050422666431, -0.6385715691360607, 1.0201893282998005)
+DEFAULT_CAMERA_QUAT_WXYZ = (-0.5314110448277682, 0.833810802683381, -0.14035163049226862, 0.051606846267884886)
 
 # Viser Server global variable
 SERVER = viser.ViserServer()
@@ -83,6 +92,79 @@ def transform_points(T: np.ndarray, points: np.ndarray) -> np.ndarray:
     return (T[:3, :3] @ points.T + T[:3, 3][:, None]).T
 
 
+def _decode_depth_image(msg: Image, depth_units: str) -> np.ndarray:
+    """Decode a ROS depth image into metric meters without requiring cv_bridge."""
+
+    encoding = msg.encoding.lower()
+    if encoding in ("32fc1", "type_32fc1"):
+        depth = np.frombuffer(msg.data, dtype=np.float32).reshape(msg.height, msg.width)
+        inferred_units = "m"
+    elif encoding in ("16uc1", "mono16"):
+        depth = np.frombuffer(msg.data, dtype=np.uint16).reshape(msg.height, msg.width).astype(np.float32)
+        inferred_units = "mm"
+    else:
+        raise ValueError(f"Unsupported depth image encoding={msg.encoding!r}; expected 32FC1 or 16UC1.")
+
+    units = depth_units
+    finite = np.isfinite(depth)
+    if units == "auto":
+        units = inferred_units
+        if finite.any() and float(np.nanmedian(depth[finite])) > 10.0:
+            units = "mm"
+
+    if units == "m":
+        depth_m = depth.astype(np.float32, copy=True)
+    elif units == "mm":
+        depth_m = depth.astype(np.float32, copy=False) / 1000.0
+    else:
+        raise ValueError(f"depth_units must be auto, m, or mm; got {depth_units!r}")
+
+    depth_m[~np.isfinite(depth_m)] = 0.0
+    return depth_m
+
+
+def _depth_to_rgb(depth_m: np.ndarray, near_m: float, far_m: float) -> np.ndarray:
+    depth = np.asarray(depth_m, dtype=np.float32)
+    valid = np.isfinite(depth) & (depth > 0.0)
+    normalized = np.clip((depth - near_m) / max(far_m - near_m, 1e-6), 0.0, 1.0)
+    gray = (255.0 * (1.0 - normalized)).astype(np.uint8)
+    rgb = np.repeat(gray[..., None], 3, axis=-1)
+    rgb[~valid] = np.array([30, 30, 30], dtype=np.uint8)
+    return rgb
+
+
+def _viser_frustum_image(rgb: np.ndarray) -> np.ndarray:
+    # Viser frustum images use an image-plane convention opposite from OpenCV.
+    return np.flipud(np.asarray(rgb))
+
+
+def _points_from_depth(
+    depth_m: np.ndarray,
+    K: np.ndarray,
+    stride: int,
+    max_points: int,
+    near_m: float,
+    far_m: float,
+) -> tuple[np.ndarray, np.ndarray]:
+    depth = np.asarray(depth_m, dtype=np.float32)
+    h, w = depth.shape
+    yy, xx = np.mgrid[0:h:stride, 0:w:stride]
+    z = depth[yy, xx]
+    valid = np.isfinite(z) & (z > 0.0)
+    if not valid.any():
+        return np.empty((0, 3), dtype=np.float32), np.empty((0, 3), dtype=np.uint8)
+
+    x = (xx.astype(np.float32) - float(K[0, 2])) / float(K[0, 0]) * z
+    y = (yy.astype(np.float32) - float(K[1, 2])) / float(K[1, 1]) * z
+    points = np.stack([x, y, z], axis=-1)[valid].reshape(-1, 3)
+    colors = _depth_to_rgb(z, near_m, far_m)[valid].reshape(-1, 3)
+    if points.shape[0] > max_points:
+        idx = np.linspace(0, points.shape[0] - 1, max_points).astype(np.int64)
+        points = points[idx]
+        colors = colors[idx]
+    return points.astype(np.float32, copy=False), colors.astype(np.uint8, copy=False)
+
+
 @dataclass
 class RosSnapshot:
     iiwa_joint_cmd: Optional[np.ndarray]
@@ -91,6 +173,9 @@ class RosSnapshot:
     sharpa_joint_state: Optional[np.ndarray]
     object_pose: Optional[np.ndarray]
     goal_object_pose: Optional[np.ndarray]
+    depth_image_m: Optional[np.ndarray]
+    depth_stamp: Optional[rospy.Time]
+    camera_K: Optional[np.ndarray]
 
     @classmethod
     def make_with_nones(cls) -> RosSnapshot:
@@ -101,6 +186,9 @@ class RosSnapshot:
             sharpa_joint_state=None,
             object_pose=None,
             goal_object_pose=None,
+            depth_image_m=None,
+            depth_stamp=None,
+            camera_K=None,
         )
 
     def make_copy_with_defaults(self) -> RosSnapshot:
@@ -151,11 +239,19 @@ class RosSnapshot:
             sharpa_joint_state=sharpa_joint_state,
             object_pose=object_pose,
             goal_object_pose=goal_object_pose,
+            depth_image_m=self.depth_image_m,
+            depth_stamp=self.depth_stamp,
+            camera_K=self.camera_K,
         )
 
 
 class VisualizationNode:
-    def __init__(self, object_name: str):
+    def __init__(self, args: VisualizationNodeArgs):
+        self.args = args
+        self.depth_frustum = None
+        self.depth_point_cloud = None
+        self._last_depth_stamp = None
+
         # ROS setup
         rospy.init_node("visualization_node")
 
@@ -166,7 +262,7 @@ class VisualizationNode:
         self.initialize_ros_subscribers()
 
         # Initialize Viser
-        self.initialize_viser(object_name=object_name)
+        self.initialize_viser(object_name=args.object_name)
 
         # Set update rate to 10Hz
         self.rate_hz = 10
@@ -207,6 +303,23 @@ class VisualizationNode:
             self.goal_object_pose_callback,
             queue_size=1,
         )
+        if self.args.load_depth_image or self.args.load_point_cloud:
+            self.depth_image_sub = rospy.Subscriber(
+                self.args.depth_topic,
+                Image,
+                self.depth_image_callback,
+                queue_size=1,
+            )
+            self.camera_info_sub = rospy.Subscriber(
+                self.args.camera_info_topic,
+                CameraInfo,
+                self.camera_info_callback,
+                queue_size=1,
+            )
+            info(
+                f"Subscribing to depth_topic={self.args.depth_topic} "
+                f"camera_info_topic={self.args.camera_info_topic}"
+            )
 
     def initialize_viser(self, object_name: str):
         SERVER.scene.add_grid("/ground", width=2, height=2, cell_size=0.1)
@@ -330,6 +443,30 @@ class VisualizationNode:
         self.robot_viser.update_cfg(DEFAULT_Q)
         self.robot_cmd_viser.update_cfg(DEFAULT_Q)
 
+        if self.args.load_depth_image or self.args.load_point_cloud:
+            self.camera_frame = SERVER.scene.add_frame(
+                DEFAULT_CAMERA_FRAME,
+                position=tuple(self.args.camera_pos_world),
+                wxyz=tuple(self.args.camera_quat_wxyz),
+                show_axes=True,
+                axes_length=0.08,
+                axes_radius=0.002,
+            )
+            self.depth_frustum = SERVER.scene.add_camera_frustum(
+                f"{DEFAULT_CAMERA_FRAME}/depth_image",
+                fov=0.7,
+                aspect=16.0 / 9.0,
+                scale=0.25,
+                image=np.zeros((90, 160, 3), dtype=np.uint8),
+            )
+            if self.args.load_point_cloud:
+                self.depth_point_cloud = SERVER.scene.add_point_cloud(
+                    f"{DEFAULT_CAMERA_FRAME}/point_cloud",
+                    points=np.empty((0, 3), dtype=np.float32),
+                    colors=np.empty((0, 3), dtype=np.uint8),
+                    point_size=self.args.point_size,
+                )
+
     def iiwa_joint_cmd_callback(self, msg: JointState):
         """Callback to update the commanded joint positions."""
         self.ros_snapshot.iiwa_joint_cmd = np.array(msg.position)
@@ -379,6 +516,59 @@ class VisualizationNode:
         latest_pose[:3, :3] = R.from_quat(quat_xyzw).as_matrix()
         self.ros_snapshot.goal_object_pose = latest_pose
 
+    def depth_image_callback(self, msg: Image):
+        """Callback to update the latest optional depth visualization image."""
+        try:
+            self.ros_snapshot.depth_image_m = _decode_depth_image(msg, self.args.depth_units)
+            self.ros_snapshot.depth_stamp = msg.header.stamp
+        except Exception as exc:
+            warn_every(f"Failed to decode depth image: {exc}", n_seconds=2.0, key="depth_decode")
+
+    def camera_info_callback(self, msg: CameraInfo):
+        """Callback to update camera intrinsics for optional point-cloud visualization."""
+        self.ros_snapshot.camera_K = np.asarray(msg.K, dtype=np.float64).reshape(3, 3)
+
+    def update_depth_viser(self):
+        if not (self.args.load_depth_image or self.args.load_point_cloud):
+            return
+
+        depth = self.ros_snapshot.depth_image_m
+        if depth is None:
+            warn_every("depth_image is None", n_seconds=2.0)
+            return
+        if self.ros_snapshot.depth_stamp is not None and self.ros_snapshot.depth_stamp == self._last_depth_stamp:
+            return
+        self._last_depth_stamp = self.ros_snapshot.depth_stamp
+
+        rgb = _depth_to_rgb(depth, self.args.depth_near_m, self.args.depth_far_m)
+        if self.depth_frustum is not None:
+            self.depth_frustum.image = _viser_frustum_image(rgb)
+            K = self.ros_snapshot.camera_K
+            h, w = depth.shape
+            self.depth_frustum.aspect = float(w) / float(h)
+            if K is not None and float(K[0, 0]) > 0.0:
+                self.depth_frustum.fov = 2.0 * np.arctan2(float(h), 2.0 * float(K[1, 1]))
+
+        if self.args.load_point_cloud and self.depth_point_cloud is not None:
+            K = self.ros_snapshot.camera_K
+            if K is None:
+                warn_every(
+                    "camera_K is None; point cloud disabled until CameraInfo arrives",
+                    n_seconds=2.0,
+                    key="camera_K_none",
+                )
+                return
+            points, colors = _points_from_depth(
+                depth,
+                K,
+                stride=self.args.point_stride,
+                max_points=self.args.max_points,
+                near_m=self.args.depth_near_m,
+                far_m=self.args.depth_far_m,
+            )
+            self.depth_point_cloud.points = points
+            self.depth_point_cloud.colors = colors
+
     def update_viser(self):
         """Update the viser simulation with the commanded joint positions."""
         ros_snapshot = self.ros_snapshot.make_copy_with_defaults()
@@ -421,6 +611,7 @@ class VisualizationNode:
         goal_object_quat_xyzw = R.from_matrix(T_W_G[:3, :3]).as_quat()
         self.goal_object_viser.position = goal_object_pos
         self.goal_object_viser.wxyz = goal_object_quat_xyzw[[3, 0, 1, 2]]
+        self.update_depth_viser()
 
     def run(self):
         """Main loop to run the node, update simulation, and publish joint states."""
@@ -468,13 +659,37 @@ class VisualizationNode:
 class VisualizationNodeArgs:
     object_name: str = "claw_hammer"
     f"""The name of the object to visualize. Options: {", ".join(VISUALIZATION_OBJECT_NAMES)}"""
+    load_depth_image: bool = False
+    """If true, subscribe to the depth image topic and show it as a Viser camera frustum."""
+    load_point_cloud: bool = False
+    """If true, also build a point cloud from the depth topic and CameraInfo intrinsics."""
+    depth_topic: str = DEFAULT_CAMERA_IMAGE_TOPIC
+    """ROS depth image topic. Supports 32FC1 meters and 16UC1 millimeters."""
+    camera_info_topic: str = DEFAULT_CAMERA_INFO_TOPIC
+    """ROS CameraInfo topic used for frustum FOV and optional point cloud projection."""
+    depth_units: str = "auto"
+    """Depth units: auto, m, or mm."""
+    depth_near_m: float = DEFAULT_DEPTH_NEAR_M
+    """Near depth value for grayscale visualization."""
+    depth_far_m: float = DEFAULT_DEPTH_FAR_M
+    """Far depth value for grayscale visualization."""
+    camera_pos_world: tuple[float, float, float] = DEFAULT_CAMERA_POS_WORLD
+    """Viser camera-frame position in the visualization world frame."""
+    camera_quat_wxyz: tuple[float, float, float, float] = DEFAULT_CAMERA_QUAT_WXYZ
+    """Viser camera-frame orientation as wxyz."""
+    point_stride: int = 4
+    """Subsample stride for optional point cloud generation."""
+    max_points: int = 20000
+    """Maximum number of point-cloud points shown."""
+    point_size: float = 0.006
+    """Viser point-cloud point size."""
 
 
 def main():
     args: VisualizationNodeArgs = tyro.cli(VisualizationNodeArgs)
     try:
         # Create and run the VisualizationNode
-        node = VisualizationNode(object_name=args.object_name)
+        node = VisualizationNode(args=args)
         node.run()
     except rospy.ROSInterruptException:
         pass

@@ -76,6 +76,24 @@ intrinsics.
 26. `26_student_depth_32c_publish_continuous_nonblocking.sh [checkpoint]`
     Publishes 32c policy joint targets continuously until Ctrl-C.
 
+30. `30_depth_debug_roscore_local.sh`
+    Starts a localhost-only `roscore` with `ROS_MASTER_URI=http://127.0.0.1:11311`.
+
+31. `31_depth_debug_fake_robot.sh`
+    Publishes fake `/iiwa/joint_states` and `/sharpa/joint_states`, subscribes to the policy command topics, and interpolates toward commands.
+
+32. `32_depth_debug_fake_depth_from_file.sh /path/to/depth_file`
+    Publishes a fixed or replayed metric depth image on `/zed/zed_node/depth/depth_registered` plus optional CameraInfo. Supports `.npz`, `.npy`, image files, and mp4/avi/mov.
+
+33. `33_depth_debug_student_ros_topic_dry_run.sh [checkpoint]`
+    Runs the student policy against the fake ROS depth topic and fake robot, publishes predicted object pose, does not publish joint commands, and records a rollout NPZ on shutdown.
+
+34. `34_depth_debug_student_ros_topic_publish_3s.sh [checkpoint]`
+    Same as 33, but publishes joint commands for `PUBLISH_DURATION_S=3` seconds by default.
+
+35. `35_depth_debug_visualization_with_depth.sh`
+    Runs the listener-only Viser visualization with optional live depth image display. Set `LOAD_POINT_CLOUD=1` to also show a point cloud when CameraInfo is available.
+
 Recommended student-policy test order:
 
 1. `01_zed_baseline_60hz_no_preprocess.sh`
@@ -123,6 +141,28 @@ Useful env overrides:
 - `PUBLISH_DURATION_S=-1 bash_scripts/08_student_depth_policy_publish_1s_nonblocking.sh`
 - `PUBLISH_DURATION_S=0.5 bash_scripts/24_student_depth_32c_publish_0p25s_nonblocking.sh`
 - `MAX_ARM_TARGET_DELTA_DEG=10 bash_scripts/25_student_depth_32c_publish_1s_nonblocking.sh`
+
+Local fake-ROS safety/debug sequence:
+
+1. Terminal A: `bash_scripts/30_depth_debug_roscore_local.sh`
+2. Terminal B: `bash_scripts/31_depth_debug_fake_robot.sh`
+3. Terminal C: `bash_scripts/32_depth_debug_fake_depth_from_file.sh /path/to/depth.npz`
+4. Terminal D: `bash_scripts/35_depth_debug_visualization_with_depth.sh`
+5. Terminal E: `RUN_DURATION_S=30 bash_scripts/33_depth_debug_student_ros_topic_dry_run.sh`
+
+All `30+` scripts source `bash_scripts/depth_deploy_debug_env.sh`, activate
+`${DEPTH_DEPLOY_CONDA_ENV:-simtoolreal_ros_env}`, and force localhost ROS
+networking. They should not talk to `bohg-ws-2`, `bohg-ws-19`, or the real
+robot unless you explicitly override the environment after sourcing.
+
+Rollout recordings from scripts 33/34 are saved once on shutdown under
+`RECORD_DIR`. Inspect one with:
+
+```bash
+python deployment/visualize_student_depth_rollout.py \
+  --recording ./student_depth_ros_topic_recording/<recording>.npz \
+  --object-name peg_L
+```
 
 HD1080 comparison example:
 

@@ -11,8 +11,10 @@ from __future__ import annotations
 
 import argparse
 import atexit
+import datetime
 import importlib.util
 import multiprocessing as mp
+import signal
 import struct
 import sys
 import time
@@ -329,6 +331,7 @@ class DepthFrame:
     encoding: str
     stamp: rospy.Time
     frame_id: int = -1
+    receive_time: rospy.Time | None = None
     grab_ms: float | None = None
     retrieve_ms: float | None = None
     copy_ms: float | None = None
@@ -1016,6 +1019,142 @@ class DepthDebugSaver:
         return np.concatenate(panels, axis=1)
 
 
+class StudentRolloutLogger:
+    """In-memory rollout logger that writes once on shutdown."""
+
+    def __init__(
+        self,
+        output_dir: Optional[Path],
+        *,
+        name: Optional[str],
+        every_n: int,
+        depth_format: str,
+    ) -> None:
+        self.output_dir = output_dir
+        self.name = name
+        self.every_n = max(1, int(every_n))
+        self.depth_format = depth_format
+        self.enabled = output_dir is not None
+        self._saved = False
+        self.step_indices: list[int] = []
+        self.time_s: list[float] = []
+        self.q: list[np.ndarray] = []
+        self.qd: list[np.ndarray] = []
+        self.proprio: list[np.ndarray] = []
+        self.actions: list[np.ndarray] = []
+        self.q_targets: list[np.ndarray] = []
+        self.prev_targets: list[np.ndarray] = []
+        self.published: list[bool] = []
+        self.policy_depth: list[np.ndarray] = []
+        self.crop_raw_depth_m: list[np.ndarray] = []
+        self.depth_stamp_s: list[float] = []
+        self.depth_age_s: list[float] = []
+        self.depth_pub_to_callback_s: list[float] = []
+        self.depth_reused: list[bool] = []
+        self.predicted_object_pos: list[np.ndarray] = []
+        self.predicted_object_quat_xyzw: list[np.ndarray] = []
+
+    def _encode_depth(self, depth: np.ndarray) -> np.ndarray:
+        if self.depth_format == "none":
+            return np.empty((0,), dtype=np.uint8)
+        if self.depth_format == "float16":
+            return np.asarray(depth, dtype=np.float16)
+        if self.depth_format == "uint8":
+            return (np.clip(depth, 0.0, 1.0) * 255.0).round().astype(np.uint8)
+        raise ValueError(f"Unsupported depth_format={self.depth_format!r}")
+
+    def maybe_record(
+        self,
+        *,
+        step: int,
+        run_start_time: rospy.Time | None,
+        q: np.ndarray,
+        qd: np.ndarray,
+        proprio: np.ndarray,
+        pipeline: DepthPipelineOutput,
+        action: np.ndarray,
+        q_targets: np.ndarray,
+        prev_targets: np.ndarray,
+        published: bool,
+        depth_stamp: rospy.Time,
+        depth_age_s: float | None,
+        depth_pub_to_callback_s: float | None,
+        depth_reused: bool,
+        predicted_pose: tuple[np.ndarray, np.ndarray] | None,
+    ) -> None:
+        if not self.enabled or step % self.every_n != 0:
+            return
+        if run_start_time is None:
+            elapsed = 0.0
+        else:
+            elapsed = max(0.0, (rospy.Time.now() - run_start_time).to_sec())
+        self.step_indices.append(int(step))
+        self.time_s.append(float(elapsed))
+        self.q.append(q.astype(np.float32, copy=True))
+        self.qd.append(qd.astype(np.float32, copy=True))
+        self.proprio.append(proprio.astype(np.float32, copy=True))
+        self.actions.append(action.astype(np.float32, copy=True))
+        self.q_targets.append(q_targets.astype(np.float32, copy=True))
+        self.prev_targets.append(prev_targets.astype(np.float32, copy=True))
+        self.published.append(bool(published))
+        self.policy_depth.append(self._encode_depth(pipeline.policy_crop))
+        crop_raw = pipeline.resized_depth_m[CROP_Y0:CROP_Y1, CROP_X0:CROP_X1]
+        self.crop_raw_depth_m.append(crop_raw.astype(np.float16, copy=True))
+        self.depth_stamp_s.append(float(depth_stamp.to_sec()))
+        self.depth_age_s.append(float("nan") if depth_age_s is None else float(depth_age_s))
+        self.depth_pub_to_callback_s.append(
+            float("nan") if depth_pub_to_callback_s is None else float(depth_pub_to_callback_s)
+        )
+        self.depth_reused.append(bool(depth_reused))
+        if predicted_pose is None:
+            self.predicted_object_pos.append(np.full(3, np.nan, dtype=np.float32))
+            self.predicted_object_quat_xyzw.append(np.full(4, np.nan, dtype=np.float32))
+        else:
+            pos, quat = predicted_pose
+            self.predicted_object_pos.append(pos.astype(np.float32, copy=True))
+            self.predicted_object_quat_xyzw.append(quat.astype(np.float32, copy=True))
+
+    def save(self, *, checkpoint_path: Path | None = None) -> Path | None:
+        if not self.enabled or self._saved:
+            return None
+        self._saved = True
+        if not self.step_indices:
+            warn("Rollout recording enabled but no steps were recorded.")
+            return None
+        assert self.output_dir is not None
+        self.output_dir.mkdir(parents=True, exist_ok=True)
+        stamp = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+        stem = self.name or "student_depth_rollout"
+        path = self.output_dir / f"{stamp}_{stem}.npz"
+        np.savez_compressed(
+            path,
+            step_indices=np.asarray(self.step_indices, dtype=np.int64),
+            time_s=np.asarray(self.time_s, dtype=np.float64),
+            q=np.stack(self.q),
+            qd=np.stack(self.qd),
+            proprio=np.stack(self.proprio),
+            actions=np.stack(self.actions),
+            q_targets=np.stack(self.q_targets),
+            prev_targets=np.stack(self.prev_targets),
+            published=np.asarray(self.published, dtype=bool),
+            policy_depth=np.stack(self.policy_depth),
+            policy_depth_format=np.asarray(self.depth_format),
+            crop_raw_depth_m=np.stack(self.crop_raw_depth_m),
+            depth_stamp_s=np.asarray(self.depth_stamp_s, dtype=np.float64),
+            depth_age_s=np.asarray(self.depth_age_s, dtype=np.float64),
+            depth_pub_to_callback_s=np.asarray(self.depth_pub_to_callback_s, dtype=np.float64),
+            depth_reused=np.asarray(self.depth_reused, dtype=bool),
+            predicted_object_pos=np.stack(self.predicted_object_pos),
+            predicted_object_quat_xyzw=np.stack(self.predicted_object_quat_xyzw),
+            checkpoint_path=np.asarray(str(checkpoint_path) if checkpoint_path is not None else ""),
+            depth_near_m=np.asarray(DEPTH_NEAR_M, dtype=np.float32),
+            depth_far_m=np.asarray(DEPTH_FAR_M, dtype=np.float32),
+            crop_xyxy=np.asarray([CROP_X0, CROP_Y0, CROP_X1, CROP_Y1], dtype=np.int64),
+        )
+        info(f"Saved student rollout recording: {path}")
+        return path
+
+
 class StudentDepthPolicyNode:
     def __init__(self, args: argparse.Namespace) -> None:
         rospy.init_node("student_depth_policy_node")
@@ -1041,6 +1180,16 @@ class StudentDepthPolicyNode:
             video_path=args.debug_depth_video_path,
             fps=args.debug_depth_video_fps,
         )
+        self.rollout_logger = StudentRolloutLogger(
+            args.record_rollout_dir,
+            name=args.record_rollout_name,
+            every_n=args.record_every_n,
+            depth_format=args.record_depth_format,
+        )
+        if self.rollout_logger.enabled:
+            atexit.register(self._save_rollout_recording)
+            signal.signal(signal.SIGINT, self._signal_handler)
+            signal.signal(signal.SIGTERM, self._signal_handler)
 
         self.prev_targets: Optional[np.ndarray] = None
         self.latest_depth_msg: Optional[Image] = None
@@ -1055,6 +1204,7 @@ class StudentDepthPolicyNode:
         self.command_start_time: Optional[rospy.Time] = None
         self.last_status_time = time.time()
         self.last_depth_age_s: float | None = None
+        self.last_depth_pub_to_callback_s: float | None = None
         self.last_step_timing_ms: dict[str, float] = {}
         self.last_depth_timing_ms: dict[str, float] = {}
         self.last_depth_stamp: rospy.Time | None = None
@@ -1071,6 +1221,7 @@ class StudentDepthPolicyNode:
         self.cached_depth_frame_id: int = -1
         self.cached_depth_pipeline: DepthPipelineOutput | None = None
         self.cached_depth_image: torch.Tensor | None = None
+        self.last_proprio_np: np.ndarray | None = None
         self._warmup_completed = False
 
         if args.depth_source == "ros_topic":
@@ -1115,6 +1266,12 @@ class StudentDepthPolicyNode:
                 "Depth debug mp4 writing can add control-loop jitter. "
                 "Disable --debug_depth_video_path for timing-critical joint publishing."
             )
+        if self.rollout_logger.enabled:
+            info(
+                "Rollout recording enabled: "
+                f"dir={args.record_rollout_dir} every_n={args.record_every_n} "
+                f"depth_format={args.record_depth_format}. Data writes once on shutdown."
+            )
         if not args.publish_joint_commands:
             warn("Joint command publishing is disabled. Use --publish_joint_commands to send targets.")
         elif args.publish_joint_commands_duration_s >= 0.0:
@@ -1138,6 +1295,14 @@ class StudentDepthPolicyNode:
                 f"Predicted object pose frame conversion: model_frame={args.predicted_pose_model_frame} "
                 f"publish_frame={args.object_pose_frame_id}"
             )
+
+    def _save_rollout_recording(self) -> None:
+        self.rollout_logger.save(checkpoint_path=self.args.checkpoint_path)
+
+    def _signal_handler(self, signum, _frame) -> None:
+        info(f"Received signal {signum}; saving rollout recording before shutdown.")
+        self._save_rollout_recording()
+        rospy.signal_shutdown(f"signal {signum}")
 
     def depth_callback(self, msg: Image) -> None:
         self.latest_depth_msg = msg
@@ -1190,6 +1355,7 @@ class StudentDepthPolicyNode:
         if self.prev_targets is None:
             self.prev_targets = q.copy()
         proprio = np.concatenate([q_norm, qd, self.prev_targets]).astype(np.float32)
+        self.last_proprio_np = proprio.copy()
         if proprio.shape != (87,):
             raise RuntimeError(f"Expected proprio shape (87,), got {proprio.shape}")
         if np.any(np.abs(q_norm) > 1.25):
@@ -1213,6 +1379,7 @@ class StudentDepthPolicyNode:
                 depth=depth,
                 encoding=msg.encoding,
                 stamp=stamp,
+                receive_time=self.latest_depth_receive_time,
                 # ROS Header.seq is not reliable across all publishers. Use
                 # stamps only for cache invalidation on the ROS-topic fallback.
                 frame_id=-1,
@@ -1253,6 +1420,10 @@ class StudentDepthPolicyNode:
             self.debug_saver.maybe_save(pipeline)
         t_debug_done = time.time()
         self.last_depth_age_s = max(0.0, (rospy.Time.now() - frame.stamp).to_sec())
+        if frame.receive_time is not None:
+            self.last_depth_pub_to_callback_s = max(0.0, (frame.receive_time - frame.stamp).to_sec())
+        else:
+            self.last_depth_pub_to_callback_s = None
         self.depth_frame_reused = cache_hit or self.last_depth_stamp == frame.stamp or (
             frame.frame_id >= 0 and self.last_depth_frame_id == frame.frame_id
         )
@@ -1310,10 +1481,15 @@ class StudentDepthPolicyNode:
         )
         return pos
 
-    def _publish_predicted_pose(self, aux: dict[str, torch.Tensor], stamp: rospy.Time) -> None:
+    def _publish_predicted_pose(
+        self,
+        aux: dict[str, torch.Tensor],
+        stamp: rospy.Time,
+        predicted_pose: tuple[np.ndarray, np.ndarray] | None = None,
+    ) -> None:
         if not self.args.publish_object_pose:
             return
-        pose = self._predicted_pose(aux)
+        pose = predicted_pose if predicted_pose is not None else self._predicted_pose(aux)
         if pose is None:
             warn_every("Policy checkpoint has no object_pos aux head; cannot publish object pose.", 5.0)
             return
@@ -1415,6 +1591,8 @@ class StudentDepthPolicyNode:
         depth_age_text = ""
         if self.last_depth_age_s is not None:
             depth_age_text = f" depth_age_ms={1000.0 * self.last_depth_age_s:.1f}"
+        if self.last_depth_pub_to_callback_s is not None:
+            depth_age_text += f" depth_pub_to_callback_ms={1000.0 * self.last_depth_pub_to_callback_s:.1f}"
         zed_timing_text = ""
         if self.last_zed_grab_ms is not None:
             zed_timing_text += f" zed_grab_ms={self.last_zed_grab_ms:.1f}"
@@ -1592,6 +1770,7 @@ class StudentDepthPolicyNode:
         t_policy_done = time.time()
         if action.shape != (1, N_ACTIONS):
             raise RuntimeError(f"Expected action shape (1, 29), got {action.shape}")
+        predicted_pose = self._predicted_pose(output.aux) if (self.args.publish_object_pose or self.rollout_logger.enabled) else None
         t_targets_start = time.time()
         prev_targets = self.prev_targets.copy()
         q_targets = compute_joint_pos_targets(
@@ -1608,7 +1787,7 @@ class StudentDepthPolicyNode:
             published = True
         self._set_prev_targets_after_step(q=q, q_targets=q_targets, published=published)
         t_targets_done = time.time()
-        self._publish_predicted_pose(output.aux, stamp)
+        self._publish_predicted_pose(output.aux, stamp, predicted_pose=predicted_pose)
         t_pose_done = time.time()
         t_step_done = time.time()
         self.last_step_timing_ms = {
@@ -1620,6 +1799,25 @@ class StudentDepthPolicyNode:
             "pose": 1000.0 * (t_pose_done - t_targets_done),
             "total": 1000.0 * (t_step_done - t_step_start),
         }
+        if self.last_proprio_np is None:
+            raise RuntimeError("Internal error: last_proprio_np was not populated.")
+        self.rollout_logger.maybe_record(
+            step=self.loop_count,
+            run_start_time=self.active_loop_start_time,
+            q=q,
+            qd=qd,
+            proprio=self.last_proprio_np,
+            pipeline=pipeline,
+            action=action[0],
+            q_targets=q_targets,
+            prev_targets=prev_targets,
+            published=published,
+            depth_stamp=stamp,
+            depth_age_s=self.last_depth_age_s,
+            depth_pub_to_callback_s=self.last_depth_pub_to_callback_s,
+            depth_reused=self.depth_frame_reused,
+            predicted_pose=predicted_pose,
+        )
         self._print_status(pipeline, action[0], q_targets, prev_targets, published)
         self.loop_count += 1
 
@@ -1656,6 +1854,7 @@ class StudentDepthPolicyNode:
                     key="loop_slow",
                 )
             rate.sleep()
+        self._save_rollout_recording()
         self.debug_saver.close()
         if self.zed_camera is not None:
             self.zed_camera.close()
@@ -1775,6 +1974,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--debug_depth_every_n", type=int, default=30)
     parser.add_argument("--debug_depth_video_path", type=Path, default=None)
     parser.add_argument("--debug_depth_video_fps", type=int, default=10)
+    parser.add_argument("--record_rollout_dir", type=Path, default=None)
+    parser.add_argument("--record_rollout_name", default=None)
+    parser.add_argument("--record_every_n", type=int, default=1)
+    parser.add_argument("--record_depth_format", choices=("uint8", "float16", "none"), default="uint8")
     parser.add_argument("--status_interval_s", type=float, default=1.0)
     parser.add_argument("--raise_on_step_error", action="store_true")
     return parser.parse_args()
