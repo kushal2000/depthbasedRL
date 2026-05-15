@@ -97,6 +97,18 @@ intrinsics.
 36. `36_home_robot_local.sh`
     Runs `deployment/home_robot.py` in the localhost-only debug ROS environment. This publishes `/iiwa/joint_cmd` and `/sharpa/joint_cmd`, so only use it with the fake robot unless you intentionally override the ROS environment for hardware.
 
+37. `37_isaac_depth_physics_only_benchmark.sh`
+    IsaacSim/Isaac Lab benchmark with student camera disabled. This estimates physics/control-loop cost without rendering.
+
+38. `38_isaac_depth_render_every_step_benchmark.sh`
+    IsaacSim benchmark with student depth rendered every control step.
+
+39. `39_isaac_depth_render_every_4_benchmark.sh`
+    IsaacSim benchmark with student depth rendered every `DEPTH_EVERY_N` control steps. Default is 4.
+
+40. `40_isaac_depth_ros_node_render_every_4.sh`
+    IsaacSim ROS source node. It subscribes to joint commands, publishes simulated joint states/object pose, and publishes IsaacSim depth every `DEPTH_EVERY_N` steps.
+
 Recommended student-policy test order:
 
 1. `01_zed_baseline_60hz_no_preprocess.sh`
@@ -158,6 +170,27 @@ To home the fake robot in this localhost setup:
 ```bash
 bash_scripts/36_home_robot_local.sh
 ```
+
+IsaacSim-backed fake-real pipeline:
+
+1. Terminal A: `bash_scripts/30_depth_debug_roscore_local.sh`
+2. Terminal B: `DEPTH_EVERY_N=4 bash_scripts/40_isaac_depth_ros_node_render_every_4.sh`
+3. Terminal C: `bash_scripts/35_depth_debug_visualization_with_depth.sh`
+4. Terminal D: `RUN_DURATION_S=30 bash_scripts/33_depth_debug_student_ros_topic_dry_run.sh`
+5. Terminal E, if you want the student to drive IsaacSim: `RUN_DURATION_S=30 PUBLISH_DURATION_S=10 bash_scripts/34_depth_debug_student_ros_topic_publish_3s.sh`
+
+Benchmark render frequency before running the full loop:
+
+```bash
+bash_scripts/37_isaac_depth_physics_only_benchmark.sh
+bash_scripts/38_isaac_depth_render_every_step_benchmark.sh
+DEPTH_EVERY_N=4 bash_scripts/39_isaac_depth_render_every_4_benchmark.sh
+DEPTH_EVERY_N=8 bash_scripts/39_isaac_depth_render_every_4_benchmark.sh
+```
+
+The IsaacSim scripts source `bash_scripts/isaacsim_ros_env.sh`: this keeps ROS
+on localhost, uses the IsaacSim Python for Isaac Lab, and prepends the ROS
+conda env's Python 3.11 site-packages so `rospy`/message types are available.
 
 All `30+` scripts source `bash_scripts/depth_deploy_debug_env.sh`, activate
 `${DEPTH_DEPLOY_CONDA_ENV:-simtoolreal_ros_env}`, and force localhost ROS
