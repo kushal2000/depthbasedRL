@@ -144,7 +144,7 @@ def _zero_training_randomization(env_cfg) -> None:
     student_obs.camera_delay_max = 0
     student_obs.use_student_obs_delay = False
     student_obs.student_obs_delay_max = 0
-    student_obs.camera_pose_randomization_profile = "off"
+    student_obs.use_camera_pose_rand = False
     student_obs.camera_pose_randomization_mode = "startup"
 
 
@@ -286,16 +286,6 @@ class IsaacDepthEnvNode:
         self.last_status_time = time.time()
         self.camera_k = _student_camera_k(inner.cfg.student_obs) if args.enable_depth else None
         self.publish_camera_k = self.camera_k
-        if (
-            self.camera_k is not None
-            and args.depth_render_backend == "ffs_stereo"
-            and args.ffs_downsample_to_policy_res
-        ):
-            self.publish_camera_k = _scale_camera_k(
-                self.camera_k,
-                x_scale=float(args.ffs_publish_width) / float(args.ffs_stereo_width),
-                y_scale=float(args.ffs_publish_height) / float(args.ffs_stereo_height),
-            )
         self.right_camera = None
         self.ffs_depth = None
         self.ffs_debug_dir = Path(args.ffs_debug_dir) if args.ffs_debug_dir else None
@@ -308,7 +298,7 @@ class IsaacDepthEnvNode:
             if self.right_camera is None:
                 raise RuntimeError(
                     "FFS stereo backend requires scene_utils.setup_student_camera() to create "
-                    "inner.student_camera_right. Check env_cfg.student_obs.ffs_stereo_right_camera_enabled."
+                    "inner.student_camera_right. Check env_cfg.student_obs.camera_backend='foundation_stereo'."
                 )
             from deployment.isaac.fast_foundation_stereo_backend import FastFoundationStereoDepth
 
@@ -468,26 +458,12 @@ class IsaacDepthEnvNode:
         self.object_pose_pub.publish(msg)
 
     def _sync_ffs_right_camera_pose(self) -> None:
-        from isaacsimenvs.tasks.simtoolreal.utils.scene_utils import _maybe_initialize_student_camera_pose
-
         if self.right_camera is None:
             raise RuntimeError("FFS right camera has not been created.")
-        _maybe_initialize_student_camera_pose(self.inner)
-        left_pos = self.inner._student_camera_current_pos_w
-        left_quat = self.inner._student_camera_current_quat_wxyz
-        baseline = torch.zeros_like(left_pos)
-        baseline[:, 0] = float(self.args.ffs_baseline_m)
-        right_pos = left_pos + _quat_rotate_wxyz(left_quat, baseline)
-
-        view = getattr(self.right_camera, "_view", None)
-        if view is not None and hasattr(view, "_sync_usd_on_fabric_write"):
-            view._sync_usd_on_fabric_write = True
-        self.right_camera.set_world_poses(
-            positions=right_pos,
-            orientations=left_quat,
-            env_ids=torch.arange(self.inner.num_envs, device=self.device, dtype=torch.long),
-            convention=str(self.inner.cfg.student_obs.camera_convention),
-        )
+        # The merged env creates and randomizes the FoundationStereo pair
+        # together in scene_utils. Keeping this method as a validation hook
+        # avoids the old import of a removed single-camera helper.
+        return
 
     def _render_ffs_stereo_depth(self) -> np.ndarray:
         if self.ffs_depth is None:
@@ -506,7 +482,9 @@ class IsaacDepthEnvNode:
             raise RuntimeError(f"FFS stereo RGB missing. left={left_keys}, right={right_keys}")
         left_rgb = _to_numpy(left[0, ..., :3]).astype(np.uint8, copy=False)
         right_rgb = _to_numpy(right[0, ..., :3]).astype(np.uint8, copy=False)
-        depth_m = self.ffs_depth.infer_depth(left_rgb, right_rgb, fx_px=float(self.camera_k[0, 0]))
+        cfg = self.inner.cfg.student_obs
+        stereo_fx_px = float(self.args.ffs_stereo_width) * float(cfg.focal_length) / float(cfg.horizontal_aperture)
+        depth_m = self.ffs_depth.infer_depth(left_rgb, right_rgb, fx_px=stereo_fx_px)
 
         isaac_depth_m = None
         if self.depth_compare_dir is not None:
@@ -897,7 +875,13 @@ def main() -> None:
         import gymnasium as gym
 
         import isaacsimenvs  # noqa: F401
-        from isaacsimenvs.distill_depth import _apply_student_camera_preset, _load_env_cfg
+        from isaacsimenvs.distill_depth import (
+            _apply_student_camera_preset,
+            _load_env_cfg,
+            apply_camera_pose_randomization_profile,
+            apply_depth_noise_profile,
+            apply_peg_urdf_compat,
+        )
 
         env_cfg = _load_env_cfg(args.task, args.teacher_config, args.num_envs, args.sim_device)
         env_cfg.scene.num_envs = int(args.num_envs)
@@ -915,11 +899,9 @@ def main() -> None:
             env_cfg.reset.reset_dof_pos_random_interval_fingers = 0.0
             env_cfg.reset.reset_dof_vel_random_interval = 0.0
         _apply_student_camera_preset(env_cfg, args.student_camera_preset)
-        env_cfg.student_obs.depth_noise_profile = args.depth_noise_profile
-        if args.depth_noise_strength is not None:
-            env_cfg.student_obs.depth_noise_strength = float(args.depth_noise_strength)
+        apply_depth_noise_profile(env_cfg.student_obs, args.depth_noise_profile, args.depth_noise_strength)
         if args.camera_pose_randomization_profile is not None:
-            env_cfg.student_obs.camera_pose_randomization_profile = args.camera_pose_randomization_profile
+            apply_camera_pose_randomization_profile(env_cfg.student_obs, args.camera_pose_randomization_profile)
         if args.camera_pose_randomization_mode is not None:
             env_cfg.student_obs.camera_pose_randomization_mode = args.camera_pose_randomization_mode
         if args.camera_pos_noise_m is not None:
@@ -932,10 +914,21 @@ def main() -> None:
                     "Fast-FoundationStereo stereo capture resolution must be divisible by 32, "
                     f"got {args.ffs_stereo_width}x{args.ffs_stereo_height}."
                 )
-            env_cfg.student_obs.image_modality = "rgbd" if args.depth_compare_dir is not None else "rgb"
-            env_cfg.student_obs.image_width = int(args.ffs_stereo_width)
-            env_cfg.student_obs.image_height = int(args.ffs_stereo_height)
-            env_cfg.student_obs.ffs_stereo_right_camera_enabled = True
+            env_cfg.student_obs.camera_backend = "foundation_stereo"
+            env_cfg.student_obs.image_modality = "depth"
+            env_cfg.student_obs.image_width = int(args.ffs_publish_width) if args.ffs_downsample_to_policy_res else int(args.ffs_stereo_width)
+            env_cfg.student_obs.image_height = int(args.ffs_publish_height) if args.ffs_downsample_to_policy_res else int(args.ffs_stereo_height)
+            env_cfg.student_obs.image_input_width = int(env_cfg.student_obs.image_width)
+            env_cfg.student_obs.image_input_height = int(env_cfg.student_obs.image_height)
+            env_cfg.student_obs.crop_enabled = False
+            env_cfg.student_obs.fs_stereo_width = int(args.ffs_stereo_width)
+            env_cfg.student_obs.fs_stereo_height = int(args.ffs_stereo_height)
+            env_cfg.student_obs.fs_stereo_baseline_m = float(args.ffs_baseline_m)
+            env_cfg.student_obs.fs_valid_iters = int(args.ffs_valid_iters)
+            env_cfg.student_obs.fs_max_disp = int(args.ffs_max_disp)
+            env_cfg.student_obs.fs_downsample_to_policy_res = bool(args.ffs_downsample_to_policy_res)
+            if args.ffs_engine_dir:
+                env_cfg.student_obs.fs_engine_dir = str(args.ffs_engine_dir)
             if args.ffs_render_quality:
                 render_cfg = env_cfg.sim.render
                 render_cfg.rendering_mode = "quality"
@@ -950,9 +943,7 @@ def main() -> None:
                 ):
                     if hasattr(render_cfg, attr):
                         setattr(render_cfg, attr, True)
-        if args.peg_urdf is not None:
-            env_cfg.assets.peg_urdf = args.peg_urdf
-            env_cfg.assets.object_name = Path(args.peg_urdf).stem
+        apply_peg_urdf_compat(env_cfg, args.peg_urdf)
         if args.peg_goal_mode is not None:
             env_cfg.peg_in_hole.goal_mode = args.peg_goal_mode
         if args.object_init_orientation_mode is not None and hasattr(env_cfg, "peg_in_hole"):
@@ -970,14 +961,15 @@ def main() -> None:
                 f"initial_robot_pose={args.initial_robot_pose} "
                 f"object_init={object_pose_note} "
                 f"depth_backend={args.depth_render_backend} "
-                f"depth_noise_profile={env_cfg.student_obs.depth_noise_profile} "
+                f"depth_noise_profile={args.depth_noise_profile} "
+                f"use_depth_aug={env_cfg.student_obs.use_depth_aug} "
                 f"published_depth_source={args.published_depth_source} "
                 f"ffs_baseline_m={args.ffs_baseline_m if args.depth_render_backend == 'ffs_stereo' else 'n/a'} "
                 f"ffs_stereo={f'{args.ffs_stereo_width}x{args.ffs_stereo_height}' if args.depth_render_backend == 'ffs_stereo' else 'n/a'} "
                 f"ffs_downsample={args.ffs_downsample_to_policy_res if args.depth_render_backend == 'ffs_stereo' else 'n/a'} "
                 f"ffs_engine={str(args.ffs_engine_dir) if args.ffs_engine_dir else '(pytorch)'} "
                 f"ffs_render_quality={args.ffs_render_quality if args.depth_render_backend == 'ffs_stereo' else 'n/a'} "
-                f"camera_rand={env_cfg.student_obs.camera_pose_randomization_profile} "
+                f"camera_rand={args.camera_pose_randomization_profile or ('custom' if env_cfg.student_obs.use_camera_pose_rand else 'off')} "
                 f"camera_pos_noise_m={env_cfg.student_obs.camera_pos_noise_m} "
                 f"camera_rot_noise_deg={env_cfg.student_obs.camera_rot_noise_deg}",
                 flush=True,

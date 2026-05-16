@@ -56,7 +56,7 @@ from pytorch3d.transforms import (
 )
 
 from dextoolbench.objects import NAME_TO_OBJECT
-import fabrica.objects  # noqa: F401 — registers fabrica parts into NAME_TO_OBJECT
+import peg_in_hole_dynamic.fabrica.objects  # noqa: F401 — registers fabrica parts into NAME_TO_OBJECT
 from isaacgymenvs.tasks.base.vec_task import VecTask
 from isaacgymenvs.tasks.simtoolreal.utils import (
     final_goal_tolerance_curriculum,
@@ -161,6 +161,13 @@ class SimToolReal(VecTask):
         self.lifting_bonus = self.cfg["env"]["liftingBonus"]
         self.lifting_bonus_threshold = self.cfg["env"]["liftingBonusThreshold"]
         self.keypoint_rew_scale = self.cfg["env"]["keypointRewScale"]
+        # Grasp-pretraining knob: when True, the keypoint reward + near_goal
+        # success criterion use ‖object_pos − goal_pos‖ instead of the
+        # rotation-dependent max-keypoint distance. Per-keypoint observation
+        # tensors (keypoints_rel_goal, etc.) are unaffected.
+        self.translation_only_reward = self.cfg["env"].get(
+            "useTranslationOnlyReward", False
+        )
         self.kuka_actions_penalty_scale = self.cfg["env"]["kukaActionsPenaltyScale"]
         self.hand_actions_penalty_scale = self.cfg["env"]["handActionsPenaltyScale"]
         self.object_lin_vel_penalty_scale = self.cfg["env"]["objectLinVelPenaltyScale"]
@@ -1195,6 +1202,13 @@ class SimToolReal(VecTask):
         self.lifting_bonus = self.cfg["env"]["liftingBonus"]
         self.lifting_bonus_threshold = self.cfg["env"]["liftingBonusThreshold"]
         self.keypoint_rew_scale = self.cfg["env"]["keypointRewScale"]
+        # Grasp-pretraining knob: when True, the keypoint reward + near_goal
+        # success criterion use ‖object_pos − goal_pos‖ instead of the
+        # rotation-dependent max-keypoint distance. Per-keypoint observation
+        # tensors (keypoints_rel_goal, etc.) are unaffected.
+        self.translation_only_reward = self.cfg["env"].get(
+            "useTranslationOnlyReward", False
+        )
         self.kuka_actions_penalty_scale = self.cfg["env"]["kukaActionsPenaltyScale"]
         self.hand_actions_penalty_scale = self.cfg["env"]["handActionsPenaltyScale"]
 
@@ -1543,6 +1557,18 @@ class SimToolReal(VecTask):
     def _extra_object_indices(self, env_ids: Tensor) -> List[Tensor]:
         return [self.goal_object_indices[env_ids]]
 
+    def _curriculum_eligible_mask(self):
+        """Optional mask over envs that count toward the tolerance curriculum.
+        Default: all envs. Subclasses can override to e.g. restrict the gate
+        to a co-training subset."""
+        return None
+
+    def _curriculum_success_threshold(self):
+        """Optional override for the curriculum-gate threshold.
+        Default: use `min(3.0, 0.8 * max_consecutive_successes)` inside
+        `tolerance_curriculum`."""
+        return None
+
     def _extra_curriculum(self):
         self.success_tolerance, self.last_curriculum_update = tolerance_curriculum(
             self.last_curriculum_update,
@@ -1553,6 +1579,9 @@ class SimToolReal(VecTask):
             self.initial_tolerance,
             self.target_tolerance,
             self.tolerance_curriculum_increment,
+            self.max_consecutive_successes,
+            eligible_mask=self._curriculum_eligible_mask(),
+            success_threshold=self._curriculum_success_threshold(),
         )
 
         if self.cfg["env"].get("finalGoalToleranceCurriculumEnabled", False):
@@ -3146,6 +3175,18 @@ class SimToolReal(VecTask):
         self.keypoints_max_dist_fixed_size = self.keypoint_distances_l2_fixed_size.max(
             dim=-1
         ).values
+
+        # Grasp-pretraining override: replace the rotation-aware max-keypoint
+        # distance used by the reward + near_goal success check with the
+        # purely translational object-vs-goal center distance. Per-keypoint
+        # observation tensors above are left unchanged, so policy obs is
+        # bit-identical to the flag-off path.
+        if self.translation_only_reward:
+            translation_dist = torch.norm(
+                self.object_pos - self.goal_pos, dim=-1
+            )
+            self.keypoints_max_dist = translation_dist
+            self.keypoints_max_dist_fixed_size = translation_dist
 
         # this is the closest the keypoint had been to the target in the current episode (for the furthest keypoint of all)
         # make sure we initialize this value before using it for obs or rewards

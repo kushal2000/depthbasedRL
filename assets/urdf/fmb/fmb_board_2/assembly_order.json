@@ -1,0 +1,15 @@
+{
+  "steps": [
+    "board_2_0",
+    "board_2_2",
+    "board_2_1",
+    "board_2_4",
+    "board_2_3"
+  ],
+  "inserts_into": {
+    "board_2_1": "board_2_0",
+    "board_2_2": "board_2_0",
+    "board_2_3": "board_2_0",
+    "board_2_4": "board_2_0"
+  }
+}

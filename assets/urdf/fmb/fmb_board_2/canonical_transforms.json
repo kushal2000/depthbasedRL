@@ -1,0 +1,92 @@
+{
+  "board_2_0": {
+    "assembled_to_canonical_wxyz": [
+      0.0,
+      0.7071067811865475,
+      0.7071067811865475,
+      0.0
+    ],
+    "original_centroid": [
+      0.0,
+      0.0,
+      0.025
+    ],
+    "canonical_extents": [
+      0.23,
+      0.23,
+      0.05
+    ]
+  },
+  "board_2_1": {
+    "assembled_to_canonical_wxyz": [
+      0.7071067811865475,
+      -0.7071067811865475,
+      -0.0,
+      -0.0
+    ],
+    "original_centroid": [
+      0.0,
+      0.0,
+      0.08
+    ],
+    "canonical_extents": [
+      0.18,
+      0.1,
+      0.03
+    ]
+  },
+  "board_2_2": {
+    "assembled_to_canonical_wxyz": [
+      0.7071067811865475,
+      0.0,
+      0.7071067811865475,
+      0.0
+    ],
+    "original_centroid": [
+      0.0,
+      0.0,
+      0.055
+    ],
+    "canonical_extents": [
+      0.09999999999999999,
+      0.1,
+      0.03
+    ]
+  },
+  "board_2_3": {
+    "assembled_to_canonical_wxyz": [
+      0.5,
+      -0.5,
+      -0.5,
+      0.5
+    ],
+    "original_centroid": [
+      -0.075,
+      0.0,
+      0.065
+    ],
+    "canonical_extents": [
+      0.1,
+      0.023093959999999997,
+      0.0200218
+    ]
+  },
+  "board_2_4": {
+    "assembled_to_canonical_wxyz": [
+      0.5,
+      -0.5,
+      -0.5,
+      0.5
+    ],
+    "original_centroid": [
+      0.075,
+      0.0,
+      0.065
+    ],
+    "canonical_extents": [
+      0.1,
+      0.023094000000000003,
+      0.0200218
+    ]
+  }
+}

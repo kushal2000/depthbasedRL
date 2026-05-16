@@ -28,7 +28,7 @@
 
 from __future__ import annotations
 
-from typing import Tuple
+from typing import Optional, Tuple
 
 from torch import Tensor
 
@@ -227,15 +227,42 @@ def tolerance_curriculum(
     initial_tolerance: float,
     target_tolerance: float,
     tolerance_curriculum_increment: float,
+    max_consecutive_successes: int = 50,
+    eligible_mask: Optional[Tensor] = None,
+    success_threshold: Optional[float] = None,
 ) -> Tuple[float, int]:
     """
     Returns: new tolerance, new last_curriculum_update
+
+    The gate `mean_successes_per_episode < threshold` is scaled by
+    `max_consecutive_successes` so sparse goal modes (preInsertAndFinal,
+    finalGoalOnly) can still drive the curriculum: with only 2 or 1
+    subgoals per episode the legacy hardcoded threshold of 3.0 was
+    unreachable and `success_tolerance` was pinned at its initial value
+    forever. The default behavior for dense mode (max≥50) is unchanged.
+
+    `eligible_mask` (bool tensor over envs) restricts the mean-successes
+    gate to a subset of envs (e.g. the reaching envs in a co-training
+    setup). When the mask is empty, no update is made.
+
+    `success_threshold` overrides the default `min(3.0, 0.8 *
+    max_consecutive_successes)` gate value when provided.
     """
     if frames_since_restart - last_curriculum_update < curriculum_interval:
         return success_tolerance, last_curriculum_update
 
-    mean_successes_per_episode = prev_episode_successes.mean()
-    if mean_successes_per_episode < 3.0:
+    if eligible_mask is not None:
+        if not bool(eligible_mask.any()):
+            return success_tolerance, last_curriculum_update
+        mean_successes_per_episode = prev_episode_successes[eligible_mask].float().mean()
+    else:
+        mean_successes_per_episode = prev_episode_successes.mean()
+
+    if success_threshold is not None:
+        threshold = float(success_threshold)
+    else:
+        threshold = min(3.0, 0.8 * max_consecutive_successes)
+    if mean_successes_per_episode < threshold:
         # this policy is not good enough with the previous tolerance value, keep training for now...
         return success_tolerance, last_curriculum_update
 

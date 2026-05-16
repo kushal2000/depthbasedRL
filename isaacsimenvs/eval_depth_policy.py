@@ -771,6 +771,9 @@ def main() -> None:
         _reset_hidden_for_done,
         _student_image_channels,
         _teacher_obs_tensor,
+        apply_camera_pose_randomization_profile,
+        apply_depth_noise_profile,
+        apply_peg_urdf_compat,
     )
     from isaacsimenvs.distillation.depth_debug import save_depth_debug
     from isaacsimenvs.distillation.student_policy import MLPRecurrentPolicy, MonoTransformerRecurrentPolicy
@@ -788,9 +791,7 @@ def main() -> None:
         env_cfg.peg_in_hole.force_scene_tol_combo = _parse_optional_pair(args.force_scene_tol_combo)
     if args.force_peg_idx is not None:
         env_cfg.peg_in_hole.force_peg_idx = args.force_peg_idx
-    if args.peg_urdf is not None:
-        env_cfg.assets.peg_urdf = args.peg_urdf
-        env_cfg.assets.object_name = Path(args.peg_urdf).stem
+    apply_peg_urdf_compat(env_cfg, args.peg_urdf)
     if args.peg_goal_mode is not None:
         env_cfg.peg_in_hole.goal_mode = args.peg_goal_mode
     if args.peg_enable_retract is not None:
@@ -802,12 +803,9 @@ def main() -> None:
         env_cfg.student_obs.use_camera_delay = queue_size > 1
         env_cfg.student_obs.camera_delay_max = queue_size
     _apply_student_camera_preset(env_cfg, args.student_camera_preset)
-    if args.depth_noise_profile is not None:
-        env_cfg.student_obs.depth_noise_profile = args.depth_noise_profile
-    if args.depth_noise_strength is not None:
-        env_cfg.student_obs.depth_noise_strength = args.depth_noise_strength
+    apply_depth_noise_profile(env_cfg.student_obs, args.depth_noise_profile, args.depth_noise_strength)
     if args.camera_pose_randomization_profile is not None:
-        env_cfg.student_obs.camera_pose_randomization_profile = args.camera_pose_randomization_profile
+        apply_camera_pose_randomization_profile(env_cfg.student_obs, args.camera_pose_randomization_profile)
     if args.camera_pose_randomization_mode is not None:
         env_cfg.student_obs.camera_pose_randomization_mode = args.camera_pose_randomization_mode
     if args.camera_pos_noise_m is not None:
@@ -1248,10 +1246,11 @@ def main() -> None:
                 "num_envs": int(args.num_envs),
                 "num_steps_requested": int(args.num_steps),
                 "one_episode_per_env": bool(args.one_episode_per_env),
-                "depth_noise_profile": env_cfg.student_obs.depth_noise_profile,
-                "depth_noise_strength": float(env_cfg.student_obs.depth_noise_strength),
+                "depth_noise_profile": args.depth_noise_profile or ("medium" if env_cfg.student_obs.use_depth_aug else "off"),
+                "depth_noise_strength": float(args.depth_noise_strength or 1.0),
                 "student_camera_preset": args.student_camera_preset,
-                "camera_pose_randomization_profile": env_cfg.student_obs.camera_pose_randomization_profile,
+                "camera_pose_randomization_profile": args.camera_pose_randomization_profile
+                or ("custom" if env_cfg.student_obs.use_camera_pose_rand else "off"),
                 "camera_pose_randomization_mode": env_cfg.student_obs.camera_pose_randomization_mode,
                 "camera_pos_noise_m": list(env_cfg.student_obs.camera_pos_noise_m),
                 "camera_rot_noise_deg": list(env_cfg.student_obs.camera_rot_noise_deg),

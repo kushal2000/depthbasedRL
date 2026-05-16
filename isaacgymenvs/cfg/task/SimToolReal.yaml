@@ -71,6 +71,11 @@ env:
   keypointRewScale: 200.0
   distanceDeltaRewScale: 50.0
   reachGoalBonus: 1000.0
+  # Grasp-pretraining knob: when True, the keypoint reward + near_goal
+  # success criterion use ‖object_pos − goal_pos‖ instead of the rotation-
+  # dependent max-keypoint distance. Per-keypoint observation tensors are
+  # unaffected. Default False — backward compatible with all other recipes.
+  useTranslationOnlyReward: False
   kukaActionsPenaltyScale: 0.03
   handActionsPenaltyScale: 0.003
   fallDistance: 0.24

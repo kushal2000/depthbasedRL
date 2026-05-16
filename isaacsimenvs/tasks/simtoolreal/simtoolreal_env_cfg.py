@@ -58,6 +58,16 @@ class AssetsCfg:
         "assets/urdf/kuka_sharpa_description/iiwa14_left_sharpa_adjusted_restricted.urdf"
     )
     table_urdf: str = "assets/urdf/table_narrow.urdf"
+    # Per-env scale ranges applied to the table mesh at scene-build time.
+    # Sampled independently per env: sx ~ U(table_scale_range_x), sy ~ U(table_scale_range_y).
+    # Z is held at 1.0 so the table surface height stays at table_reset_z (which the
+    # policy was trained to expect). Default (1, 1) means no scaling (legacy behavior).
+    table_scale_range_x: tuple[float, float] = (1.0, 1.0)
+    table_scale_range_y: tuple[float, float] = (1.0, 1.0)
+    # Number of pre-baked USD variants spanning the scale range. Per env Isaac Lab
+    # round-robins across this list at scene build, so each env's table has a
+    # different XY footprint drawn from the configured ranges.
+    table_scale_num_variants: int = 1
 
     object_name: str = "handle_head_primitives"
     handle_head_types: tuple[str, ...] = (
@@ -174,48 +184,124 @@ class StudentObsCfg:
     depth_max_m: float = 1.25
     hide_goal_viz: bool = True
 
-    # Metric-depth augmentation, applied before clipping/window normalization.
-    # Profiles are resolved in scene_utils:
-    #   off     -> no noise
-    #   weak    -> barely visible sanity-check noise
-    #   medium  -> intended realistic training noise
-    #   strong  -> obviously visible debug noise
-    #   custom  -> use the explicit fields below
-    depth_noise_profile: str = "off"
-    depth_noise_strength: float = 1.0
-    depth_noise_gaussian_std_m: float = 0.002
-    depth_noise_correlated_std_m: float = 0.003
-    depth_noise_correlated_kernel_size: int = 5
-    depth_noise_dropout_prob: float = 0.003
-    depth_noise_randu_prob: float = 0.003
-    depth_noise_randu_min_m: float = 0.50
-    depth_noise_randu_max_m: float = 1.30
-    depth_noise_stick_prob: float = 0.00025
-    depth_noise_stick_max_len_px: int = 18
-    depth_noise_stick_max_width_px: int = 3
-    depth_noise_max_sticks_per_image: int = 8
-
-    # Per-env camera extrinsic randomization. With "startup", each env samples
-    # one fixed camera pose lazily before first image read. With "reset", envs
-    # resample on reset, matching DEXTRAH's TiledCamera.set_world_poses pattern.
-    camera_pose_randomization_profile: str = "off"  # off | weak | medium | strong | custom
-    camera_pose_randomization_mode: str = "startup"  # startup | reset
-    camera_pos_noise_m: tuple[float, float, float] = (0.01, 0.01, 0.01)
-    camera_rot_noise_deg: tuple[float, float, float] = (1.0, 1.0, 1.0)
-
-    camera_backend: str = "tiled"  # "tiled" | "standard"
+    camera_backend: str = "tiled"  # "tiled" | "standard" | "raycaster" | "foundation_stereo"
     camera_mount: str = "world"
     camera_convention: str = "ros"
     camera_pos: tuple[float, float, float] = (0.0, -1.0, 1.0)
     camera_quat_wxyz: tuple[float, float, float, float] = (1.0, 0.0, 0.0, 0.0)
 
-    # Empty means use focal_length/horizontal_aperture. A 9-value tuple means
-    # use PinholeCameraCfg.from_intrinsic_matrix for this exact image size.
-    camera_intrinsic_matrix: tuple[float, ...] = ()
     focal_length: float = 24.0
+    camera_intrinsic_matrix: tuple[float, ...] = ()
     horizontal_aperture: float = 33.19737869997174
+    # USD PinholeCamera aperture offsets shift the principal point without
+    # changing FOV or image dimensions.  Defaults are set so the implied
+    # intrinsics match the ZED HD1080 calibration on lab serial 15107
+    # (fx=fy=115.67, cx=80.02, cy=47.13 at the 160x90 retrieve resolution).
+    # If you ever switch cameras or move to a centered-aperture sensor, set
+    # both offsets to 0.0 to recover the geometric-center default.
+    #   horizontal_offset_cm = (cx - W/2) * focal_length / fx
+    #     = (80.02 - 80) * 24 / 115.67   ~= 0.0035 cm  (sub-pixel)
+    #   vertical_offset_cm   = (cy - H/2) * focal_length / fy
+    #     = (47.13 - 45) * 24 / 115.67   ~= 0.4418 cm
+    horizontal_aperture_offset: float = 0.0035
+    vertical_aperture_offset: float = 0.4418
     focus_distance: float = 400.0
     clipping_range: tuple[float, float] = (0.1, 5.0)
+    # Sensor update period in seconds. 0.0 = render every policy step (60 Hz
+    # at our 60-Hz policy cadence). Set to 1/30 = 0.03333 to render at 30 Hz
+    # (matches real ZED), in which case the sensor returns its cached output
+    # on alternate policy steps. Cuts depth-render cost ~in half and closes
+    # a sim2real fidelity gap (real ZED is 30 Hz, we control at 60 Hz).
+    camera_update_period_s: float = 0.0
+
+    # ---- RayCaster-only knobs (consumed when camera_backend == "raycaster") ----
+    # USD prim-path globs the raycaster casts against. Entries in
+    # `raycast_static_prim_exprs` have their pose cached at sensor init (no
+    # per-step view query, cheaper). Entries in `raycast_dynamic_prim_exprs`
+    # have their mesh transforms refreshed every step — list every prim
+    # whose pose changes (robot links, the peg, the receptive, the table if
+    # table-DR is enabled).
+    raycast_static_prim_exprs: tuple[str, ...] = ("/World/ground",)
+    # Point at each rigid body's `/visuals` subgroup, NOT the rigid body root.
+    # The URDF importer attaches the visual-origin xform (e.g.
+    # `<origin xyz="0 0 0.38"/>` on a table) at the `/box/visuals` level;
+    # targeting the rigid body root collapses across that xform and the
+    # raycaster places the geometry at z=0 instead. For the iiwa+sharpa
+    # articulation we use `.*` to pick up every link's `/visuals` child —
+    # the MultiMeshRayCaster creates a view that tracks each matched prim's
+    # world pose independently, so articulation joints update per step.
+    raycast_dynamic_prim_exprs: tuple[str, ...] = (
+        "/World/envs/env_.*/Table/box/visuals",
+        "/World/envs/env_.*/Hole/hole/visuals",
+        # Wildcard the Object's link-name subpath so this works for any
+        # task / problem URDF (peg, lpeg, fmb_peg_board_*, fabrica beam
+        # parts, furniture parts, ...). The single-link case matches one
+        # `/visuals` group; multi-link URDFs (fabrica) match each link's
+        # `/visuals` group independently, which is what we want.
+        "/World/envs/env_.*/Object/.*/visuals",
+        # iiwa arm + sharpa hand link visuals. Explicit prefixes (not a
+        # broad `/Robot/.*/visuals`) so the parser doesn't try to make
+        # rigid-body views for non-link prims like `/Robot/Looks` /
+        # `/Robot/joints` (those stall sensor init for several minutes
+        # with PhysX retries before timing out).
+        "/World/envs/env_.*/Robot/iiwa14_link_.*/visuals",
+        "/World/envs/env_.*/Robot/left_.*/visuals",
+    )
+    # Rays that don't intersect any mesh return max_distance (instead of NaN)
+    # when `depth_clipping_behavior == "max"`. Keep at the rasterizer's default
+    # ("none" → NaN at infinity) so downstream depth-window normalization
+    # treats far rays the same as the TiledCamera path.
+    raycast_max_distance_m: float = 10.0
+    raycast_depth_clipping_behavior: str = "none"  # "max" | "zero" | "none"
+
+    # ---- Fast-FoundationStereo settings (used when camera_backend == "foundation_stereo") ----
+    # Spawns a stereo TiledCamera pair (left at `camera_pos`/`camera_quat_wxyz`,
+    # right at left + R_left @ [baseline, 0, 0]), renders RGB at
+    # `fs_stereo_width × fs_stereo_height`, runs Fast-FS inference to recover
+    # disparity, converts to metric depth, and downsamples to `image_width ×
+    # image_height` before the existing depth-noise / crop / normalize chain.
+    #
+    # See deployment/FAST_FS_SETUP.md for weight download + ONNX/engine build.
+    fs_model_dir: str = "third_party/Fast-FoundationStereo/weights/23-36-37"
+    # When set, prefer the TRT engine pair at this directory
+    # (feature_runner.engine + post_runner.engine + onnx.yaml). Otherwise the
+    # wrapper falls back to PyTorch inference on `{fs_model_dir}/model_best_bp2_serialize.pth`.
+    fs_engine_dir: str = ""
+    fs_valid_iters: int = 4
+    fs_max_disp: int = 192
+    # ZED 1 stereo baseline. Override per camera serial via SDK calibration.
+    fs_stereo_baseline_m: float = 0.120
+    # Stereo render size. Multiples of 32. 384x224 matches the team's deployment
+    # ONNX export (~3.9 ms TRT / 26 ms PyTorch on RTX 6000 Ada).
+    fs_stereo_width: int = 384
+    fs_stereo_height: int = 224
+    # If true (the default), the FS depth is downsampled to `image_width ×
+    # image_height` before _apply_depth_noise / _crop_student_image. If false,
+    # the policy-input resolution is set to the stereo resolution (only useful
+    # for sanity-check debugging).
+    fs_downsample_to_policy_res: bool = True
+
+    # Camera pose randomization. "startup" samples once per env and then keeps
+    # the camera fixed; "reset" resamples every episode reset.
+    use_camera_pose_rand: bool = False
+    camera_pose_randomization_mode: str = "startup"
+    camera_pos_noise_m: tuple[float, float, float] = (0.01, 0.01, 0.01)
+    camera_rot_noise_deg: tuple[float, float, float] = (1.0, 1.0, 1.0)
+
+    # Depth-image noise pipeline (5 stages, applied in raw meters BEFORE preprocess).
+    # Master switch + numerical defaults are the team's "medium" preset.
+    use_depth_aug: bool = False
+    depth_aug_gaussian_std_m: float = 0.002
+    depth_aug_correlated_std_m: float = 0.003
+    depth_aug_correlated_kernel_size: int = 5
+    depth_aug_dropout_prob: float = 0.003
+    depth_aug_randu_prob: float = 0.003
+    depth_aug_randu_min_m: float = 0.50
+    depth_aug_randu_max_m: float = 1.30
+    depth_aug_stick_prob: float = 0.00025
+    depth_aug_max_sticks_per_image: int = 8
+    depth_aug_stick_max_len_px: int = 18
+    depth_aug_stick_max_width_px: int = 3
 
 
 # ----------------------------------------------------------------------------
@@ -274,8 +360,6 @@ class ResetCfg:
     reset_position_noise_y: float = 0.1
     reset_position_noise_z: float = 0.02
     fixed_start_pose: tuple[float, float, float, float, float, float, float] | None = None
-    object_orientation_mode: str = "full"  # full | yaw_only
-    object_yaw_range_degrees: float = 180.0
 
     # Joint state noise on reset
     reset_dof_pos_random_interval_arm: float = 0.1
@@ -286,6 +370,12 @@ class ResetCfg:
     table_reset_z: float = 0.38
     table_reset_z_range: float = 0.01
     table_object_z_offset: float = 0.25
+    # Per-env XY position noise applied at reset (uniform half-widths in m).
+    # Default (0, 0) keeps the table centered on the env origin (legacy behavior).
+    table_reset_xy_range_m: tuple[float, float] = (0.0, 0.0)
+    # Per-env yaw noise applied at reset (uniform half-width in degrees about z).
+    # Default 0.0 preserves the identity quat (legacy behavior).
+    table_reset_yaw_range_deg: float = 0.0
 
     # Goal sampling
     goal_sampling_type: str = "delta"  # "delta" | "absolute"

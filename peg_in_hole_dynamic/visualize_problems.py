@@ -1,0 +1,615 @@
+#!/usr/bin/env python3
+"""Standalone viser viewer for `peg_in_hole_dynamic.PROBLEM_REGISTRY`.
+
+Loads the receptive URDF at the origin and the insertion URDF at either
+the final insert pose or the first insertion subgoal (selectable via dropdown),
+with optional keypoint markers for the insertion object's bounding-box
+corners. No Isaac Gym, no policy.
+
+Usage:
+    python peg_in_hole_dynamic/visualize_problems.py [--port 8043]
+"""
+
+from __future__ import annotations
+
+import argparse
+import time
+import xml.etree.ElementTree as ET
+from pathlib import Path
+from typing import List, Optional, Tuple
+
+import numpy as np
+import trimesh
+import viser
+from scipy.spatial.transform import Rotation as R
+from viser.extras import ViserUrdf
+
+from dextoolbench.objects import NAME_TO_OBJECT
+from peg_in_hole_dynamic import PROBLEM_REGISTRY, Problem
+
+REPO_ROOT = Path(__file__).resolve().parent.parent
+ASSETS_ROOT = REPO_ROOT / "assets"
+
+# Defaults from SimToolReal.yaml — used to reproduce env-side keypoint
+# math for visualization purposes.
+OBJECT_BASE_SIZE = 0.04
+KEYPOINT_SCALE = 1.5
+
+# Env defaults (PegInHoleDynamicEnv / SimToolReal): table base at world z=0.38,
+# table half-height 0.15 → top at world z=0.53. Robot base at world (0, 0.8, 0).
+TABLE_RESET_Z = 0.38
+TABLE_HALF_HEIGHT = 0.15
+TABLE_TOP_Z = TABLE_RESET_Z + TABLE_HALF_HEIGHT
+TABLE_DIMENSIONS = (0.475, 0.4, 0.3)  # X, Y, Z extents from urdf/table_narrow.urdf
+ROBOT_POSITION = (0.0, 0.8, 0.0)
+ROBOT_URDF = REPO_ROOT / "assets/urdf/kuka_sharpa_description/iiwa14_left_sharpa_adjusted_restricted.urdf"
+DEFAULT_ARM_DOFS = np.array([-1.571, 1.571 - np.deg2rad(10), 0.0,
+                             1.376 + np.deg2rad(10), 0.0, 1.485, 1.308])
+
+# Per-env hole XY randomization range (matches PegInHole.yaml /
+# peg_in_hole_env_cfg defaults). The env samples hole_pos uniformly within
+# these per-axis bounds; in the viewer we render the full range as a
+# translucent footprint on the table top, and let the user drag a slider
+# within the range to position the whole assembly.
+HOLE_X_RANGE = (-0.1875, 0.1875)
+HOLE_Y_RANGE = (-0.1, 0.1)
+
+
+def _xyzw_to_wxyz(q: Tuple[float, float, float, float]) -> Tuple[float, float, float, float]:
+    qx, qy, qz, qw = q
+    return (qw, qx, qy, qz)
+
+
+def _keypoint_half_extents(insertion_object_name: str) -> Optional[Tuple[float, float, float]]:
+    obj = NAME_TO_OBJECT.get(insertion_object_name)
+    if obj is None:
+        return None
+    return tuple(
+        obj.scale[i] * OBJECT_BASE_SIZE * KEYPOINT_SCALE / 2 for i in range(3)
+    )
+
+
+def _keypoint_corners(half_extents: Tuple[float, float, float]) -> List[Tuple[float, float, float]]:
+    hx, hy, hz = half_extents
+    out = []
+    for sx in (-1.0, 1.0):
+        for sy in (-1.0, 1.0):
+            for sz in (-1.0, 1.0):
+                out.append((sx * hx, sy * hy, sz * hz))
+    return out
+
+
+def _parse_fixture_urdf(urdf_path: Path) -> List[Tuple[str, Tuple[float, float, float], Tuple[float, float, float, float], List[Tuple["trimesh.Trimesh", Tuple[int, int, int]]]]]:
+    """Parse one of our generated fixture URDFs.
+
+    Returns a list of ``(part_label, joint_xyz, joint_wxyz, [(mesh, rgb), ...])``
+    entries — one per link that has any visual geometry. Each visual mesh
+    gets its own color from a palette (each CoACD hull rendered distinctly).
+
+    Handles:
+      * single-link URDFs whose root link contains all visuals (peg_in_hole
+        receptive style).
+      * multi-link URDFs with fixed joints carrying the per-link transform
+        (fabrica/fmb fixture style).
+      * `<box>` primitives in addition to `<mesh>`.
+      * per-visual `<origin xyz=... rpy=...>` baked into the returned mesh
+        vertices so the caller doesn't need to know the URDF's local frame
+        structure.
+    """
+    tree = ET.parse(str(urdf_path))
+    robot = tree.getroot()
+    urdf_dir = urdf_path.parent
+
+    joints = {}
+    for j in robot.findall("joint"):
+        if j.find("child") is None or j.find("origin") is None:
+            continue
+        child = j.find("child").get("link")
+        origin = j.find("origin")
+        xyz = tuple(float(x) for x in origin.get("xyz", "0 0 0").split())
+        rpy = tuple(float(x) for x in origin.get("rpy", "0 0 0").split())
+        joints[child] = (xyz, rpy)
+
+    palette = [
+        (217,  76,  76), ( 76, 165, 217), (102, 191,  89), (229, 178,  51),
+        (179, 102, 204), ( 76, 204, 191), (217, 127,  51), (140, 140, 140),
+        (242, 110, 165), ( 51, 130,  76), (255, 217, 102), ( 89,  89, 191),
+        (191,  89, 165), (140, 217, 217), (217, 191,  89), (114, 114, 178),
+    ]
+
+    def _origin_xyz_rpy(origin_elem):
+        if origin_elem is None:
+            return (0.0, 0.0, 0.0), (0.0, 0.0, 0.0)
+        xyz = tuple(float(x) for x in origin_elem.get("xyz", "0 0 0").split())
+        rpy = tuple(float(x) for x in origin_elem.get("rpy", "0 0 0").split())
+        return xyz, rpy
+
+    def _load_visual_geom(visual_elem) -> Optional["trimesh.Trimesh"]:
+        geom = visual_elem.find("geometry")
+        if geom is None:
+            return None
+        mesh_tag = geom.find("mesh")
+        if mesh_tag is not None:
+            mesh_abs = (urdf_dir / mesh_tag.get("filename")).resolve()
+            try:
+                return trimesh.load_mesh(str(mesh_abs), process=False)
+            except Exception as e:
+                print(f"[visualize] failed to load mesh {mesh_abs}: {e}")
+                return None
+        box_tag = geom.find("box")
+        if box_tag is not None:
+            size = [float(x) for x in box_tag.get("size", "0 0 0").split()]
+            return trimesh.creation.box(extents=size)
+        return None
+
+    SDF_BLACK = (15, 15, 15)   # near-black so SDF regions are visually obvious
+
+    parts = []
+    palette_offset = 0
+    for link in robot.findall("link"):
+        link_name = link.get("name")
+        visuals = link.findall("visual")
+        # Fabrica/fmb-style empty root link: skip it (kept for the URDF tree
+        # but carries no geometry of its own).
+        if link_name == "root" and not visuals:
+            continue
+
+        # Collect mesh-filenames flagged as SDF on the collision side. Any
+        # <visual> referencing one of these meshes is an "SDF region" and
+        # gets coloured black so the user can immediately tell where the
+        # SDF physics applies vs the CoACD / box hulls.
+        sdf_mesh_filenames = set()
+        for col in link.findall("collision"):
+            if col.find("sdf") is None:
+                continue
+            mtag = col.find("geometry/mesh")
+            if mtag is not None:
+                sdf_mesh_filenames.add(mtag.get("filename"))
+
+        jxyz, jrpy = joints.get(link_name, ((0.0, 0.0, 0.0), (0.0, 0.0, 0.0)))
+        rxyzw = R.from_euler("xyz", jrpy).as_quat()
+        wxyz = (float(rxyzw[3]), float(rxyzw[0]), float(rxyzw[1]), float(rxyzw[2]))
+
+        meshes: List[Tuple["trimesh.Trimesh", Tuple[int, int, int]]] = []
+        for vi, visual in enumerate(visuals):
+            geom = _load_visual_geom(visual)
+            if geom is None:
+                continue
+            v_xyz, v_rpy = _origin_xyz_rpy(visual.find("origin"))
+            R_loc = R.from_euler("xyz", v_rpy).as_matrix()
+            geom = geom.copy()
+            geom.vertices = geom.vertices @ R_loc.T + np.asarray(v_xyz)
+
+            mesh_tag = visual.find("geometry/mesh")
+            mesh_filename = mesh_tag.get("filename") if mesh_tag is not None else None
+            if mesh_filename is not None and mesh_filename in sdf_mesh_filenames:
+                color = SDF_BLACK
+            else:
+                color = palette[(palette_offset + vi) % len(palette)]
+            meshes.append((geom, color))
+
+        if not meshes:
+            continue
+        parts.append((link_name, tuple(map(float, jxyz)), wxyz, meshes))
+        palette_offset += max(len(meshes), 1) + 3
+    return parts
+
+
+class ProblemVisualizer:
+    """Re-builds the dynamic scene under a fresh `/v{counter}` namespace each
+    render, so that even if individual `.remove()` calls don't fully clean
+    up viser-side state, the next render's nodes never collide with the
+    previous render's."""
+
+    def __init__(self, server: viser.ViserServer):
+        self.server = server
+        self._handles: List = []
+        self._fixture_mesh_handles: List = []
+        self._insertion_mesh_handles: List = []
+        self._render_counter = 0
+        self._info_md = None
+        # UI state — set after gui is built.
+        self._current_problem: Optional[str] = None
+        self._current_pose: str = "final"
+        self._show_insertion_keypoints: bool = False
+        self._show_receptive_keypoints: bool = False
+        self._fixture_opacity: float = 0.5
+        self._insertion_opacity: float = 1.0
+        self._assembly_xy: Tuple[float, float] = (0.0, 0.0)
+        self._build_static()
+
+    # ---- static (built once) ----
+    def _build_static(self) -> None:
+        self.server.scene.add_grid("/ground", width=2, height=2, cell_size=0.1)
+        self.server.scene.add_frame(
+            "/world", position=(0, 0, 0), wxyz=(1, 0, 0, 0), show_axes=True,
+            axes_length=0.1, axes_radius=0.003,
+        )
+
+        # Table — modelled as a primitive box matching urdf/table_narrow.urdf,
+        # placed so its top sits at world z = TABLE_TOP_Z.
+        self.server.scene.add_frame(
+            "/table", position=(0, 0, TABLE_RESET_Z), wxyz=(1, 0, 0, 0), show_axes=False,
+        )
+        self.server.scene.add_box(
+            "/table/wood",
+            color=(180, 130, 70),
+            dimensions=TABLE_DIMENSIONS,
+            position=(0, 0, 0),
+            opacity=0.85,
+        )
+
+        # Fixture XY randomization footprint — translucent box on the table
+        # top whose extents match the env's hole_x_range / hole_y_range. The
+        # assembly slider position is drawn from inside this region.
+        rx_lo, rx_hi = HOLE_X_RANGE
+        ry_lo, ry_hi = HOLE_Y_RANGE
+        self.server.scene.add_box(
+            "/fixture_range",
+            color=(80, 200, 255),
+            dimensions=(rx_hi - rx_lo, ry_hi - ry_lo, 0.002),
+            position=((rx_lo + rx_hi) / 2, (ry_lo + ry_hi) / 2, TABLE_TOP_Z + 0.001),
+            opacity=0.18,
+        )
+
+        # Robot — pose-only ViserUrdf at the env's robot location.
+        self.server.scene.add_frame(
+            "/robot", position=ROBOT_POSITION, wxyz=(1, 0, 0, 0), show_axes=False,
+        )
+        try:
+            robot = ViserUrdf(self.server, ROBOT_URDF, root_node_name="/robot")
+            cfg = np.zeros(len(robot.get_actuated_joint_names()))
+            cfg[: len(DEFAULT_ARM_DOFS)] = DEFAULT_ARM_DOFS
+            robot.update_cfg(cfg)
+        except Exception as e:
+            print(f"[visualize] failed to load robot URDF {ROBOT_URDF}: {e}")
+
+    # ---- handle bookkeeping ----
+    def _track(self, handle):
+        self._handles.append(handle)
+        return handle
+
+    def _clear_dynamic(self) -> None:
+        # Remove deepest-first so parents don't auto-orphan children.
+        for h in reversed(self._handles):
+            try:
+                h.remove()
+            except Exception:
+                pass
+        self._handles.clear()
+        self._fixture_mesh_handles.clear()
+        self._insertion_mesh_handles.clear()
+        # Belt-and-suspenders: also remove every prior version subtree by
+        # path, in case some scene nodes aren't tracked by .remove() handles
+        # (ViserUrdf-internal frames, etc.).
+        for n in range(1, self._render_counter + 1):
+            try:
+                self.server.scene.remove_by_name(f"/v{n}")
+            except Exception:
+                pass
+
+    # ---- pose helpers ----
+    def _selected_position_quat(self, p: Problem) -> Tuple[Tuple[float, float, float], Tuple[float, float, float, float]]:
+        pose = self._pose_from_selection(p, self._current_pose)
+        x, y, z, qx, qy, qz, qw = pose
+        return (x, y, z), (qx, qy, qz, qw)
+
+    @staticmethod
+    def _pose_from_selection(p: Problem, selection: str):
+        if selection.startswith("subgoal_"):
+            try:
+                idx = int(selection[len("subgoal_"):])
+            except ValueError:
+                idx = len(p.insert_pose_rel_receptive) - 1
+            idx = int(np.clip(idx, 0, len(p.insert_pose_rel_receptive) - 1))
+            return p.insert_pose_rel_receptive[idx]
+        if selection == "first_subgoal":
+            return p.insert_pose_rel_receptive[0]
+        return p.final_insert_pose_rel_receptive
+
+    @staticmethod
+    def pose_options_for(p: Problem) -> List[str]:
+        return [f"subgoal_{i}" for i in range(len(p.insert_pose_rel_receptive))]
+
+    # ---- main render ----
+    def render(self) -> None:
+        self._clear_dynamic()
+        self._render_counter += 1
+        ns = f"/v{self._render_counter}"
+
+        if self._current_problem not in PROBLEM_REGISTRY:
+            return
+        p = PROBLEM_REGISTRY[self._current_problem]
+
+        # --- receptive object at world (assembly_x, assembly_y, table_top_z + hole_z_offset) ---
+        # The env picks hole_pos = (rand_x, rand_y, table_top_z + holeZOffset)
+        # uniformly within HOLE_X_RANGE × HOLE_Y_RANGE. Here the slider value
+        # (_assembly_xy) drives the receptive XY directly, and the insertion
+        # object shifts by the same XY so the whole assembly translates as a
+        # rigid unit.
+        ax, ay = self._assembly_xy
+        recv_world_z = TABLE_TOP_Z + p.hole_z_offset
+        receptive_abs = ASSETS_ROOT / p.receptive_urdf
+        recv_frame = self._track(self.server.scene.add_frame(
+            f"{ns}/receptive",
+            position=(ax, ay, recv_world_z),
+            wxyz=(1, 0, 0, 0),
+            show_axes=True, axes_length=0.1, axes_radius=0.003,
+        ))
+        try:
+            for part_label, jxyz, jwxyz, mesh_entries in _parse_fixture_urdf(receptive_abs):
+                part_node = f"{ns}/receptive/{part_label}"
+                self._track(self.server.scene.add_frame(
+                    part_node, position=jxyz, wxyz=jwxyz, show_axes=False,
+                ))
+                for mi, (mesh, rgb) in enumerate(mesh_entries):
+                    h = self.server.scene.add_mesh_simple(
+                        f"{part_node}/m{mi}",
+                        vertices=np.asarray(mesh.vertices, dtype=np.float32),
+                        faces=np.asarray(mesh.faces, dtype=np.int32),
+                        color=rgb,
+                        opacity=self._fixture_opacity,
+                    )
+                    self._track(h)
+                    self._fixture_mesh_handles.append(h)
+        except Exception as e:
+            print(f"[visualize] failed to load receptive {receptive_abs}: {e}")
+
+        # --- insertion object at the selected pose (relative to receptive) ---
+        (ix, iy, iz), (qx, qy, qz, qw) = self._selected_position_quat(p)
+        # Lift to world frame by adding the receptive's world position.
+        ix_world, iy_world, iz_world = ix + ax, iy + ay, iz + recv_world_z
+        ins_frame = self._track(self.server.scene.add_frame(
+            f"{ns}/insertion",
+            position=(ix_world, iy_world, iz_world),
+            wxyz=_xyzw_to_wxyz((qx, qy, qz, qw)),
+            show_axes=True, axes_length=0.05, axes_radius=0.002,
+        ))
+        try:
+            obj = NAME_TO_OBJECT.get(p.insertion_object_name)
+            if obj is None:
+                raise KeyError(f"{p.insertion_object_name!r} not in NAME_TO_OBJECT")
+            for part_label, jxyz, jwxyz, mesh_entries in _parse_fixture_urdf(Path(obj.urdf_path)):
+                ins_part_node = f"{ns}/insertion/{part_label}"
+                self._track(self.server.scene.add_frame(
+                    ins_part_node, position=jxyz, wxyz=jwxyz, show_axes=False,
+                ))
+                for mi, (mesh, rgb) in enumerate(mesh_entries):
+                    h = self.server.scene.add_mesh_simple(
+                        f"{ins_part_node}/m{mi}",
+                        vertices=np.asarray(mesh.vertices, dtype=np.float32),
+                        faces=np.asarray(mesh.faces, dtype=np.int32),
+                        color=rgb,
+                        opacity=self._insertion_opacity,
+                    )
+                    self._track(h)
+                    self._insertion_mesh_handles.append(h)
+        except Exception as e:
+            print(f"[visualize] failed to load insertion: {e}")
+
+        # --- optional keypoint spheres ---
+        half_ext = _keypoint_half_extents(p.insertion_object_name)
+
+        # "Insertion keypoints": the 8 bbox corners attached to the insertion
+        # frame so they ride along with the rendered insertion mesh.
+        if self._show_insertion_keypoints and half_ext is not None:
+            for k, (cx, cy, cz) in enumerate(_keypoint_corners(half_ext)):
+                self._track(self.server.scene.add_icosphere(
+                    f"{ns}/insertion/kp_{k}",
+                    position=(cx, cy, cz),
+                    radius=0.006,
+                    color=(40, 200, 255),
+                ))
+
+        # "Goal-pose keypoints": same 8 corners but expressed in the
+        # receptive frame at the FINAL insert pose — this is what the
+        # policy is trying to land each corner on.
+        if self._show_receptive_keypoints and half_ext is not None:
+            # Keypoints at the FINAL insert pose — this is where the policy
+            # is trying to land each insertion-object corner.
+            from scipy.spatial.transform import Rotation as _R
+            x_f, y_f, z_f, qx_f, qy_f, qz_f, qw_f = p.final_insert_pose_rel_receptive
+            R_ins = _R.from_quat([qx_f, qy_f, qz_f, qw_f]).as_matrix()
+            for k, c in enumerate(_keypoint_corners(half_ext)):
+                rec_local = R_ins @ np.asarray(c) + np.array([x_f, y_f, z_f])
+                world = (rec_local[0] + ax, rec_local[1] + ay, rec_local[2] + recv_world_z)
+                self._track(self.server.scene.add_icosphere(
+                    f"{ns}/receptive_kp_{k}",
+                    position=world,
+                    radius=0.006,
+                    color=(255, 180, 40),
+                ))
+
+        # --- info panel ---
+        if self._info_md is not None:
+            current_pose = self._pose_from_selection(p, self._current_pose)
+            x_f, y_f, z_f, qx_f, qy_f, qz_f, qw_f = p.final_insert_pose_rel_receptive
+            x_0, y_0, z_0, qx_0, qy_0, qz_0, qw_0 = p.insert_pose_rel_receptive[0]
+            current_pose_str = ", ".join(f"{v:+.6f}" for v in current_pose)
+            self._info_md.content = (
+                f"### {self._current_problem}  ({self._current_pose})\n"
+                f"- **insertion**: `{p.insertion_object_name}`\n"
+                f"- **receptive**: `{p.receptive_urdf}`\n"
+                f"- **subgoals**: `{len(p.insert_pose_rel_receptive)}`\n"
+                f"- **current pose (xyz xyzw)** `({current_pose_str})`\n"
+                f"- **first** xyz `({x_0:+.4f}, {y_0:+.4f}, {z_0:+.4f})`\n"
+                f"- **final** xyz `({x_f:+.4f}, {y_f:+.4f}, {z_f:+.4f})`\n"
+                f"- **first quat (xyzw)** `({qx_0:+.4f}, {qy_0:+.4f}, {qz_0:+.4f}, {qw_0:+.4f})`\n"
+                f"- **final quat (xyzw)** `({qx_f:+.4f}, {qy_f:+.4f}, {qz_f:+.4f}, {qw_f:+.4f})`\n"
+                f"- **insertion_direction**: `{tuple(p.insertion_direction)}`\n"
+                f"- **pre_insert_offset**: `{p.pre_insert_offset}`\n"
+            )
+
+    # ---- UI integration ----
+    def attach_info(self, info_handle) -> None:
+        self._info_md = info_handle
+
+    def set_problem(self, name: str) -> None:
+        self._current_problem = name
+        if name in PROBLEM_REGISTRY:
+            options = self.pose_options_for(PROBLEM_REGISTRY[name])
+            if options and self._current_pose not in options:
+                self._current_pose = options[-1]
+        self.render()
+
+    def set_pose(self, pose: str) -> None:
+        if self._current_problem in PROBLEM_REGISTRY:
+            valid = set(self.pose_options_for(PROBLEM_REGISTRY[self._current_problem]))
+        else:
+            valid = {"final"}
+        if pose not in valid:
+            return
+        self._current_pose = pose
+        self.render()
+
+    def set_show_insertion_keypoints(self, val: bool) -> None:
+        self._show_insertion_keypoints = bool(val)
+        self.render()
+
+    def set_show_receptive_keypoints(self, val: bool) -> None:
+        self._show_receptive_keypoints = bool(val)
+        self.render()
+
+    def set_fixture_opacity(self, val: float) -> None:
+        self._fixture_opacity = float(np.clip(val, 0.0, 1.0))
+        for h in self._fixture_mesh_handles:
+            try:
+                h.opacity = self._fixture_opacity
+            except Exception:
+                pass
+
+    def set_insertion_opacity(self, val: float) -> None:
+        self._insertion_opacity = float(np.clip(val, 0.0, 1.0))
+        for h in self._insertion_mesh_handles:
+            try:
+                h.opacity = self._insertion_opacity
+            except Exception:
+                pass
+
+    def set_assembly_xy(self, x: float, y: float) -> None:
+        self._assembly_xy = (float(x), float(y))
+        self.render()
+
+
+def _free_port(start: int = 8043, span: int = 20) -> Optional[int]:
+    import socket
+    for p in range(start, start + span):
+        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        try:
+            s.bind(("0.0.0.0", p))
+            s.close()
+            return p
+        except OSError:
+            s.close()
+    return None
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--port", type=int, default=None,
+                        help="viser port; if unset, picks a free port near 8043")
+    parser.add_argument("--initial", type=str, default=None,
+                        help="initial problem name; defaults to first in registry")
+    args = parser.parse_args()
+
+    problems = sorted(PROBLEM_REGISTRY)
+    if not problems:
+        raise SystemExit("PROBLEM_REGISTRY is empty — nothing to visualize.")
+    initial = args.initial if args.initial in problems else problems[0]
+
+    port = args.port if args.port is not None else _free_port()
+    if port is None:
+        raise SystemExit("Could not find a free port near 8043.")
+
+    server = viser.ViserServer(host="0.0.0.0", port=port)
+    print(f"[visualize] viser server listening on http://localhost:{port}")
+    print(f"[visualize] {len(problems)} problem(s) registered")
+
+    @server.on_client_connect
+    def _on_connect(client: viser.ClientHandle) -> None:
+        client.camera.position = (0.6, 0.6, 0.4)
+        client.camera.look_at = (0.0, 0.0, 0.05)
+
+    viz = ProblemVisualizer(server)
+
+    with server.gui.add_folder("Problem"):
+        problem_dropdown = server.gui.add_dropdown(
+            "Select", options=problems, initial_value=initial,
+        )
+        initial_pose_options = ProblemVisualizer.pose_options_for(PROBLEM_REGISTRY[initial])
+        pose_dropdown = server.gui.add_dropdown(
+            "Pose", options=initial_pose_options, initial_value=initial_pose_options[-1],
+        )
+        kp_ins_checkbox = server.gui.add_checkbox(
+            "Show insertion keypoints", initial_value=False,
+        )
+        kp_recv_checkbox = server.gui.add_checkbox(
+            "Show goal-pose keypoints", initial_value=False,
+        )
+        opacity_slider = server.gui.add_slider(
+            "Fixture opacity", min=0.0, max=1.0, step=0.05, initial_value=0.5,
+        )
+        ins_opacity_slider = server.gui.add_slider(
+            "Insertion opacity", min=0.0, max=1.0, step=0.05, initial_value=1.0,
+        )
+        assembly_x_slider = server.gui.add_slider(
+            "Assembly X", min=HOLE_X_RANGE[0], max=HOLE_X_RANGE[1],
+            step=0.005, initial_value=0.0,
+        )
+        assembly_y_slider = server.gui.add_slider(
+            "Assembly Y", min=HOLE_Y_RANGE[0], max=HOLE_Y_RANGE[1],
+            step=0.005, initial_value=0.0,
+        )
+        info = server.gui.add_markdown("")
+        viz.attach_info(info)
+
+    @problem_dropdown.on_update
+    def _on_problem(_) -> None:
+        p = PROBLEM_REGISTRY[problem_dropdown.value]
+        pose_dropdown.options = ProblemVisualizer.pose_options_for(p)
+        if pose_dropdown.value not in pose_dropdown.options:
+            pose_dropdown.value = pose_dropdown.options[-1]
+        viz.set_problem(problem_dropdown.value)
+        viz.set_pose(pose_dropdown.value)
+
+    @pose_dropdown.on_update
+    def _on_pose(_) -> None:
+        viz.set_pose(pose_dropdown.value)
+
+    @kp_ins_checkbox.on_update
+    def _on_kp_ins(_) -> None:
+        viz.set_show_insertion_keypoints(kp_ins_checkbox.value)
+
+    @kp_recv_checkbox.on_update
+    def _on_kp_recv(_) -> None:
+        viz.set_show_receptive_keypoints(kp_recv_checkbox.value)
+
+    @opacity_slider.on_update
+    def _on_opacity(_) -> None:
+        viz.set_fixture_opacity(opacity_slider.value)
+
+    @ins_opacity_slider.on_update
+    def _on_ins_opacity(_) -> None:
+        viz.set_insertion_opacity(ins_opacity_slider.value)
+
+    @assembly_x_slider.on_update
+    def _on_assembly_x(_) -> None:
+        viz.set_assembly_xy(assembly_x_slider.value, assembly_y_slider.value)
+
+    @assembly_y_slider.on_update
+    def _on_assembly_y(_) -> None:
+        viz.set_assembly_xy(assembly_x_slider.value, assembly_y_slider.value)
+
+    viz.set_fixture_opacity(opacity_slider.value)
+    viz.set_insertion_opacity(ins_opacity_slider.value)
+    viz.set_problem(initial)
+
+    try:
+        while True:
+            time.sleep(1.0)
+    except KeyboardInterrupt:
+        pass
+
+
+if __name__ == "__main__":
+    main()

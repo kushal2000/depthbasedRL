@@ -40,6 +40,52 @@ SAMRAT_ZED2I_INTRINSIC_MATRIX = (
 SAMRAT_ZED2I_WIDTH = 384
 SAMRAT_ZED2I_HEIGHT = 224
 
+DEPTH_NOISE_PRESETS: dict[str, dict[str, float | int]] = {
+    "off": {
+        "gaussian_std_m": 0.0,
+        "correlated_std_m": 0.0,
+        "correlated_kernel_size": 1,
+        "dropout_prob": 0.0,
+        "randu_prob": 0.0,
+        "stick_prob": 0.0,
+        "max_sticks_per_image": 0,
+    },
+    "weak": {
+        "gaussian_std_m": 0.0002,
+        "correlated_std_m": 0.0003,
+        "correlated_kernel_size": 5,
+        "dropout_prob": 0.00005,
+        "randu_prob": 0.00005,
+        "stick_prob": 0.0,
+        "max_sticks_per_image": 0,
+    },
+    "medium": {
+        "gaussian_std_m": 0.002,
+        "correlated_std_m": 0.003,
+        "correlated_kernel_size": 5,
+        "dropout_prob": 0.003,
+        "randu_prob": 0.003,
+        "stick_prob": 0.00025,
+        "max_sticks_per_image": 8,
+    },
+    "strong": {
+        "gaussian_std_m": 0.015,
+        "correlated_std_m": 0.020,
+        "correlated_kernel_size": 9,
+        "dropout_prob": 0.020,
+        "randu_prob": 0.020,
+        "stick_prob": 0.002,
+        "max_sticks_per_image": 32,
+    },
+}
+
+CAMERA_POSE_RANDOMIZATION_PRESETS: dict[str, tuple[tuple[float, float, float], tuple[float, float, float]]] = {
+    "off": ((0.0, 0.0, 0.0), (0.0, 0.0, 0.0)),
+    "weak": ((0.001, 0.001, 0.001), (0.1, 0.1, 0.1)),
+    "medium": ((0.01, 0.01, 0.01), (1.0, 1.0, 1.0)),
+    "strong": ((0.10, 0.10, 0.10), (20.0, 20.0, 20.0)),
+}
+
 
 def _scale_intrinsic_matrix(
     intrinsic_matrix: tuple[float, ...],
@@ -79,6 +125,83 @@ def _parse_optional_pair(value: str | None) -> tuple[int, int] | None:
 def _load_yaml(path: Path) -> dict:
     with path.open() as f:
         return yaml.safe_load(f) or {}
+
+
+def apply_depth_noise_profile(student_obs_cfg, profile: str | None, strength: float | None = None) -> None:
+    """Map legacy profile names onto the newer metric-depth augmentation fields."""
+
+    if profile is None:
+        return
+    profile = str(profile).lower()
+    if profile in DEPTH_NOISE_PRESETS:
+        params = dict(DEPTH_NOISE_PRESETS[profile])
+    elif profile == "custom":
+        params = {
+            "gaussian_std_m": float(student_obs_cfg.depth_aug_gaussian_std_m),
+            "correlated_std_m": float(student_obs_cfg.depth_aug_correlated_std_m),
+            "correlated_kernel_size": int(student_obs_cfg.depth_aug_correlated_kernel_size),
+            "dropout_prob": float(student_obs_cfg.depth_aug_dropout_prob),
+            "randu_prob": float(student_obs_cfg.depth_aug_randu_prob),
+            "stick_prob": float(student_obs_cfg.depth_aug_stick_prob),
+            "max_sticks_per_image": int(student_obs_cfg.depth_aug_max_sticks_per_image),
+        }
+    else:
+        raise ValueError(
+            f"Unsupported depth noise profile {profile!r}; "
+            f"expected one of {sorted([*DEPTH_NOISE_PRESETS, 'custom'])}."
+        )
+
+    scale = 1.0 if strength is None else float(strength)
+    for key in ("gaussian_std_m", "correlated_std_m", "dropout_prob", "randu_prob", "stick_prob"):
+        params[key] = float(params[key]) * scale
+    params["correlated_kernel_size"] = max(1, int(params["correlated_kernel_size"]))
+    params["max_sticks_per_image"] = max(0, int(params["max_sticks_per_image"]))
+
+    student_obs_cfg.depth_aug_gaussian_std_m = float(params["gaussian_std_m"])
+    student_obs_cfg.depth_aug_correlated_std_m = float(params["correlated_std_m"])
+    student_obs_cfg.depth_aug_correlated_kernel_size = int(params["correlated_kernel_size"])
+    student_obs_cfg.depth_aug_dropout_prob = float(params["dropout_prob"])
+    student_obs_cfg.depth_aug_randu_prob = float(params["randu_prob"])
+    student_obs_cfg.depth_aug_stick_prob = float(params["stick_prob"])
+    student_obs_cfg.depth_aug_max_sticks_per_image = int(params["max_sticks_per_image"])
+    student_obs_cfg.use_depth_aug = profile != "off" and any(
+        float(params[key]) > 0.0
+        for key in ("gaussian_std_m", "correlated_std_m", "dropout_prob", "randu_prob", "stick_prob")
+    )
+
+
+def apply_camera_pose_randomization_profile(student_obs_cfg, profile: str | None) -> None:
+    """Map legacy camera-pose profile names onto the newer randomization fields."""
+
+    if profile is None:
+        return
+    profile = str(profile).lower()
+    if profile in CAMERA_POSE_RANDOMIZATION_PRESETS:
+        pos_range, rot_range = CAMERA_POSE_RANDOMIZATION_PRESETS[profile]
+        student_obs_cfg.camera_pos_noise_m = tuple(float(v) for v in pos_range)
+        student_obs_cfg.camera_rot_noise_deg = tuple(float(v) for v in rot_range)
+    elif profile != "custom":
+        raise ValueError(
+            f"Unsupported camera pose randomization profile {profile!r}; "
+            f"expected one of {sorted([*CAMERA_POSE_RANDOMIZATION_PRESETS, 'custom'])}."
+        )
+    student_obs_cfg.use_camera_pose_rand = profile != "off"
+
+
+def apply_peg_urdf_compat(env_cfg, peg_urdf: str | Path | None) -> None:
+    """Compatibility bridge from old --peg_urdf experiments to dynamic problems."""
+
+    if peg_urdf is None:
+        return
+    peg_path = Path(peg_urdf)
+    env_cfg.assets.object_urdf = str(peg_urdf)
+    env_cfg.assets.object_name = peg_path.stem
+    stem = peg_path.stem.lower()
+    if hasattr(env_cfg, "peg_in_hole"):
+        if stem in {"peg_l", "lpeg"}:
+            env_cfg.peg_in_hole.problem = "Lpeg.tol0p5mm"
+        elif stem == "peg":
+            env_cfg.peg_in_hole.problem = "peg.tol0p5mm"
 
 
 def _apply_student_camera_preset(env_cfg, preset: str) -> None:
@@ -996,9 +1119,7 @@ def main() -> None:
         env_cfg.peg_in_hole.force_scene_tol_combo = _parse_optional_pair(args.force_scene_tol_combo)
     if args.force_peg_idx is not None:
         env_cfg.peg_in_hole.force_peg_idx = args.force_peg_idx
-    if args.peg_urdf is not None:
-        env_cfg.assets.peg_urdf = args.peg_urdf
-        env_cfg.assets.object_name = Path(args.peg_urdf).stem
+    apply_peg_urdf_compat(env_cfg, args.peg_urdf)
     if args.student_image_delay_queue_size is not None:
         queue_size = int(args.student_image_delay_queue_size)
         if queue_size < 1:
@@ -1011,12 +1132,9 @@ def main() -> None:
             flush=True,
         )
     _apply_student_camera_preset(env_cfg, args.student_camera_preset)
-    if args.depth_noise_profile is not None:
-        env_cfg.student_obs.depth_noise_profile = args.depth_noise_profile
-    if args.depth_noise_strength is not None:
-        env_cfg.student_obs.depth_noise_strength = args.depth_noise_strength
+    apply_depth_noise_profile(env_cfg.student_obs, args.depth_noise_profile, args.depth_noise_strength)
     if args.camera_pose_randomization_profile is not None:
-        env_cfg.student_obs.camera_pose_randomization_profile = args.camera_pose_randomization_profile
+        apply_camera_pose_randomization_profile(env_cfg.student_obs, args.camera_pose_randomization_profile)
     if args.camera_pose_randomization_mode is not None:
         env_cfg.student_obs.camera_pose_randomization_mode = args.camera_pose_randomization_mode
     if args.camera_pos_noise_m is not None:

@@ -5,15 +5,17 @@ from __future__ import annotations
 import shutil
 import tempfile
 import time
+import xml.etree.ElementTree as ET
+from dataclasses import dataclass
 from pathlib import Path
 
 import torch
 import torch.nn.functional as F
 
 import isaaclab.sim as sim_utils
+from isaaclab.utils.math import quat_apply, quat_from_angle_axis, quat_mul
 from isaaclab.actuators import ImplicitActuatorCfg
 from isaaclab.assets import Articulation, ArticulationCfg, RigidObject, RigidObjectCfg
-from isaaclab.utils.math import quat_from_angle_axis, quat_mul
 from isaaclab.sim.converters import UrdfConverter, UrdfConverterCfg
 from isaaclab.sim.spawners.from_files import GroundPlaneCfg, UsdFileCfg, spawn_ground_plane
 from isaaclab.sim.spawners.wrappers import MultiUsdFileCfg
@@ -136,6 +138,8 @@ _PHYSICS_SPECS: dict[str, tuple[str, str, str]] = {
     "kinematic_enabled": ("rb", "physics:kinematicEnabled", "Bool"),
     "disable_gravity": ("rb", "physxRigidBody:disableGravity", "Bool"),
     "max_depenetration_velocity": ("rb", "physxRigidBody:maxDepenetrationVelocity", "Float"),
+    "rb_solver_position_iterations": ("rb", "physxRigidBody:solverPositionIterationCount", "Int"),
+    "rb_solver_velocity_iterations": ("rb", "physxRigidBody:solverVelocityIterationCount", "Int"),
     "articulation_enabled": ("art", "physics:articulationEnabled", "Bool"),
     "enabled_self_collisions": ("art", "physxArticulation:enabledSelfCollisions", "Bool"),
     "solver_position_iterations": ("art", "physxArticulation:solverPositionIterationCount", "Int"),
@@ -198,271 +202,32 @@ def _student_camera_data_types(modality: str) -> list[str]:
     )
 
 
-_DEPTH_NOISE_PRESETS: dict[str, dict[str, float | int]] = {
-    "off": {
-        "gaussian_std_m": 0.0,
-        "correlated_std_m": 0.0,
-        "correlated_kernel_size": 1,
-        "dropout_prob": 0.0,
-        "randu_prob": 0.0,
-        "stick_prob": 0.0,
-        "max_sticks_per_image": 0,
-    },
-    "weak": {
-        "gaussian_std_m": 0.0002,
-        "correlated_std_m": 0.0003,
-        "correlated_kernel_size": 5,
-        "dropout_prob": 0.00005,
-        "randu_prob": 0.00005,
-        "stick_prob": 0.0,
-        "max_sticks_per_image": 0,
-    },
-    "medium": {
-        "gaussian_std_m": 0.002,
-        "correlated_std_m": 0.003,
-        "correlated_kernel_size": 5,
-        "dropout_prob": 0.003,
-        "randu_prob": 0.003,
-        "stick_prob": 0.00025,
-        "max_sticks_per_image": 8,
-    },
-    "strong": {
-        "gaussian_std_m": 0.015,
-        "correlated_std_m": 0.020,
-        "correlated_kernel_size": 9,
-        "dropout_prob": 0.020,
-        "randu_prob": 0.020,
-        "stick_prob": 0.002,
-        "max_sticks_per_image": 32,
-    },
-}
-
-
-_CAMERA_POSE_RANDOMIZATION_PRESETS: dict[str, tuple[tuple[float, float, float], tuple[float, float, float]]] = {
-    "off": ((0.0, 0.0, 0.0), (0.0, 0.0, 0.0)),
-    "weak": ((0.001, 0.001, 0.001), (0.1, 0.1, 0.1)),
-    "medium": ((0.01, 0.01, 0.01), (1.0, 1.0, 1.0)),
-    "strong": ((0.10, 0.10, 0.10), (20.0, 20.0, 20.0)),
-}
-
-
-def _student_depth_noise_params(cfg) -> dict[str, float | int]:
-    profile = str(cfg.depth_noise_profile).lower()
-    if profile in _DEPTH_NOISE_PRESETS:
-        params = dict(_DEPTH_NOISE_PRESETS[profile])
-    elif profile == "custom":
-        params = {
-            "gaussian_std_m": float(cfg.depth_noise_gaussian_std_m),
-            "correlated_std_m": float(cfg.depth_noise_correlated_std_m),
-            "correlated_kernel_size": int(cfg.depth_noise_correlated_kernel_size),
-            "dropout_prob": float(cfg.depth_noise_dropout_prob),
-            "randu_prob": float(cfg.depth_noise_randu_prob),
-            "stick_prob": float(cfg.depth_noise_stick_prob),
-            "max_sticks_per_image": int(cfg.depth_noise_max_sticks_per_image),
-        }
-    else:
-        raise ValueError(
-            "cfg.student_obs.depth_noise_profile must be one of "
-            f"{sorted([*_DEPTH_NOISE_PRESETS, 'custom'])}, got {profile!r}."
+def _pinhole_camera_spawn_cfg(cfg, *, width: int, height: int):
+    intrinsic_matrix = tuple(float(x) for x in getattr(cfg, "camera_intrinsic_matrix", ()))
+    if intrinsic_matrix:
+        if len(intrinsic_matrix) != 9:
+            raise ValueError(
+                "cfg.student_obs.camera_intrinsic_matrix must be empty or contain 9 values, "
+                f"got {len(intrinsic_matrix)}."
+            )
+        return sim_utils.PinholeCameraCfg.from_intrinsic_matrix(
+            intrinsic_matrix=list(intrinsic_matrix),
+            width=int(width),
+            height=int(height),
+            clipping_range=tuple(float(x) for x in cfg.clipping_range),
         )
-
-    strength = float(cfg.depth_noise_strength)
-    for key in ("gaussian_std_m", "correlated_std_m", "dropout_prob", "randu_prob", "stick_prob"):
-        params[key] = float(params[key]) * strength
-    params["correlated_kernel_size"] = max(1, int(params["correlated_kernel_size"]))
-    params["max_sticks_per_image"] = max(0, int(params["max_sticks_per_image"]))
-    return params
-
-
-def _camera_pose_noise_ranges(cfg) -> tuple[torch.Tensor, torch.Tensor]:
-    profile = str(cfg.camera_pose_randomization_profile).lower()
-    if profile in _CAMERA_POSE_RANDOMIZATION_PRESETS:
-        pos_range, rot_range = _CAMERA_POSE_RANDOMIZATION_PRESETS[profile]
-    elif profile == "custom":
-        pos_range = tuple(float(x) for x in cfg.camera_pos_noise_m)
-        rot_range = tuple(float(x) for x in cfg.camera_rot_noise_deg)
-    else:
-        raise ValueError(
-            "cfg.student_obs.camera_pose_randomization_profile must be one of "
-            f"{sorted([*_CAMERA_POSE_RANDOMIZATION_PRESETS, 'custom'])}, got {profile!r}."
-        )
-    return (
-        torch.as_tensor(pos_range, dtype=torch.float32),
-        torch.as_tensor(rot_range, dtype=torch.float32),
+    return sim_utils.PinholeCameraCfg(
+        focal_length=float(cfg.focal_length),
+        focus_distance=float(cfg.focus_distance),
+        horizontal_aperture=float(cfg.horizontal_aperture),
+        horizontal_aperture_offset=float(
+            getattr(cfg, "horizontal_aperture_offset", 0.0)
+        ),
+        vertical_aperture_offset=float(
+            getattr(cfg, "vertical_aperture_offset", 0.0)
+        ),
+        clipping_range=tuple(float(x) for x in cfg.clipping_range),
     )
-
-
-def _rpy_noise_quat_wxyz(roll_pitch_yaw_rad: torch.Tensor) -> torch.Tensor:
-    """Convert batched XYZ Euler perturbations to wxyz quaternions."""
-    n = roll_pitch_yaw_rad.shape[0]
-    device = roll_pitch_yaw_rad.device
-    axes = torch.eye(3, device=device, dtype=roll_pitch_yaw_rad.dtype)
-    qx = quat_from_angle_axis(roll_pitch_yaw_rad[:, 0], axes[0].expand(n, -1))
-    qy = quat_from_angle_axis(roll_pitch_yaw_rad[:, 1], axes[1].expand(n, -1))
-    qz = quat_from_angle_axis(roll_pitch_yaw_rad[:, 2], axes[2].expand(n, -1))
-    return quat_mul(qz, quat_mul(qy, qx))
-
-
-def apply_student_camera_pose_randomization(env, env_ids: torch.Tensor) -> None:
-    """Randomize student-camera world poses for selected envs."""
-    cfg = getattr(env.cfg, "student_obs", None)
-    camera = getattr(env, "student_camera", None)
-    if cfg is None or camera is None:
-        return
-    pos_range_cpu, rot_range_cpu = _camera_pose_noise_ranges(cfg)
-    if not torch.any(pos_range_cpu > 0.0) and not torch.any(rot_range_cpu > 0.0):
-        return
-
-    env_ids = torch.as_tensor(env_ids, device=env.device, dtype=torch.long)
-    n = env_ids.numel()
-    if n == 0:
-        return
-
-    pos_range = pos_range_cpu.to(env.device)
-    rot_range_deg = rot_range_cpu.to(env.device)
-    base_pos = env._student_camera_base_pos_local[env_ids]
-    base_quat = env._student_camera_base_quat_wxyz[env_ids]
-    pos_noise = (torch.rand(n, 3, device=env.device) * 2.0 - 1.0) * pos_range
-    rot_noise_rad = (
-        (torch.rand(n, 3, device=env.device) * 2.0 - 1.0)
-        * rot_range_deg
-        * torch.pi
-        / 180.0
-    )
-    quat = quat_mul(_rpy_noise_quat_wxyz(rot_noise_rad), base_quat)
-    pos_w = env.scene.env_origins[env_ids] + base_pos + pos_noise
-
-    # Isaac Lab 5.1's XformPrimView writes world poses through Fabric when
-    # Fabric is enabled. The renderer reads USD-authored camera transforms, so
-    # mirror these writes back to USD for camera randomization to affect images.
-    view = getattr(camera, "_view", None)
-    if view is not None and hasattr(view, "_sync_usd_on_fabric_write"):
-        view._sync_usd_on_fabric_write = True
-
-    camera.set_world_poses(
-        positions=pos_w,
-        orientations=quat,
-        env_ids=env_ids,
-        convention=str(cfg.camera_convention),
-    )
-    env._student_camera_current_pos_w[env_ids] = pos_w
-    env._student_camera_current_quat_wxyz[env_ids] = quat
-
-
-def _maybe_initialize_student_camera_pose(env) -> None:
-    cfg = getattr(env.cfg, "student_obs", None)
-    if cfg is None or getattr(env, "_student_camera_pose_randomized_once", True):
-        return
-    mode = str(cfg.camera_pose_randomization_mode).lower()
-    if mode == "startup":
-        env_ids = torch.arange(env.num_envs, device=env.device)
-        apply_student_camera_pose_randomization(env, env_ids)
-        env._student_camera_pose_randomized_once = True
-    elif mode == "reset":
-        return
-    else:
-        raise ValueError(
-            "cfg.student_obs.camera_pose_randomization_mode must be "
-            f"'startup' or 'reset', got {mode!r}."
-        )
-
-
-def _draw_depth_sticks(depth_nhw: torch.Tensor, *, cfg, stick_prob: float, max_sticks_per_image: int) -> None:
-    if stick_prob <= 0.0 or max_sticks_per_image <= 0:
-        return
-    batch, height, width = depth_nhw.shape
-    expected = max(0.0, stick_prob * float(height * width))
-    if expected <= 0.0:
-        return
-    counts = torch.poisson(torch.full((batch,), expected, device=depth_nhw.device))
-    counts = torch.clamp(counts.to(torch.long), max=max_sticks_per_image)
-    max_len = max(1, int(cfg.depth_noise_stick_max_len_px))
-    max_width = max(1, int(cfg.depth_noise_stick_max_width_px))
-    d_min = float(cfg.depth_noise_randu_min_m)
-    d_max = float(cfg.depth_noise_randu_max_m)
-    slots = max_sticks_per_image
-    device = depth_nhw.device
-    dtype = depth_nhw.dtype
-
-    slot_ids = torch.arange(slots, device=device).unsqueeze(0)
-    active = slot_ids < counts.unsqueeze(1)
-    if not active.any():
-        return
-
-    lengths = torch.randint(1, max_len + 1, (batch, slots), device=device)
-    stick_widths = torch.randint(1, max_width + 1, (batch, slots), device=device)
-    angles = torch.rand(batch, slots, device=device) * (2.0 * torch.pi)
-    x0 = torch.randint(0, width, (batch, slots), device=device).float()
-    y0 = torch.randint(0, height, (batch, slots), device=device).float()
-    values = torch.empty(batch, slots, device=device, dtype=dtype).uniform_(d_min, d_max)
-
-    line_idx = torch.arange(max_len, device=device, dtype=torch.float32).view(1, 1, max_len, 1)
-    width_idx = torch.arange(max_width, device=device).view(1, 1, 1, max_width)
-    xs = torch.round(x0[..., None, None] + line_idx * torch.cos(angles[..., None, None])).long()
-    ys = torch.round(y0[..., None, None] + line_idx * torch.sin(angles[..., None, None])).long()
-    xs = xs.expand(-1, -1, -1, max_width).clamp(0, width - 1)
-    ys = (ys + width_idx).clamp(0, height - 1)
-
-    valid = (
-        active[..., None, None]
-        & (line_idx.long() < lengths[..., None, None])
-        & (width_idx < stick_widths[..., None, None])
-    )
-    if not valid.any():
-        return
-
-    batch_idx = torch.arange(batch, device=device).view(batch, 1, 1, 1)
-    flat_idx = (batch_idx * height * width + ys * width + xs)[valid]
-    flat_values = values[..., None, None].expand(-1, -1, max_len, max_width)[valid].clone()
-    depth_nhw.reshape(-1).index_put_((flat_idx,), flat_values, accumulate=False)
-
-
-def _apply_student_depth_noise(env, depth: torch.Tensor) -> torch.Tensor:
-    cfg = env.cfg.student_obs
-    params = _student_depth_noise_params(cfg)
-    if str(cfg.depth_noise_profile).lower() == "off" or all(
-        float(params[key]) <= 0.0
-        for key in ("gaussian_std_m", "correlated_std_m", "dropout_prob", "randu_prob", "stick_prob")
-    ):
-        return depth
-
-    noisy = depth.clone()
-    finite = torch.isfinite(noisy)
-    gaussian_std = float(params["gaussian_std_m"])
-    if gaussian_std > 0.0:
-        noisy = torch.where(finite, noisy + torch.randn_like(noisy) * gaussian_std, noisy)
-
-    correlated_std = float(params["correlated_std_m"])
-    if correlated_std > 0.0:
-        kernel = int(params["correlated_kernel_size"])
-        if kernel % 2 == 0:
-            kernel += 1
-        corr = torch.randn_like(noisy) * correlated_std
-        corr = F.avg_pool2d(corr, kernel_size=kernel, stride=1, padding=kernel // 2)
-        noisy = torch.where(finite, noisy + corr, noisy)
-
-    dropout_prob = min(max(float(params["dropout_prob"]), 0.0), 1.0)
-    if dropout_prob > 0.0:
-        mask = torch.rand_like(noisy) < dropout_prob
-        noisy = torch.where(mask, torch.zeros_like(noisy), noisy)
-
-    randu_prob = min(max(float(params["randu_prob"]), 0.0), 1.0)
-    if randu_prob > 0.0:
-        d_min = float(cfg.depth_noise_randu_min_m)
-        d_max = float(cfg.depth_noise_randu_max_m)
-        mask = torch.rand_like(noisy) < randu_prob
-        values = torch.empty_like(noisy).uniform_(d_min, d_max)
-        noisy = torch.where(mask, values, noisy)
-
-    if noisy.shape[1] != 1:
-        raise RuntimeError(f"Depth noise expects NCHW with one channel, got {tuple(noisy.shape)}")
-    _draw_depth_sticks(
-        noisy[:, 0],
-        cfg=cfg,
-        stick_prob=float(params["stick_prob"]),
-        max_sticks_per_image=int(params["max_sticks_per_image"]),
-    )
-    return noisy
 
 
 def hide_goal_viz_for_student_camera(env) -> None:
@@ -484,6 +249,153 @@ def hide_goal_viz_for_student_camera(env) -> None:
     )
 
 
+def _quat_wxyz_to_rotmat(quat_wxyz: tuple) -> torch.Tensor:
+    """Standard (w, x, y, z) -> 3x3 rotation matrix.
+
+    Column 0 of the result is the camera's local +X axis in world coords,
+    which for a ROS-convention camera ('+X = image right') is the
+    direction toward the RIGHT eye of a stereo pair.
+    """
+    w, x, y, z = (float(v) for v in quat_wxyz)
+    return torch.tensor([
+        [1 - 2 * (y * y + z * z),     2 * (x * y - w * z),         2 * (x * z + w * y)],
+        [    2 * (x * y + w * z), 1 - 2 * (x * x + z * z),         2 * (y * z - w * x)],
+        [    2 * (x * z - w * y),     2 * (y * z + w * x),     1 - 2 * (x * x + y * y)],
+    ], dtype=torch.float64)
+
+
+def _stereo_right_pose_from_left(
+    left_pos: tuple, left_quat_wxyz: tuple, baseline_m: float
+) -> tuple[tuple[float, float, float], tuple[float, float, float, float]]:
+    """Right-eye pose from left-eye pose + ZED-style horizontal baseline.
+
+    Rectified stereo shares orientation, so the right cam's quat is the
+    same as the left's; only the position is offset by `baseline_m` along
+    the left camera's local +X axis (image-right under ROS convention).
+    """
+    R = _quat_wxyz_to_rotmat(left_quat_wxyz)
+    delta = float(baseline_m) * R[:, 0]
+    right_pos = tuple(float(left_pos[i] + delta[i].item()) for i in range(3))
+    right_quat = tuple(float(v) for v in left_quat_wxyz)
+    return right_pos, right_quat
+
+
+def _diagnose_target_expr(expr: str) -> None:
+    """Echo what `_obtain_trackable_prim_view` will see for this expr.
+
+    Walks parents until hitting RigidBodyAPI / ArticulationRootAPI exactly
+    like the raycaster does, then prints `mesh_prims` and `view_prims`
+    counts. If they disagree, the worker will error with
+    "1 mesh prim vs N physics prims" and this print pinpoints which target.
+    """
+    from pxr import Usd, UsdPhysics
+    from isaaclab.sim.utils import find_matching_prims, find_first_matching_prim
+
+    try:
+        mesh_prim = find_first_matching_prim(expr)
+        if mesh_prim is None or not mesh_prim.IsValid():
+            print(f"[raycaster][diag]   {expr!r}: NO mesh prim match", flush=True)
+            return
+        cur_prim = mesh_prim
+        cur_expr = expr
+        depth = 0
+        while True:
+            depth += 1
+            if cur_prim.HasAPI(UsdPhysics.ArticulationRootAPI):
+                kind = "ArticulationRoot"
+                break
+            if cur_prim.HasAPI(UsdPhysics.RigidBodyAPI):
+                kind = "RigidBody"
+                break
+            parent = cur_prim.GetParent()
+            cur_expr = cur_expr.rsplit("/", 1)[0]
+            if not parent.IsValid() or depth > 10:
+                kind = "XForm(fallback)"
+                break
+            cur_prim = parent
+
+        mesh_paths = [str(p.GetPath()) for p in find_matching_prims(expr)]
+        view_paths = [str(p.GetPath()) for p in find_matching_prims(cur_expr)]
+        print(
+            f"[raycaster][diag]   target={expr!r}\n"
+            f"     -> walked up to {cur_prim.GetPath()} ({kind}), "
+            f"path_expr={cur_expr!r}\n"
+            f"     -> meshes ({len(mesh_paths)}): {mesh_paths}\n"
+            f"     -> views  ({len(view_paths)}): {view_paths}",
+            flush=True,
+        )
+    except Exception as exc:
+        print(f"[raycaster][diag]   {expr!r}: diag failed: {exc!r}", flush=True)
+
+
+def _expand_link_wildcard(expr: str, num_envs: int) -> list[str]:
+    """Resolve a `.../<wildcard>/visuals` raycast prim expression at setup
+    time.
+
+    The raycaster needs a 1-to-1 mapping between mesh prims (the leaves
+    matching the prim_expr) and physics-body view prims (the parent it
+    walks up to with RigidBodyAPI / ArticulationRootAPI). When the regex
+    component just before `/visuals` is a wildcard like `.*`, the walk-up
+    builds a `.../...*` view-prim expression that also matches sibling
+    non-link xforms (`Looks`, `joints`, ...), and the raycaster errors:
+        "The number of mesh prims (N) does not match the number of physics
+         prims (M)"
+
+    Fix: at setup time, list the actual link children that (a) match the
+    wildcard component, AND (b) have a `/visuals` subgroup with at least
+    one Gprim child. Return one explicit prim_expr per concrete link name,
+    preserving the `/visuals` tail. Callers who pass an expression without
+    a single wildcard between two slashes just get it back unchanged.
+
+    Example:
+        `/World/envs/env_.*/Object/.*/visuals`  ->
+            ["/World/envs/env_.*/Object/peg/visuals"]      # peg.tol0p5mm
+        or  ["/World/envs/env_.*/Object/lpeg/visuals"]     # Lpeg.tol0p5mm
+
+    For multi-link object URDFs (e.g. fabrica beam parts) we emit one
+    expression per link.
+    """
+    if "/.*/" not in expr:
+        return [expr]
+    # Split at the first wildcard component so we can list its concrete
+    # candidates against env_0 (clones share structure, so env_0 is enough).
+    head, tail = expr.split("/.*/", 1)
+    # Materialise `env_.*` in the head against env_0 for the stage lookup.
+    head_env0 = head.replace("/env_.*", "/env_0")
+    stage = get_current_stage()
+    parent_prim = stage.GetPrimAtPath(head_env0)
+    if not parent_prim.IsValid():
+        print(
+            f"[raycaster][expand] parent {head_env0!r} INVALID; keeping {expr!r}",
+            flush=True,
+        )
+        return [expr]
+
+    # Walk children of `parent_prim`. Keep ones that look like URDF link
+    # subgroups (have a `/visuals` child), drop the materials / joints /
+    # sensor xforms the URDF importer also creates.
+    SKIP_NAMES = {"Looks", "joints", "Sensors", "joint_drives"}
+    concrete: list[str] = []
+    skipped: list[tuple[str, str]] = []
+    for child in parent_prim.GetChildren():
+        name = child.GetName()
+        if name in SKIP_NAMES:
+            skipped.append((name, "in SKIP_NAMES"))
+            continue
+        visuals_prim = stage.GetPrimAtPath(f"{head_env0}/{name}/visuals")
+        if not visuals_prim.IsValid():
+            skipped.append((name, "no /visuals child"))
+            continue
+        concrete.append(f"{head}/{name}/{tail}")
+    print(
+        f"[raycaster][expand] {expr!r} -> kept {len(concrete)}: "
+        f"{[c.rsplit('/', 2)[0].rsplit('/', 1)[1] for c in concrete]}; "
+        f"skipped {skipped}",
+        flush=True,
+    )
+    return concrete if concrete else [expr]
+
+
 def setup_student_camera(env) -> None:
     """Create the optional per-env student camera sensor.
 
@@ -494,15 +406,14 @@ def setup_student_camera(env) -> None:
     """
     cfg = getattr(env.cfg, "student_obs", None)
     env.student_camera = None
-    env.student_camera_right = None
     if cfg is None or not cfg.enabled or not cfg.image_enabled:
         return
 
     backend = str(cfg.camera_backend).lower()
-    if backend not in ("tiled", "standard"):
+    if backend not in ("tiled", "standard", "raycaster", "foundation_stereo"):
         raise ValueError(
-            "cfg.student_obs.camera_backend must be 'tiled' or 'standard', "
-            f"got {backend!r}."
+            "cfg.student_obs.camera_backend must be 'tiled', 'standard', "
+            f"'raycaster', or 'foundation_stereo', got {backend!r}."
         )
 
     camera_mount = str(cfg.camera_mount).lower()
@@ -513,90 +424,426 @@ def setup_student_camera(env) -> None:
         )
 
     t0 = time.perf_counter()
-    from isaaclab.sensors import Camera, CameraCfg, TiledCamera, TiledCameraCfg
 
-    camera_cfg_cls = TiledCameraCfg if backend == "tiled" else CameraCfg
-    camera_cls = TiledCamera if backend == "tiled" else Camera
-    intrinsic_matrix = tuple(float(x) for x in getattr(cfg, "camera_intrinsic_matrix", ()))
-    if intrinsic_matrix:
-        if len(intrinsic_matrix) != 9:
-            raise ValueError(
-                "cfg.student_obs.camera_intrinsic_matrix must be empty or contain 9 values, "
-                f"got {len(intrinsic_matrix)}."
-            )
-        camera_spawn_cfg = sim_utils.PinholeCameraCfg.from_intrinsic_matrix(
-            intrinsic_matrix=list(intrinsic_matrix),
-            width=int(cfg.image_width),
-            height=int(cfg.image_height),
-            clipping_range=tuple(float(x) for x in cfg.clipping_range),
-        )
-        _log_scene_step(
-            t0,
-            "student camera uses explicit intrinsic matrix "
-            f"for {int(cfg.image_width)}x{int(cfg.image_height)}",
-        )
-    else:
-        camera_spawn_cfg = sim_utils.PinholeCameraCfg(
-            focal_length=float(cfg.focal_length),
-            focus_distance=float(cfg.focus_distance),
-            horizontal_aperture=float(cfg.horizontal_aperture),
-            clipping_range=tuple(float(x) for x in cfg.clipping_range),
-        )
-    camera_cfg = camera_cfg_cls(
-        prim_path="/World/envs/env_.*/StudentCamera",
-        update_period=0,
-        update_latest_camera_pose=True,
-        height=int(cfg.image_height),
-        width=int(cfg.image_width),
-        data_types=_student_camera_data_types(cfg.image_modality),
-        spawn=camera_spawn_cfg,
-        offset=camera_cfg_cls.OffsetCfg(
-            pos=tuple(float(x) for x in cfg.camera_pos),
-            rot=tuple(float(x) for x in cfg.camera_quat_wxyz),
-            convention=str(cfg.camera_convention),
-        ),
-    )
-    env.student_camera = camera_cls(cfg=camera_cfg)
-    env.scene.sensors["student_camera"] = env.student_camera
-    if bool(getattr(cfg, "ffs_stereo_right_camera_enabled", False)):
-        right_camera_cfg = camera_cfg_cls(
-            prim_path="/World/envs/env_.*/StudentCameraRight",
-            update_period=0,
+    if backend in ("tiled", "standard"):
+        from isaaclab.sensors import Camera, CameraCfg, TiledCamera, TiledCameraCfg
+
+        camera_cfg_cls = TiledCameraCfg if backend == "tiled" else CameraCfg
+        camera_cls = TiledCamera if backend == "tiled" else Camera
+        camera_cfg = camera_cfg_cls(
+            prim_path="/World/envs/env_.*/StudentCamera",
+            update_period=float(getattr(cfg, "camera_update_period_s", 0.0)),
             update_latest_camera_pose=True,
             height=int(cfg.image_height),
             width=int(cfg.image_width),
-            data_types=["rgb"],
-            spawn=camera_spawn_cfg,
+            data_types=_student_camera_data_types(cfg.image_modality),
+            spawn=_pinhole_camera_spawn_cfg(cfg, width=int(cfg.image_width), height=int(cfg.image_height)),
             offset=camera_cfg_cls.OffsetCfg(
                 pos=tuple(float(x) for x in cfg.camera_pos),
                 rot=tuple(float(x) for x in cfg.camera_quat_wxyz),
                 convention=str(cfg.camera_convention),
             ),
         )
-        env.student_camera_right = camera_cls(cfg=right_camera_cfg)
+        env.student_camera = camera_cls(cfg=camera_cfg)
+        env.scene.sensors["student_camera"] = env.student_camera
+        size_str = f"{int(cfg.image_width)}x{int(cfg.image_height)}"
+    elif backend == "raycaster":
+        # CUDA mesh raycaster, no rasterizer / Replicator.
+        # Restricted to depth modality — RGB / semantic outputs aren't supported.
+        if str(cfg.image_modality).lower() != "depth":
+            raise ValueError(
+                "cfg.student_obs.camera_backend='raycaster' only supports "
+                f"image_modality='depth' (got {cfg.image_modality!r}). "
+                "Use camera_backend='tiled' for RGB/semantic modalities."
+            )
+        from isaaclab.sensors.ray_caster import (
+            MultiMeshRayCasterCamera,
+            MultiMeshRayCasterCameraCfg,
+            patterns,
+        )
+
+        pattern_cfg = patterns.PinholeCameraPatternCfg(
+            focal_length=float(cfg.focal_length),
+            horizontal_aperture=float(cfg.horizontal_aperture),
+            horizontal_aperture_offset=float(
+                getattr(cfg, "horizontal_aperture_offset", 0.0)
+            ),
+            vertical_aperture_offset=float(
+                getattr(cfg, "vertical_aperture_offset", 0.0)
+            ),
+            width=int(cfg.image_width),
+            height=int(cfg.image_height),
+        )
+
+        raycast_targets = []
+        for expr in tuple(cfg.raycast_static_prim_exprs):
+            print(f"[raycaster] STATIC target: {expr!r}", flush=True)
+            raycast_targets.append(
+                MultiMeshRayCasterCameraCfg.RaycastTargetCfg(
+                    prim_expr=str(expr), track_mesh_transforms=False
+                )
+            )
+        for expr in tuple(cfg.raycast_dynamic_prim_exprs):
+            expanded = _expand_link_wildcard(str(expr), env.num_envs)
+            print(
+                f"[raycaster] DYNAMIC target: {expr!r} -> "
+                f"{len(expanded)} concrete: {expanded}",
+                flush=True,
+            )
+            for concrete_expr in expanded:
+                # Verify mesh/view counts match before the raycaster's
+                # _obtain_trackable_prim_view sees this expression, so we
+                # know exactly which target trips the
+                # "1 mesh vs N physics" error.
+                _diagnose_target_expr(concrete_expr)
+                raycast_targets.append(
+                    MultiMeshRayCasterCameraCfg.RaycastTargetCfg(
+                        prim_expr=concrete_expr, track_mesh_transforms=True
+                    )
+                )
+        if not raycast_targets:
+            raise ValueError(
+                "camera_backend='raycaster' requires at least one entry in "
+                "cfg.student_obs.raycast_static_prim_exprs or "
+                "raycast_dynamic_prim_exprs."
+            )
+
+        # MultiMeshRayCasterCamera attaches to an existing prim (it doesn't
+        # spawn one the way TiledCamera does). setup_student_camera now runs
+        # AFTER clone_environments(), so every env's namespace exists — we
+        # just create a per-env Xform parent explicitly.
+        for env_id in range(int(env.num_envs)):
+            sim_utils.create_prim(
+                f"/World/envs/env_{env_id}/StudentCamera", "Xform"
+            )
+
+        raycaster_cfg = MultiMeshRayCasterCameraCfg(
+            prim_path="/World/envs/env_.*/StudentCamera",
+            update_period=float(getattr(cfg, "camera_update_period_s", 0.0)),
+            offset=MultiMeshRayCasterCameraCfg.OffsetCfg(
+                pos=tuple(float(x) for x in cfg.camera_pos),
+                rot=tuple(float(x) for x in cfg.camera_quat_wxyz),
+                convention=str(cfg.camera_convention),
+            ),
+            mesh_prim_paths=raycast_targets,
+            pattern_cfg=pattern_cfg,
+            data_types=["distance_to_image_plane"],
+            depth_clipping_behavior=str(cfg.raycast_depth_clipping_behavior),
+            max_distance=float(cfg.raycast_max_distance_m),
+        )
+        env.student_camera = MultiMeshRayCasterCamera(cfg=raycaster_cfg)
+        env.scene.sensors["student_camera"] = env.student_camera
+        size_str = (
+            f"{int(cfg.image_width)}x{int(cfg.image_height)} "
+            f"targets={len(raycast_targets)} "
+            f"(static={len(tuple(cfg.raycast_static_prim_exprs))}, "
+            f"dynamic={len(tuple(cfg.raycast_dynamic_prim_exprs))})"
+        )
+
+    elif backend == "foundation_stereo":
+        # Stereo TiledCamera pair (RGB), rendered at fs_stereo_{width,height}.
+        # Fast-FS runs inference at the same resolution to produce disparity ->
+        # depth, which the obs pipeline downsamples to (image_width, image_height)
+        # before the usual noise / crop / window-normalize chain.
+        from isaaclab.sensors import TiledCamera, TiledCameraCfg
+
+        # Stereo render must be at multiples of 32 (FS InputPadder requirement).
+        stereo_w = int(cfg.fs_stereo_width)
+        stereo_h = int(cfg.fs_stereo_height)
+        if stereo_w % 32 != 0 or stereo_h % 32 != 0:
+            raise ValueError(
+                f"camera_backend='foundation_stereo' requires "
+                f"fs_stereo_width / fs_stereo_height to be multiples of 32 "
+                f"(got {stereo_w}x{stereo_h})."
+            )
+
+        left_pos = tuple(float(x) for x in cfg.camera_pos)
+        left_quat = tuple(float(x) for x in cfg.camera_quat_wxyz)
+        right_pos, right_quat = _stereo_right_pose_from_left(
+            left_pos, left_quat, float(cfg.fs_stereo_baseline_m)
+        )
+
+        def _build_stereo_cam_cfg(prim_path: str, pos: tuple, quat: tuple) -> "TiledCameraCfg":
+            return TiledCameraCfg(
+                prim_path=prim_path,
+                update_period=float(getattr(cfg, "camera_update_period_s", 0.0)),
+                update_latest_camera_pose=True,
+                height=stereo_h,
+                width=stereo_w,
+                data_types=["rgb"],
+                spawn=_pinhole_camera_spawn_cfg(cfg, width=stereo_w, height=stereo_h),
+                offset=TiledCameraCfg.OffsetCfg(
+                    pos=pos, rot=quat, convention=str(cfg.camera_convention),
+                ),
+            )
+
+        env.student_camera_left = TiledCamera(
+            cfg=_build_stereo_cam_cfg(
+                "/World/envs/env_.*/StudentCameraLeft", left_pos, left_quat,
+            )
+        )
+        env.student_camera_right = TiledCamera(
+            cfg=_build_stereo_cam_cfg(
+                "/World/envs/env_.*/StudentCameraRight", right_pos, right_quat,
+            )
+        )
+        env.scene.sensors["student_camera_left"] = env.student_camera_left
         env.scene.sensors["student_camera_right"] = env.student_camera_right
-    base_pos = torch.tensor(
-        tuple(float(x) for x in cfg.camera_pos),
-        device=env.device,
-        dtype=torch.float32,
-    )
-    base_quat = torch.tensor(
-        tuple(float(x) for x in cfg.camera_quat_wxyz),
-        device=env.device,
-        dtype=torch.float32,
-    )
-    env._student_camera_base_pos_local = base_pos.unsqueeze(0).expand(env.num_envs, -1).clone()
-    env._student_camera_base_quat_wxyz = base_quat.unsqueeze(0).expand(env.num_envs, -1).clone()
-    env._student_camera_current_pos_w = env.scene.env_origins + env._student_camera_base_pos_local
-    env._student_camera_current_quat_wxyz = env._student_camera_base_quat_wxyz.clone()
-    env._student_camera_pose_randomized_once = False
+        # Alias so any read paths that hit `env.student_camera` still resolve.
+        env.student_camera = env.student_camera_left
+        # The FS inference module is loaded lazily on first call to avoid
+        # paying the model-load cost when the env is constructed for tasks
+        # that don't actually consume the student image.
+        env._fs_module = None
+        print(
+            f"[foundation_stereo] stereo pair: left  pos={left_pos} quat={left_quat}\n"
+            f"[foundation_stereo]              right pos={right_pos} (baseline {cfg.fs_stereo_baseline_m:.3f} m along left +X)\n"
+            f"[foundation_stereo]              capture {stereo_w}x{stereo_h}, model_dir={cfg.fs_model_dir}, "
+            f"iters={cfg.fs_valid_iters}, max_disp={cfg.fs_max_disp}, "
+            f"engine_dir={cfg.fs_engine_dir or '(none, using PyTorch)'}",
+            flush=True,
+        )
+        size_str = (
+            f"stereo {stereo_w}x{stereo_h} -> "
+            f"{int(cfg.image_width)}x{int(cfg.image_height)} via Fast-FS"
+        )
+
     _log_scene_step(
         t0,
         f"registered student camera backend={backend} "
         f"modality={cfg.image_modality} "
-        f"size={int(cfg.image_width)}x{int(cfg.image_height)} "
-        f"ffs_stereo_right={bool(getattr(cfg, 'ffs_stereo_right_camera_enabled', False))}",
+        f"size={size_str}",
     )
+
+
+def _apply_depth_noise(env, depth: torch.Tensor) -> torch.Tensor:
+    """5-stage depth noise pipeline on raw-meters depth, shape (B, 1, H, W).
+
+    Stages (all gated by their own σ/prob being > 0):
+      1. additive Gaussian
+      2. spatially-correlated Gaussian (k×k mean-blur of i.i.d. noise)
+      3. per-pixel dropout to 0
+      4. per-pixel random-uniform replacement in [randu_min, randu_max]
+      5. stick artifacts (small random streaks)
+
+    No-op when `cfg.use_depth_aug=False`. Defaults match the team's "medium"
+    preset (see StudentObsCfg).
+    """
+    cfg = env.cfg.student_obs
+    if not bool(getattr(cfg, "use_depth_aug", False)):
+        return depth
+
+    out = depth.float()
+    device = out.device
+
+    # 1. additive Gaussian
+    gauss_std = float(cfg.depth_aug_gaussian_std_m)
+    if gauss_std > 0.0:
+        out = out + torch.randn_like(out) * gauss_std
+
+    # 2. spatially-correlated Gaussian: i.i.d. noise blurred by mean k×k kernel.
+    corr_std = float(cfg.depth_aug_correlated_std_m)
+    k = int(cfg.depth_aug_correlated_kernel_size)
+    if corr_std > 0.0 and k > 1:
+        noise = torch.randn_like(out) * corr_std
+        kernel = torch.ones(1, 1, k, k, device=device, dtype=out.dtype) / (k * k)
+        out = out + F.conv2d(noise, kernel, padding=k // 2)
+
+    # 3. per-pixel dropout to 0
+    p_drop = float(cfg.depth_aug_dropout_prob)
+    if p_drop > 0.0:
+        keep = (torch.rand_like(out) >= p_drop).to(out.dtype)
+        out = out * keep
+
+    # 4. per-pixel random-uniform replacement
+    p_randu = float(cfg.depth_aug_randu_prob)
+    if p_randu > 0.0:
+        lo = float(cfg.depth_aug_randu_min_m)
+        hi = float(cfg.depth_aug_randu_max_m)
+        mask = torch.rand_like(out) < p_randu
+        randu = torch.rand_like(out) * (hi - lo) + lo
+        out = torch.where(mask, randu, out)
+
+    # 5. stick artifacts (Poisson-count per image, vectorized line rasterization).
+    stick_prob = float(cfg.depth_aug_stick_prob)
+    max_sticks = int(cfg.depth_aug_max_sticks_per_image)
+    if stick_prob > 0.0 and max_sticks > 0:
+        out = _draw_depth_sticks(out, cfg=cfg, stick_prob=stick_prob, max_sticks=max_sticks)
+
+    return out
+
+
+def _draw_depth_sticks(
+    depth_b1hw: torch.Tensor,
+    *,
+    cfg,
+    stick_prob: float,
+    max_sticks: int,
+) -> torch.Tensor:
+    """Add random line streaks to a (B, 1, H, W) depth buffer.
+
+    Fully vectorized: zero Python loops, zero per-step ``.item()``/``.tolist()``
+    syncs. Per env we sample up to ``max_sticks`` candidate sticks, rasterize
+    each as a length-``max_len_px`` line, expand by the stick's width, mask
+    in-bounds + active steps, and scatter fill values in a single index
+    write. Profile shows ~250 ms/step at B=512 with the previous Python loop;
+    this implementation runs in <1 ms.
+
+    Per-stick parameter distributions match the previous Python loop:
+    length ~ U[1, max_len], width ~ U[1, max_w], angle ~ U[0, 2π),
+    fill ~ U[randu_min, randu_max], origin ~ U(pixel grid). The per-image
+    stick count is sampled per-candidate as Bernoulli(p) where
+    ``p = expected_per_image / max_sticks``, giving the same expected count
+    as the original ``Poisson(expected).clamp(max=max_sticks)`` (variance
+    differs by O(1), which is irrelevant for this DR noise channel).
+    """
+    B, _, H, W = depth_b1hw.shape
+    device = depth_b1hw.device
+    dtype = depth_b1hw.dtype
+
+    if max_sticks <= 0 or stick_prob <= 0.0:
+        return depth_b1hw
+
+    max_len = max(1, int(cfg.depth_aug_stick_max_len_px))
+    max_w = max(1, int(cfg.depth_aug_stick_max_width_px))
+    w_half_max = max_w // 2
+    K = 2 * w_half_max + 1  # kernel side, matches the old `out[..., y±w_half, x±w_half]` slice
+    lo = float(cfg.depth_aug_randu_min_m)
+    hi = float(cfg.depth_aug_randu_max_m)
+
+    # Per-candidate gate: expected_per_image = max_sticks * p_candidate.
+    expected_per_image = stick_prob * float(H * W)
+    p_candidate = min(1.0, expected_per_image / float(max_sticks))
+    active = torch.rand(B, max_sticks, device=device) < p_candidate          # (B, S)
+
+    # Per-stick parameters. All shapes (B, S).
+    x0 = torch.randint(0, W, (B, max_sticks), device=device)
+    y0 = torch.randint(0, H, (B, max_sticks), device=device)
+    theta = torch.rand(B, max_sticks, device=device) * (2.0 * torch.pi)
+    lengths = torch.randint(1, max_len + 1, (B, max_sticks), device=device)
+    widths = torch.randint(1, max_w + 1, (B, max_sticks), device=device)
+    fills = torch.rand(B, max_sticks, device=device) * (hi - lo) + lo
+    cos_t = torch.cos(theta)
+    sin_t = torch.sin(theta)
+
+    # Rasterize the line center across max_len pixels.
+    s = torch.arange(max_len, device=device, dtype=torch.float32)            # (L,)
+    xs = x0.float()[:, :, None] + cos_t[:, :, None] * s[None, None, :]       # (B, S, L)
+    ys = y0.float()[:, :, None] + sin_t[:, :, None] * s[None, None, :]       # (B, S, L)
+    s_active = s[None, None, :] < lengths.float()[:, :, None]                # (B, S, L)
+    line_active = active[:, :, None] & s_active                              # (B, S, L)
+
+    # Expand by stick width.
+    offs = torch.arange(-w_half_max, w_half_max + 1, device=device)          # (K,)
+    dy_g, dx_g = torch.meshgrid(offs, offs, indexing="ij")                   # (K, K) each
+    w_half_b = (widths // 2)[:, :, None, None, None]                         # (B, S, 1, 1, 1)
+    within_w = (dx_g[None, None, None] .abs() <= w_half_b) & \
+               (dy_g[None, None, None].abs() <= w_half_b)                    # (B, S, 1, K, K)
+
+    xi = xs[:, :, :, None, None].long() + dx_g[None, None, None]             # (B, S, L, K, K)
+    yi = ys[:, :, :, None, None].long() + dy_g[None, None, None]
+    in_bounds = (xi >= 0) & (xi < W) & (yi >= 0) & (yi < H)
+    final_mask = line_active[:, :, :, None, None] & within_w & in_bounds     # (B, S, L, K, K)
+
+    if not bool(final_mask.any()):
+        return depth_b1hw
+
+    # Flatten and scatter. One kernel launch.
+    b_idx = torch.arange(B, device=device)[:, None, None, None, None].expand_as(xi)
+    fill_full = fills[:, :, None, None, None].expand_as(xi).to(dtype)
+    flat_mask = final_mask.reshape(-1)
+    flat_b = b_idx.reshape(-1)[flat_mask]
+    flat_y = yi.reshape(-1)[flat_mask]
+    flat_x = xi.reshape(-1)[flat_mask]
+    flat_fill = fill_full.reshape(-1)[flat_mask]
+
+    out = depth_b1hw.clone()
+    out[flat_b, 0, flat_y, flat_x] = flat_fill
+    return out
+
+
+def _apply_camera_pose_rand_at_reset(env, env_ids: torch.Tensor) -> None:
+    """Sample per-env camera-pose noise and apply via student_camera.set_world_poses.
+
+    In "startup" mode, each env receives one randomized fixed camera pose the
+    first time it resets. In "reset" mode, a fresh pose is sampled on every
+    episode reset. No-op when `cfg.use_camera_pose_rand=False`.
+    """
+    cfg = getattr(env.cfg, "student_obs", None)
+    camera = getattr(env, "student_camera", None)
+    if cfg is None or camera is None:
+        return
+    if not bool(getattr(cfg, "use_camera_pose_rand", False)):
+        return
+
+    env_ids = torch.as_tensor(env_ids, device=env.device, dtype=torch.long)
+    mode = str(getattr(cfg, "camera_pose_randomization_mode", "startup")).lower()
+    if mode == "startup":
+        mask = getattr(env, "_student_camera_pose_randomized_mask", None)
+        if mask is None:
+            mask = torch.zeros(env.num_envs, dtype=torch.bool, device=env.device)
+            env._student_camera_pose_randomized_mask = mask
+        env_ids = env_ids[~mask[env_ids]]
+        if int(env_ids.numel()) == 0:
+            return
+        mask[env_ids] = True
+    elif mode != "reset":
+        raise ValueError(
+            "cfg.student_obs.camera_pose_randomization_mode must be 'startup' or "
+            f"'reset', got {mode!r}."
+        )
+
+    n = int(env_ids.numel())
+    if n == 0:
+        return
+
+    device = env.device
+    pos_range = torch.as_tensor(cfg.camera_pos_noise_m, device=device, dtype=torch.float32)
+    rot_range_deg = torch.as_tensor(cfg.camera_rot_noise_deg, device=device, dtype=torch.float32)
+    base_pos = torch.as_tensor(cfg.camera_pos, device=device, dtype=torch.float32)
+    base_quat = torch.as_tensor(cfg.camera_quat_wxyz, device=device, dtype=torch.float32)
+
+    pos_noise = (torch.rand(n, 3, device=device) * 2.0 - 1.0) * pos_range
+    rot_noise_rad = (torch.rand(n, 3, device=device) * 2.0 - 1.0) * rot_range_deg * (torch.pi / 180.0)
+
+    # RPY → wxyz quat: q = q_yaw * q_pitch * q_roll
+    axes = torch.eye(3, device=device, dtype=torch.float32)
+    q_roll = quat_from_angle_axis(rot_noise_rad[:, 0], axes[0].expand(n, -1))
+    q_pitch = quat_from_angle_axis(rot_noise_rad[:, 1], axes[1].expand(n, -1))
+    q_yaw = quat_from_angle_axis(rot_noise_rad[:, 2], axes[2].expand(n, -1))
+    rot_noise_quat = quat_mul(q_yaw, quat_mul(q_pitch, q_roll))
+
+    pos_w = env.scene.env_origins[env_ids] + base_pos + pos_noise
+    quat = quat_mul(rot_noise_quat, base_quat.expand(n, -1))
+
+    # Isaac Lab 5.1+: when Fabric is enabled, write through to USD so the
+    # renderer actually picks up the new camera pose.
+    def _enable_fabric_usd_sync(cam) -> None:
+        view = getattr(cam, "_view", None)
+        if view is not None and hasattr(view, "_sync_usd_on_fabric_write"):
+            view._sync_usd_on_fabric_write = True
+
+    _enable_fabric_usd_sync(camera)
+    camera.set_world_poses(
+        positions=pos_w,
+        orientations=quat,
+        env_ids=env_ids,
+        convention=str(cfg.camera_convention),
+    )
+
+    if str(getattr(cfg, "camera_backend", "")).lower() == "foundation_stereo":
+        right_camera = getattr(env, "student_camera_right", None)
+        if right_camera is not None:
+            baseline = torch.zeros(n, 3, device=device, dtype=torch.float32)
+            baseline[:, 0] = float(cfg.fs_stereo_baseline_m)
+            right_pos_w = pos_w + quat_apply(quat, baseline)
+            _enable_fabric_usd_sync(right_camera)
+            right_camera.set_world_poses(
+                positions=right_pos_w,
+                orientations=quat,
+                env_ids=env_ids,
+                convention=str(cfg.camera_convention),
+            )
 
 
 def _preprocess_student_depth(env, depth: torch.Tensor) -> torch.Tensor:
@@ -661,6 +908,64 @@ def _crop_student_image(env, image: torch.Tensor) -> torch.Tensor:
     return image[..., y0:y1, x0:x1]
 
 
+def _run_foundation_stereo(env, cfg) -> torch.Tensor:
+    """Render stereo RGB and run Fast-FS to produce depth in meters.
+
+    Lazy-loads the FS module on first call. Reads from
+    ``env.student_camera_{left,right}.data.output["rgb"]`` (shape
+    ``(B, H, W, 4)`` uint8 from Replicator), converts to ``(B, 3, H, W)``
+    float in [0, 255] for FS, runs inference, converts disparity to depth
+    via ``depth = fx_px * baseline / disparity``, and downsamples to
+    ``(image_height, image_width)`` if ``fs_downsample_to_policy_res`` is
+    set (the policy's depth-window crop pipeline runs on the result).
+    """
+    if getattr(env, "_fs_module", None) is None:
+        from isaacsimenvs.perception.fast_foundation_stereo import (
+            FastFoundationStereoModule,
+        )
+        engine_dir = str(cfg.fs_engine_dir).strip() or None
+        env._fs_module = FastFoundationStereoModule(
+            model_dir=str(cfg.fs_model_dir),
+            engine_dir=engine_dir,
+            valid_iters=int(cfg.fs_valid_iters),
+            max_disp=int(cfg.fs_max_disp),
+            device=str(env.device),
+        )
+        print(
+            f"[foundation_stereo] FS module loaded ({env._fs_module.backend})",
+            flush=True,
+        )
+
+    left_rgba = env.student_camera_left.data.output["rgb"]
+    right_rgba = env.student_camera_right.data.output["rgb"]
+    if left_rgba is None or right_rgba is None:
+        raise RuntimeError(
+            "foundation_stereo backend: one of student_camera_{left,right} "
+            "produced no RGB output."
+        )
+    # Replicator returns (B, H, W, 4) uint8 -> (B, 3, H, W) float in [0, 255].
+    left  = left_rgba[..., :3].permute(0, 3, 1, 2).float().contiguous()
+    right = right_rgba[..., :3].permute(0, 3, 1, 2).float().contiguous()
+
+    # fx in pixels at the FS-render resolution.
+    fx_px = float(cfg.fs_stereo_width) * float(cfg.focal_length) \
+            / float(cfg.horizontal_aperture)
+    depth = env._fs_module(
+        left, right,
+        fx_px=fx_px,
+        baseline_m=float(cfg.fs_stereo_baseline_m),
+    )                                              # (B, 1, H_stereo, W_stereo) in m
+
+    if bool(getattr(cfg, "fs_downsample_to_policy_res", True)):
+        depth = F.interpolate(
+            depth,
+            size=(int(cfg.image_height), int(cfg.image_width)),
+            mode="bilinear",
+            antialias=True,
+        )
+    return depth
+
+
 def read_student_camera_image(env) -> torch.Tensor:
     """Return the configured student image as ``(num_envs, channels, H, W)``."""
     cfg = getattr(env.cfg, "student_obs", None)
@@ -673,6 +978,61 @@ def read_student_camera_image(env) -> torch.Tensor:
             "cfg.student_obs.image_enabled is false; no student image is available."
         )
 
+    # ---- env-level frame-skip gate (true 30Hz / 15Hz / ... behavior) ----
+    # Isaac Lab's sensor `update_period` is ineffective at our 60Hz policy
+    # cadence because `_timestamp` accumulates across the decimation loop's
+    # multiple `scene.update(dt=physics_dt)` calls plus our own explicit
+    # `camera.update`. So we gate at the env level instead: only fall through
+    # to a fresh render every `skip_every`-th call, otherwise return the
+    # cached previous frame to mimic a slower physical camera.
+    period_s = float(getattr(cfg, "camera_update_period_s", 0.0))
+    if period_s > 0.0:
+        step_dt = float(getattr(env, "step_dt", env.cfg.sim.dt * env.cfg.decimation))
+        skip_every = max(1, int(round(period_s / step_dt)))
+    else:
+        skip_every = 1
+    counter = int(getattr(env, "_student_camera_skip_counter", -1)) + 1
+    env._student_camera_skip_counter = counter
+    if skip_every > 1 and (counter % skip_every) != 0:
+        cached = getattr(env, "_last_student_image_noisy", None)
+        if cached is not None:
+            return _validate_student_image_shape(env, cached)
+
+    # --- Fast-FoundationStereo path -------------------------------------------
+    # Stereo backend bypasses the regular single-camera retrieve: it renders
+    # both stereo views, runs FS inference, downsamples the depth, then
+    # re-uses the depth modality's noise / preprocess / crop chain.
+    if str(cfg.camera_backend).lower() == "foundation_stereo":
+        if str(cfg.image_modality).lower() != "depth":
+            raise ValueError(
+                f"camera_backend='foundation_stereo' requires "
+                f"image_modality='depth' (got {cfg.image_modality!r})."
+            )
+        env.sim.render()
+        dt = float(getattr(env, "physics_dt", env.cfg.sim.dt))
+        # force_recompute=False so cfg.update_period is honored. With
+        # update_period=0 the sensor refreshes every call (60Hz default);
+        # with update_period=1/30 it caches alternate calls (30Hz).
+        env.student_camera_left.update(dt, force_recompute=False)
+        env.student_camera_right.update(dt, force_recompute=False)
+        depth = _run_foundation_stereo(env, cfg)
+        depth_raw = depth
+        depth = _apply_depth_noise(env, depth)
+        env._student_depth_raw_m = depth_raw.detach()
+        env._student_depth_noisy_m = depth.detach()
+        depth_policy = _crop_student_image(
+            env, _preprocess_student_depth(env, depth)
+        )
+        env._last_student_image_noisy = depth_policy.detach()
+        if bool(getattr(env.cfg.student_obs, "use_depth_aug", False)):
+            depth_clean = _crop_student_image(
+                env, _preprocess_student_depth(env, depth_raw)
+            )
+            env._last_student_image_clean = depth_clean.detach()
+        else:
+            env._last_student_image_clean = depth_policy.detach()
+        return _validate_student_image_shape(env, depth_policy)
+
     camera = getattr(env, "student_camera", None)
     if camera is None:
         raise RuntimeError(
@@ -680,10 +1040,12 @@ def read_student_camera_image(env) -> torch.Tensor:
             "launch with cameras enabled."
         )
 
-    _maybe_initialize_student_camera_pose(env)
     env.sim.render()
     dt = float(getattr(env, "physics_dt", env.cfg.sim.dt))
-    camera.update(dt, force_recompute=True)
+    # force_recompute=False so cfg.update_period is honored (see stereo branch
+    # above). With update_period=0 the sensor refreshes every call; with
+    # update_period=1/30 it caches alternate calls for a true 30Hz camera.
+    camera.update(dt, force_recompute=False)
 
     outputs = camera.data.output
     available = {key: value for key, value in outputs.items() if value is not None}
@@ -713,18 +1075,27 @@ def read_student_camera_image(env) -> torch.Tensor:
             depth = depth.unsqueeze(1)
         else:
             raise RuntimeError(f"Unsupported depth tensor shape: {tuple(depth.shape)}")
-        env._student_depth_raw_m = depth.detach()
-        depth = _apply_student_depth_noise(env, depth)
-        env._student_depth_noisy_m = depth.detach()
-        depth = _preprocess_student_depth(env, depth)
-        env._student_depth_policy_full = depth.detach()
-        image_parts.append(_crop_student_image(env, depth))
+        depth_raw = depth
+        depth = _apply_depth_noise(env, depth)
+        depth_noisy_m = depth
+        env._student_depth_raw_m = depth_raw.detach()
+        env._student_depth_noisy_m = depth_noisy_m.detach()
+        # The policy view: preprocess + crop on the (maybe-noisy) depth.
+        depth_policy = _crop_student_image(env, _preprocess_student_depth(env, depth_noisy_m))
+        image_parts.append(depth_policy)
+        # Stash the cropped, normalized policy view + the matching clean view
+        # for the interactive viewer's clean/noisy A/B. When noise is off the
+        # two are identical (cheap, and avoids branching in the viewer).
+        env._last_student_image_noisy = depth_policy.detach()
+        if bool(getattr(env.cfg.student_obs, "use_depth_aug", False)):
+            depth_clean = _crop_student_image(env, _preprocess_student_depth(env, depth_raw))
+            env._last_student_image_clean = depth_clean.detach()
+        else:
+            env._last_student_image_clean = depth_policy.detach()
 
     if not image_parts:
         raise ValueError(f"Unsupported student image modality: {modality!r}")
-    image = _validate_student_image_shape(env, torch.cat(image_parts, dim=1))
-    env._student_image_policy = image.detach()
-    return image
+    return _validate_student_image_shape(env, torch.cat(image_parts, dim=1))
 
 
 def _set_usd_attr(prim, name: str, value, value_type) -> None:
@@ -737,6 +1108,257 @@ def _set_usd_attr(prim, name: str, value, value_type) -> None:
     (attr or prim.CreateAttribute(name, value_type, False)).Set(value)
 
 
+@dataclass(frozen=True)
+class _UrdfSdfCollisionMarker:
+    mesh_stem: str
+    mesh_filename: str
+    resolution: int | None = None
+    margin: float | None = None
+    narrow_band_thickness: float | None = None
+    subgrid_resolution: int | None = None
+
+
+def _usd_safe_identifier(name: str) -> str:
+    """Mirror the conservative subset of USD identifier rules we need here."""
+    safe = "".join(ch if (ch.isalnum() or ch == "_") else "_" for ch in name)
+    if not safe or not (safe[0].isalpha() or safe[0] == "_"):
+        safe = f"mesh_{safe}"
+    return safe
+
+
+def _resolve_urdf_mesh_path(urdf_path: Path, mesh_filename: str) -> Path:
+    mesh_path = Path(mesh_filename)
+    if mesh_path.is_absolute():
+        return mesh_path
+    return (urdf_path.parent / mesh_path).resolve()
+
+
+def _prepare_urdf_for_isaacsim(asset_path: str, usd_work_dir: Path) -> str:
+    """Return a URDF path whose mesh stems are valid USD prim identifiers.
+
+    Isaac's URDF importer names USD prims from mesh stems.  Meshes such as
+    ``6_hole_patch.obj`` therefore fail conversion because USD identifiers
+    cannot start with a digit.  When needed, write a temporary URDF with safe
+    mesh aliases while leaving the source asset untouched.
+    """
+    urdf_path = Path(asset_path)
+    tree = ET.parse(urdf_path)
+    root = tree.getroot()
+
+    changed = False
+    alias_dir = usd_work_dir / "_mesh_aliases" / urdf_path.stem
+    alias_by_source: dict[Path, Path] = {}
+    used_alias_names: set[str] = set()
+
+    for mesh_tag in root.findall(".//mesh"):
+        filename = mesh_tag.get("filename")
+        if not filename:
+            continue
+        source_mesh = _resolve_urdf_mesh_path(urdf_path, filename)
+        original_stem = source_mesh.stem
+        safe_stem = _usd_safe_identifier(original_stem)
+        if safe_stem == original_stem:
+            continue
+
+        changed = True
+        alias = alias_by_source.get(source_mesh)
+        if alias is None:
+            alias_dir.mkdir(parents=True, exist_ok=True)
+            alias_name = f"{safe_stem}{source_mesh.suffix}"
+            if alias_name in used_alias_names:
+                index = 1
+                while f"{safe_stem}_{index}{source_mesh.suffix}" in used_alias_names:
+                    index += 1
+                alias_name = f"{safe_stem}_{index}{source_mesh.suffix}"
+            used_alias_names.add(alias_name)
+            alias = alias_dir / alias_name
+            shutil.copy2(source_mesh, alias)
+            alias_by_source[source_mesh] = alias
+
+        mesh_tag.set("filename", str(alias))
+
+    if not changed:
+        return asset_path
+
+    # The copied URDF lives in the converter work dir, so make every remaining
+    # mesh path absolute to preserve source-relative references.
+    for mesh_tag in root.findall(".//mesh"):
+        filename = mesh_tag.get("filename")
+        if filename:
+            mesh_tag.set("filename", str(_resolve_urdf_mesh_path(urdf_path, filename)))
+
+    out_dir = usd_work_dir / "_urdf_preprocessed"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    out_path = out_dir / urdf_path.name
+    tree.write(out_path, encoding="utf-8", xml_declaration=True)
+    return str(out_path)
+
+
+def _parse_optional_int(value: str | None) -> int | None:
+    return None if value is None else int(value)
+
+
+def _parse_optional_float(value: str | None) -> float | None:
+    return None if value is None else float(value)
+
+
+def _parse_urdf_sdf_collision_markers(asset_path: str) -> list[_UrdfSdfCollisionMarker]:
+    urdf_path = Path(asset_path)
+    root = ET.parse(urdf_path).getroot()
+    markers: list[_UrdfSdfCollisionMarker] = []
+    for collision in root.findall(".//collision"):
+        sdf_tag = collision.find("sdf")
+        if sdf_tag is None:
+            continue
+        mesh_tag = collision.find("geometry/mesh")
+        if mesh_tag is None or not mesh_tag.get("filename"):
+            continue
+        mesh_filename = str(mesh_tag.get("filename"))
+        mesh_path = _resolve_urdf_mesh_path(urdf_path, mesh_filename)
+        markers.append(
+            _UrdfSdfCollisionMarker(
+                mesh_stem=_usd_safe_identifier(mesh_path.stem),
+                mesh_filename=mesh_filename,
+                resolution=_parse_optional_int(sdf_tag.get("resolution")),
+                margin=_parse_optional_float(sdf_tag.get("margin")),
+                narrow_band_thickness=_parse_optional_float(
+                    sdf_tag.get("narrow_band_thickness")
+                    or sdf_tag.get("narrowBandThickness")
+                ),
+                subgrid_resolution=_parse_optional_int(
+                    sdf_tag.get("subgrid_resolution")
+                    or sdf_tag.get("subgridResolution")
+                ),
+            )
+        )
+    return markers
+
+
+def _apply_urdf_sdf_collision_markers(
+    usd_path: str,
+    source_asset_path: str,
+    markers: list[_UrdfSdfCollisionMarker],
+) -> None:
+    if not markers:
+        return
+
+    from pxr import Usd, UsdPhysics
+
+    from isaaclab.sim.schemas import SDFMeshPropertiesCfg, define_mesh_collision_properties
+
+    raw_usd_path = Path(usd_path)
+    physics_usd_path = raw_usd_path.parent / "configuration" / f"{raw_usd_path.stem}_physics.usd"
+    edit_usd_path = physics_usd_path if physics_usd_path.exists() else raw_usd_path
+
+    stage = Usd.Stage.Open(str(edit_usd_path), Usd.Stage.LoadAll)
+    if stage is None:
+        raise RuntimeError(f"Failed to open USD while applying URDF SDF markers: {edit_usd_path}")
+    stage.Load()
+
+    marker_by_stem = {marker.mesh_stem: marker for marker in markers}
+    matched: dict[str, int] = {marker.mesh_stem: 0 for marker in markers}
+
+    fallback_matches = []
+    collider_matches = []
+    for prim in Usd.PrimRange(stage.GetPseudoRoot(), Usd.TraverseInstanceProxies()):
+        if not prim.HasAPI(UsdPhysics.MeshCollisionAPI):
+            continue
+        path = prim.GetPath().pathString
+        path_parts = [part for part in path.split("/") if part]
+        marker = next((marker_by_stem[part] for part in path_parts if part in marker_by_stem), None)
+        if marker is None:
+            continue
+        if path.startswith("/colliders/"):
+            collider_matches.append((prim, marker))
+        else:
+            fallback_matches.append((prim, marker))
+
+    for prim, marker in collider_matches or fallback_matches:
+        define_mesh_collision_properties(
+            str(prim.GetPath()),
+            SDFMeshPropertiesCfg(
+                sdf_margin=marker.margin,
+                sdf_narrow_band_thickness=marker.narrow_band_thickness,
+                sdf_resolution=marker.resolution,
+                sdf_subgrid_resolution=marker.subgrid_resolution,
+            ),
+            stage=stage,
+        )
+        matched[marker.mesh_stem] += 1
+
+    stage.GetRootLayer().Save()
+
+    matched_count = sum(matched.values())
+    missing = [stem for stem, count in matched.items() if count == 0]
+    if missing:
+        print(
+            f"[scene_utils] warning: URDF SDF markers in {source_asset_path!r} did not match "
+            f"USD collision prims for mesh stems {missing}",
+            flush=True,
+        )
+    if matched_count:
+        details = ", ".join(f"{stem}:{count}" for stem, count in matched.items() if count)
+        print(
+            f"[scene_utils] applied URDF SDF collision markers to {matched_count} prims "
+            f"in {edit_usd_path.name} ({details})",
+            flush=True,
+        )
+
+
+def _generate_scaled_table_urdfs(
+    base_urdf_path: str,
+    num_variants: int,
+    scale_range_x: tuple[float, float],
+    scale_range_y: tuple[float, float],
+    out_dir: Path,
+    seed: int = 0,
+) -> tuple[list[str], list[tuple[float, float]]]:
+    """Write `num_variants` scaled copies of a single-box table URDF.
+
+    Each variant samples (sx, sy) independently from the configured ranges
+    (Z scale held at 1.0 so the table surface height matches what the policy
+    was trained on). The base URDF must have a single `<box size="X Y Z"/>`
+    in both the `<visual>` and `<collision>` blocks (matches the bundled
+    `assets/urdf/table_narrow.urdf`).
+
+    Returns the list of written URDF paths, in deterministic order.
+    """
+    import re
+    import numpy as np
+
+    base_text = Path(base_urdf_path).read_text()
+    match = re.search(r'<box\s+size="([\d.\-+eE\s]+)"\s*/>', base_text)
+    if match is None:
+        raise ValueError(
+            f"table URDF {base_urdf_path!r} has no <box size=\"...\"/> element; "
+            "scaling helper only supports the simple single-box table."
+        )
+    base_dims = tuple(float(v) for v in match.group(1).split())
+    if len(base_dims) != 3:
+        raise ValueError(
+            f"expected 3-element <box size>, got {base_dims!r} from {base_urdf_path}"
+        )
+
+    rng = np.random.default_rng(seed)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    paths: list[str] = []
+    scales: list[tuple[float, float]] = []
+    for i in range(int(num_variants)):
+        sx = float(rng.uniform(*scale_range_x))
+        sy = float(rng.uniform(*scale_range_y))
+        new_size = f"{base_dims[0] * sx:.6f} {base_dims[1] * sy:.6f} {base_dims[2]:.6f}"
+        new_text = re.sub(
+            r'<box\s+size="[\d.\-+eE\s]+"\s*/>',
+            f'<box size="{new_size}"/>',
+            base_text,
+        )
+        path = out_dir / f"table_variant_{i:03d}.urdf"
+        path.write_text(new_text)
+        paths.append(str(path))
+        scales.append((sx, sy))
+    return paths, scales
+
+
 def _convert_urdf_to_usd(
     asset_path: str,
     usd_work_dir: Path,
@@ -746,8 +1368,9 @@ def _convert_urdf_to_usd(
     replace_cylinders_with_capsules: bool = False,
     joint_drive=None,
 ) -> str:
+    converter_asset_path = _prepare_urdf_for_isaacsim(asset_path, usd_work_dir)
     cfg_kwargs = dict(
-        asset_path=asset_path,
+        asset_path=converter_asset_path,
         usd_dir=str(usd_work_dir / Path(asset_path).stem),
         force_usd_conversion=True,
         fix_base=fix_base,
@@ -758,7 +1381,14 @@ def _convert_urdf_to_usd(
     )
     if self_collision is not None:
         cfg_kwargs["self_collision"] = self_collision
-    return UrdfConverter(UrdfConverterCfg(**cfg_kwargs)).usd_path
+    usd_path = UrdfConverter(UrdfConverterCfg(**cfg_kwargs)).usd_path
+    _apply_urdf_sdf_collision_markers(
+        usd_path,
+        converter_asset_path,
+        _parse_urdf_sdf_collision_markers(converter_asset_path),
+    )
+    return usd_path
+
 
 
 def _robot_joint_drive_cfg():
@@ -894,7 +1524,9 @@ def apply_physx_material_properties(env) -> None:
         )
     robot_view.set_material_properties(robot_materials, env_ids)
 
-    for name in ("table", "object", "goal_viz"):
+    for name in ("table", "object", "goal_viz", "hole"):
+        if not hasattr(env, name):
+            continue
         view = getattr(env, name).root_physx_view
         materials = view.get_material_properties()
         materials[:] = default
@@ -999,13 +1631,57 @@ def setup_scene(env) -> None:
         ),
         apply_physx_articulation=True,
     )
-    table_usd_path = _bake_usd(
-        _convert_urdf_to_usd(assets_cfg.table_urdf, usd_work_dir, fix_base=False),
-        bake_root, "table",
-        props=dict(
-            kinematic_enabled=True, disable_gravity=True, articulation_enabled=False,
-        ),
-    )
+    # Table USD(s). When table_scale_range_x/y are non-trivial and
+    # table_scale_num_variants > 1, pre-bake N scaled URDF variants and pass
+    # them as a list to RigidObject — Isaac Lab's MultiUsdFileCfg cycles
+    # through the list, giving each env one of the variants. Z scale is held
+    # at 1.0 so the table surface height matches the policy's expectation.
+    scale_range_x = tuple(float(v) for v in getattr(assets_cfg, "table_scale_range_x", (1.0, 1.0)))
+    scale_range_y = tuple(float(v) for v in getattr(assets_cfg, "table_scale_range_y", (1.0, 1.0)))
+    n_table_variants = int(getattr(assets_cfg, "table_scale_num_variants", 1))
+    table_scale_is_trivial = (
+        scale_range_x == (1.0, 1.0) and scale_range_y == (1.0, 1.0)
+    ) or n_table_variants <= 1
+    if table_scale_is_trivial:
+        table_usd_paths = [_bake_usd(
+            _convert_urdf_to_usd(assets_cfg.table_urdf, usd_work_dir, fix_base=False),
+            bake_root, "table",
+            props=dict(
+                kinematic_enabled=True, disable_gravity=True, articulation_enabled=False,
+            ),
+        )]
+        # Single (sx, sy) = (1.0, 1.0) for downstream consumers (eval viz).
+        env._table_variant_scales = [(1.0, 1.0)]
+    else:
+        variant_urdf_dir = Path(env._tmp_asset_dir) / "table_variants"
+        variant_urdf_paths, variant_scales = _generate_scaled_table_urdfs(
+            base_urdf_path=assets_cfg.table_urdf,
+            num_variants=n_table_variants,
+            scale_range_x=scale_range_x,
+            scale_range_y=scale_range_y,
+            out_dir=variant_urdf_dir,
+            # Deterministic across runs so the on-disk variants are stable.
+            # The env-level seed governs which variant lands in which env via
+            # Isaac Lab's round-robin spawn ordering.
+            seed=0,
+        )
+        env._table_variant_scales = list(variant_scales)
+        table_usd_paths = [
+            _bake_usd(
+                _convert_urdf_to_usd(p, usd_work_dir, fix_base=False),
+                bake_root, f"table_variant_{idx:03d}",
+                props=dict(
+                    kinematic_enabled=True, disable_gravity=True, articulation_enabled=False,
+                ),
+            )
+            for idx, p in enumerate(variant_urdf_paths)
+        ]
+        # variant_scales already stashed above for downstream consumers.
+        _log_scene_step(
+            setup_t0,
+            f"baked {len(table_usd_paths)} scaled table USD variants "
+            f"x_range={scale_range_x} y_range={scale_range_y}",
+        )
     _log_scene_step(setup_t0, "resolved baked USDs")
 
     # 3. Pre-create env roots so regex spawns resolve to every env.
@@ -1013,7 +1689,7 @@ def setup_scene(env) -> None:
 
     # 4. Spawn assets.
     env.robot = Articulation(build_robot_articulation_usd_cfg(robot_usd_path))
-    env.table = RigidObject(build_rigid_object_cfg("/World/envs/env_.*/Table", [table_usd_path]))
+    env.table = RigidObject(build_rigid_object_cfg("/World/envs/env_.*/Table", table_usd_paths))
     env.object = RigidObject(build_rigid_object_cfg("/World/envs/env_.*/Object", object_usd_paths))
     env.goal_viz = RigidObject(build_rigid_object_cfg("/World/envs/env_.*/GoalViz", goalviz_usd_paths))
     _log_scene_step(setup_t0, "spawned robot/table/object/goalviz")

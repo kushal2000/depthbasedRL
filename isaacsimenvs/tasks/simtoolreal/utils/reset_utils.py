@@ -11,7 +11,6 @@ from .goal_sampling import sample_absolute_goal_pose, sample_delta_goal_pose
 from .obs_utils import KEYPOINT_CORNERS, NUM_FINGERTIPS
 from .scene_utils import (
     ARM_JOINT_REGEX,
-    apply_student_camera_pose_randomization,
     FINGERTIP_BODY_REGEX,
     HAND_JOINT_REGEX,
     JOINT_NAMES_CANONICAL,
@@ -198,7 +197,13 @@ def _randomize_robot_dof_state(env, env_ids: torch.Tensor) -> None:
 
 
 def _reset_table_pose(env, env_ids: torch.Tensor) -> None:
-    """Randomize the table's surface height per env and write the new pose."""
+    """Randomize the table's pose per env and write the new transform.
+
+    Z position is required (the policy uses `_table_z_per_env` to set the
+    object init height). XY position and yaw are gated on
+    `table_reset_xy_range_m` / `table_reset_yaw_range_deg` — default ranges
+    are zero so this is a no-op for runs that don't opt in.
+    """
     cfg = env.cfg.reset
     n = env_ids.numel()
     env_origins = env.scene.env_origins[env_ids]
@@ -211,9 +216,30 @@ def _reset_table_pose(env, env_ids: torch.Tensor) -> None:
 
     pos_local = torch.zeros(n, 3, device=env.device)
     pos_local[:, 2] = table_z
-    quat = torch.tensor(
-        [1.0, 0.0, 0.0, 0.0], device=env.device, dtype=torch.float32
-    ).unsqueeze(0).expand(n, -1)
+
+    # XY position noise — per-env independent uniform half-widths.
+    xy_range = tuple(float(v) for v in cfg.table_reset_xy_range_m)
+    if xy_range[0] > 0.0 or xy_range[1] > 0.0:
+        rx = torch.empty(n, device=env.device).uniform_(-xy_range[0], xy_range[0])
+        ry = torch.empty(n, device=env.device).uniform_(-xy_range[1], xy_range[1])
+        pos_local[:, 0] = rx
+        pos_local[:, 1] = ry
+
+    # Yaw noise — sample uniform [-r, r] degrees, build a z-axis rotation quat.
+    yaw_range_deg = float(cfg.table_reset_yaw_range_deg)
+    if yaw_range_deg > 0.0:
+        yaw_rad = (
+            torch.empty(n, device=env.device).uniform_(-1.0, 1.0)
+            * yaw_range_deg * (torch.pi / 180.0)
+        )
+        half = yaw_rad * 0.5
+        w = torch.cos(half)
+        z = torch.sin(half)
+        quat = torch.stack([w, torch.zeros_like(w), torch.zeros_like(w), z], dim=-1)
+    else:
+        quat = torch.tensor(
+            [1.0, 0.0, 0.0, 0.0], device=env.device, dtype=torch.float32
+        ).unsqueeze(0).expand(n, -1)
 
     pose = torch.cat([pos_local + env_origins, quat], dim=-1)
     env.table.write_root_pose_to_sim(pose, env_ids=env_ids)
@@ -340,11 +366,6 @@ def reset_env_state(env, env_ids: torch.Tensor) -> None:
     for queue_name in ("_student_camera_queue", "_student_obs_queue"):
         if hasattr(env, queue_name):
             getattr(env, queue_name)[env_ids] = 0.0
-    if (
-        getattr(env, "student_camera", None) is not None
-        and str(env.cfg.student_obs.camera_pose_randomization_mode).lower() == "reset"
-    ):
-        apply_student_camera_pose_randomization(env, env_ids)
     env._object_forces[env_ids] = 0.0
     env._object_torques[env_ids] = 0.0
 
@@ -359,6 +380,10 @@ def reset_env_state(env, env_ids: torch.Tensor) -> None:
     env._object_scale_multiplier[env_ids] = torch.empty(
         n, 3, device=env.device
     ).uniform_(lo, hi)
+
+    # Camera pose randomization (no-op when cfg.student_obs.use_camera_pose_rand is False).
+    from .scene_utils import _apply_camera_pose_rand_at_reset
+    _apply_camera_pose_rand_at_reset(env, env_ids)
 
 
 __all__ = [

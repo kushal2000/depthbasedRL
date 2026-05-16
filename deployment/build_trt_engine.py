@@ -1,13 +1,19 @@
 """Build Fast-FoundationStereo TensorRT engines from ONNX exports.
 
-Example:
+This builds the `feature_runner.engine` + `post_runner.engine` pair from the
+ONNX files emitted by `third_party/Fast-FoundationStereo/scripts/make_onnx.py`.
 
-    ONNX_DIR=/home/tylerlum/github_repos/Fast-FoundationStereo/weights/23-36-37/onnx_384x224_iters4
-    python /home/tylerlum/github_repos/Fast-FoundationStereo/scripts/make_onnx.py \
-      --model_dir /home/tylerlum/github_repos/Fast-FoundationStereo/weights/23-36-37/model_best_bp2_serialize.pth \
+Example end-to-end (23-36-37, 4 iters, 384x224, FP16):
+
+    ONNX_DIR=third_party/Fast-FoundationStereo/weights/23-36-37/onnx_384x224_iters4
+    python third_party/Fast-FoundationStereo/scripts/make_onnx.py \
+      --model_dir third_party/Fast-FoundationStereo/weights/23-36-37/model_best_bp2_serialize.pth \
       --save_path "${ONNX_DIR}" \
       --height 224 --width 384 --valid_iters 4 --max_disp 192
     python deployment/build_trt_engine.py --onnx_dir "${ONNX_DIR}"
+
+Observed on RTX 6000 Ada: feature_runner builds in roughly 2.5 min and
+post_runner in roughly 10 min. Resulting engines are roughly 20 MiB + 14 MiB.
 """
 
 from __future__ import annotations
