@@ -170,6 +170,12 @@ intrinsics.
     directory, or no argument to auto-pick the newest recording from the common
     debug directories.
 
+64. `64_ws16_direct_zed_publish_log.sh [checkpoint]`
+    Direct-ZED ws-16/ws-2 run that publishes joint commands and records rollout
+    data. It does not use a ROS depth topic. Defaults to `RUN_DURATION_S=3`,
+    `PUBLISH_DURATION_S=$RUN_DURATION_S`, and writes raw-depth, policy-input,
+    and side-by-side MP4s from the in-memory rollout buffer on shutdown.
+
 Recommended student-policy test order:
 
 1. `01_zed_baseline_60hz_no_preprocess.sh`
@@ -264,6 +270,8 @@ One-command tmux wrappers:
   `ISAAC_DEPTH_SCRIPT=bash_scripts/42_isaac_depth_ros_train_settings_noise_camrand.sh bash_scripts/61_depth_debug_local_isaac_pipeline_tmux.sh`
 - ws-16 direct-ZED log-only run against ws-2 ROS master:
   `bash_scripts/62_ws16_direct_zed_log_only.sh`
+- ws-16 direct-ZED run that publishes joint commands and logs MP4s:
+  `RUN_DURATION_S=3 PUBLISH_DURATION_S=3 bash_scripts/64_ws16_direct_zed_publish_log.sh`
 - Visualize latest recorded rollout:
   `bash_scripts/63_visualize_latest_student_depth_recording.sh`
 
@@ -304,6 +312,14 @@ python deployment/visualize_student_depth_rollout.py \
   --recording ./student_depth_ros_topic_recording/<recording>.npz \
   --object-name peg_L
 ```
+
+Set `RECORD_DEPTH_VIDEO_FPS=30` on scripts 62/64 or pass
+`--record_depth_video_fps 30` to `deployment/student_depth_policy_node.py` to
+write shutdown-time MP4s next to the NPZ:
+
+- `<timestamp>_student_depth_rollout_raw_depth_window_160x90.mp4`
+- `<timestamp>_student_depth_rollout_policy_input_70x70.mp4`
+- `<timestamp>_student_depth_rollout_depth_side_by_side.mp4`
 
 HD1080 comparison example:
 

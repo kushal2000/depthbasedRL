@@ -24,6 +24,7 @@ else
   RECORDING="$(
     {
       find_latest_recording student_depth_zed_direct_recording
+      find_latest_recording student_depth_zed_direct_publish_recording
       find_latest_recording student_depth_ros_topic_recording
       find_latest_recording student_depth_ros_topic_publish_recording
     } | sed '/^$/d' | while IFS= read -r path; do

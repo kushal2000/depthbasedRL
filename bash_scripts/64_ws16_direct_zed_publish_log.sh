@@ -1,10 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Direct-ZED deployment/debug run for ws-16 + ws-2 style setup.
-# This does not subscribe to a ROS depth image topic and does not publish joint
-# commands. It still uses ROS for robot joint states and optional predicted pose
-# publication, and records rollout data to disk once on shutdown.
+# Direct-ZED ws-16/ws-2 run that publishes joint commands and records rollout
+# data to disk. It does not use a ROS depth image topic; depth comes directly
+# from the local ZED SDK through the nonblocking shared-memory producer.
 
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
 
@@ -16,11 +15,12 @@ CHECKPOINT="${1:-${DEFAULT_STUDENT_CHECKPOINT:-${DEFAULT_CHECKPOINT}}}"
 
 CONDA_ENV="${DEPTH_DEPLOY_CONDA_ENV:-simtoolreal_ros_env}"
 WS_ROS_MASTER_URI="${WS_ROS_MASTER_URI:-http://bohg-ws-2.stanford.edu:11311}"
-RUN_DURATION_S="${RUN_DURATION_S:-10}"
-RECORD_DIR="${RECORD_DIR:-./student_depth_zed_direct_recording}"
+RUN_DURATION_S="${RUN_DURATION_S:-3}"
+PUBLISH_DURATION_S="${PUBLISH_DURATION_S:-${RUN_DURATION_S}}"
+RECORD_DIR="${RECORD_DIR:-./student_depth_zed_direct_publish_recording}"
 RECORD_DEPTH_FORMAT="${RECORD_DEPTH_FORMAT:-uint8}"
-RECORD_DEPTH_VIDEO_FPS="${RECORD_DEPTH_VIDEO_FPS:-0}"
-STATUS_INTERVAL_S="${STATUS_INTERVAL_S:-1.0}"
+RECORD_DEPTH_VIDEO_FPS="${RECORD_DEPTH_VIDEO_FPS:-30}"
+STATUS_INTERVAL_S="${STATUS_INTERVAL_S:-0.5}"
 CONTROL_HZ="${CONTROL_HZ:-60}"
 WARMUP_STEPS="${WARMUP_STEPS:-30}"
 ZED_CAMERA_FPS="${ZED_CAMERA_FPS:-30}"
@@ -45,18 +45,20 @@ unset ROS_HOSTNAME
 export LD_LIBRARY_PATH="${LD_LIBRARY_PATH:-}:${CONDA_PREFIX}/lib"
 
 cat <<EOF
-[ws16_direct_zed_log_only]
+[ws16_direct_zed_publish_log]
 repo=$(pwd)
 python=$(command -v python)
 conda=${CONDA_DEFAULT_ENV}
 ROS_MASTER_URI=${ROS_MASTER_URI}
 ROS_IP=${ROS_IP}
 checkpoint=${CHECKPOINT}
+run_duration_s=${RUN_DURATION_S}
+publish_duration_s=${PUBLISH_DURATION_S}
 record_dir=${RECORD_DIR}
 record_depth_video_fps=${RECORD_DEPTH_VIDEO_FPS}
 
 Depth source is direct ZED SDK capture, not a ROS depth topic.
-Joint command publishing is disabled.
+Joint command publishing is ENABLED for publish_duration_s.
 EOF
 
 python deployment/student_depth_policy_node_nonblocking.py \
@@ -72,7 +74,8 @@ python deployment/student_depth_policy_node_nonblocking.py \
   --status_interval_s "${STATUS_INTERVAL_S}" \
   --warmup_steps "${WARMUP_STEPS}" \
   --publish_object_pose \
-  --no-publish_joint_commands \
+  --publish_joint_commands \
+  --publish_joint_commands_duration_s "${PUBLISH_DURATION_S}" \
   --max_arm_target_delta_deg "${MAX_ARM_TARGET_DELTA_DEG}" \
   --record_rollout_dir "${RECORD_DIR}" \
   --record_depth_format "${RECORD_DEPTH_FORMAT}" \

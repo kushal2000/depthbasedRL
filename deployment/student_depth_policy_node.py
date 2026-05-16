@@ -1065,11 +1065,13 @@ class StudentRolloutLogger:
         name: Optional[str],
         every_n: int,
         depth_format: str,
+        depth_video_fps: int,
     ) -> None:
         self.output_dir = output_dir
         self.name = name
         self.every_n = max(1, int(every_n))
         self.depth_format = depth_format
+        self.depth_video_fps = max(0, int(depth_video_fps))
         self.enabled = output_dir is not None
         self._saved = False
         self.step_indices: list[int] = []
@@ -1103,6 +1105,91 @@ class StudentRolloutLogger:
         if self.depth_format == "uint8":
             return (np.clip(depth, 0.0, 1.0) * 255.0).round().astype(np.uint8)
         raise ValueError(f"Unsupported depth_format={self.depth_format!r}")
+
+    def _decode_normalized_depth(self, depth: np.ndarray) -> np.ndarray:
+        if self.depth_format == "none":
+            raise ValueError("Cannot decode policy depth when record_depth_format='none'.")
+        if self.depth_format == "uint8":
+            return np.asarray(depth, dtype=np.float32) / 255.0
+        if self.depth_format == "float16":
+            return np.asarray(depth, dtype=np.float32)
+        raise ValueError(f"Unsupported depth_format={self.depth_format!r}")
+
+    @staticmethod
+    def _gray_to_rgb_u8(image: np.ndarray) -> np.ndarray:
+        gray = (np.clip(image, 0.0, 1.0) * 255.0).round().astype(np.uint8)
+        return np.repeat(gray[..., None], 3, axis=-1)
+
+    @staticmethod
+    def _window_metric_depth(depth_m: np.ndarray) -> np.ndarray:
+        safe = np.nan_to_num(
+            np.asarray(depth_m, dtype=np.float32),
+            nan=DEPTH_FAR_M,
+            posinf=DEPTH_FAR_M,
+            neginf=DEPTH_NEAR_M,
+        )
+        return np.clip((safe - DEPTH_NEAR_M) / (DEPTH_FAR_M - DEPTH_NEAR_M), 0.0, 1.0)
+
+    def _labeled_panel(
+        self,
+        image: np.ndarray,
+        label: str,
+        *,
+        pad_to_hw: tuple[int, int] | None = None,
+    ) -> np.ndarray:
+        from PIL import Image as PILImage
+        from PIL import ImageDraw
+
+        rgb = self._gray_to_rgb_u8(image)
+        img = PILImage.fromarray(rgb)
+        label_h = 16
+        canvas_w = img.width
+        canvas_h = img.height
+        if pad_to_hw is not None:
+            pad_h, pad_w = pad_to_hw
+            canvas_w = max(canvas_w, pad_w)
+            canvas_h = max(canvas_h, pad_h)
+        canvas = PILImage.new("RGB", (canvas_w, canvas_h + label_h), color=(255, 255, 255))
+        draw = ImageDraw.Draw(canvas)
+        draw.text((3, 2), label, fill=(0, 0, 0))
+        canvas.paste(img, (0, label_h))
+        return np.asarray(canvas)
+
+    def _write_mp4(self, path: Path, frames: list[np.ndarray]) -> None:
+        import imageio.v2 as imageio
+
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with imageio.get_writer(str(path), fps=self.depth_video_fps, macro_block_size=1) as writer:
+            for frame in frames:
+                writer.append_data(np.asarray(frame, dtype=np.uint8))
+
+    def _save_depth_videos(self, *, stem_path: Path) -> None:
+        if self.depth_video_fps <= 0:
+            return
+        if self.depth_format == "none":
+            warn("Skipping rollout depth MP4s because record_depth_format='none'.")
+            return
+
+        raw_frames: list[np.ndarray] = []
+        policy_frames: list[np.ndarray] = []
+        side_by_side_frames: list[np.ndarray] = []
+        for resized_depth_m, policy_depth in zip(self.resized_depth_m, self.policy_depth):
+            raw_window = self._window_metric_depth(resized_depth_m)
+            policy_input = self._decode_normalized_depth(policy_depth)
+            raw_frames.append(self._gray_to_rgb_u8(raw_window))
+            policy_frames.append(self._gray_to_rgb_u8(policy_input))
+
+            raw_panel = self._labeled_panel(raw_window, "raw metric depth [0.70,1.10]m")
+            policy_panel = self._labeled_panel(policy_input, "policy input 70x70", pad_to_hw=(90, 90))
+            side_by_side_frames.append(np.concatenate([raw_panel, policy_panel], axis=1))
+
+        raw_path = stem_path.with_name(stem_path.name + "_raw_depth_window_160x90.mp4")
+        policy_path = stem_path.with_name(stem_path.name + "_policy_input_70x70.mp4")
+        side_by_side_path = stem_path.with_name(stem_path.name + "_depth_side_by_side.mp4")
+        self._write_mp4(raw_path, raw_frames)
+        self._write_mp4(policy_path, policy_frames)
+        self._write_mp4(side_by_side_path, side_by_side_frames)
+        info(f"Saved rollout depth MP4s: {raw_path}, {policy_path}, {side_by_side_path}")
 
     def maybe_record(
         self,
@@ -1178,6 +1265,7 @@ class StudentRolloutLogger:
         stamp = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
         stem = self.name or "student_depth_rollout"
         path = self.output_dir / f"{stamp}_{stem}.npz"
+        stem_path = self.output_dir / f"{stamp}_{stem}"
         np.savez_compressed(
             path,
             step_indices=np.asarray(self.step_indices, dtype=np.int64),
@@ -1209,6 +1297,11 @@ class StudentRolloutLogger:
             crop_xyxy=np.asarray([CROP_X0, CROP_Y0, CROP_X1, CROP_Y1], dtype=np.int64),
         )
         info(f"Saved student rollout recording: {path}")
+        if self.depth_video_fps > 0:
+            try:
+                self._save_depth_videos(stem_path=stem_path)
+            except Exception as exc:
+                warn(f"Failed to save rollout depth MP4s: {exc}")
         return path
 
 
@@ -1242,6 +1335,7 @@ class StudentDepthPolicyNode:
             name=args.record_rollout_name,
             every_n=args.record_every_n,
             depth_format=args.record_depth_format,
+            depth_video_fps=args.record_depth_video_fps,
         )
         if self.rollout_logger.enabled:
             atexit.register(self._save_rollout_recording)
@@ -1339,7 +1433,8 @@ class StudentDepthPolicyNode:
             info(
                 "Rollout recording enabled: "
                 f"dir={args.record_rollout_dir} every_n={args.record_every_n} "
-                f"depth_format={args.record_depth_format}. Data writes once on shutdown."
+                f"depth_format={args.record_depth_format} depth_video_fps={args.record_depth_video_fps}. "
+                "Data writes once on shutdown."
             )
         if not args.publish_joint_commands:
             warn("Joint command publishing is disabled. Use --publish_joint_commands to send targets.")
@@ -2086,6 +2181,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--record_rollout_name", default=None)
     parser.add_argument("--record_every_n", type=int, default=1)
     parser.add_argument("--record_depth_format", choices=("uint8", "float16", "none"), default="uint8")
+    parser.add_argument(
+        "--record_depth_video_fps",
+        type=int,
+        default=0,
+        help="If positive, write raw-depth, policy-input, and side-by-side MP4s from the rollout buffer on shutdown.",
+    )
     parser.add_argument("--status_interval_s", type=float, default=1.0)
     parser.add_argument("--raise_on_step_error", action="store_true")
     return parser.parse_args()
