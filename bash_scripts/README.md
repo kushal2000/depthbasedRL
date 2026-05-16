@@ -176,6 +176,11 @@ intrinsics.
     `PUBLISH_DURATION_S=$RUN_DURATION_S`, and writes raw-depth, policy-input,
     and side-by-side MP4s from the in-memory rollout buffer on shutdown.
 
+65. `65_direct_zed_publish_log_no_env.sh [checkpoint]`
+    Same student-policy command as script 64, but it does not activate conda or
+    set ROS networking variables. Use it when the shell is already configured
+    correctly on another workstation.
+
 Recommended student-policy test order:
 
 1. `01_zed_baseline_60hz_no_preprocess.sh`
@@ -272,6 +277,8 @@ One-command tmux wrappers:
   `bash_scripts/62_ws16_direct_zed_log_only.sh`
 - ws-16 direct-ZED run that publishes joint commands and logs MP4s:
   `RUN_DURATION_S=3 PUBLISH_DURATION_S=3 bash_scripts/64_ws16_direct_zed_publish_log.sh`
+- Direct-ZED publish/log command without environment setup:
+  `RUN_DURATION_S=3 PUBLISH_DURATION_S=3 bash_scripts/65_direct_zed_publish_log_no_env.sh`
 - Visualize latest recorded rollout:
   `bash_scripts/63_visualize_latest_student_depth_recording.sh`
 
