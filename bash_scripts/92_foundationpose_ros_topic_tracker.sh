@@ -8,7 +8,10 @@ DEPTHBASED_RL_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 source "${DEPTHBASED_RL_ROOT}/bash_scripts/foundationpose_ros_env.sh"
 
 MESH_PATH="${MESH_PATH:-${DEPTHBASED_RL_ROOT}/assets/urdf/peg_in_hole/peg_L/peg_L.obj}"
-CALIBRATION_FILE="${CALIBRATION_FILE:-${FOUNDATIONPOSE_ROOT}/calibration/T_RC_example.txt}"
+# Matches isaacsimenvs/cfg/task/PegInHoleDepthStudent.yaml:
+# camera_pos minus the sim robot-frame offset (0, 0.8, 0), with the same
+# ROS optical-frame camera_quat_wxyz. Override CALIBRATION_FILE for real ZED.
+CALIBRATION_FILE="${CALIBRATION_FILE:-${DEPTHBASED_RL_ROOT}/deployment/calibration/isaac_default_student_camera_T_RC.txt}"
 CAM_K_FILE="${CAM_K_FILE:-/juno/u/kedia/FoundationPose/human_videos/Jan_17/brush/red_brush/sweep_forward/cam_K.txt}"
 RGB_TOPIC="${RGB_TOPIC:-/zed/zed_node/rgb/image_rect_color}"
 DEPTH_TOPIC="${DEPTH_TOPIC:-/zed/zed_node/depth/depth_registered}"

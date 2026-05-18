@@ -142,7 +142,7 @@ intrinsics.
     IsaacSim/IsaacLab RGB-D source for FoundationPose tests. It publishes RGB, metric depth, CameraInfo, joint states, Isaac GT pose on `/robot_frame/isaac_gt_object_pose`, and the active peg-in-hole goal on `/robot_frame/goal_object_pose`, but deliberately does not publish `/robot_frame/current_object_pose`.
 
 92. `92_foundationpose_ros_topic_tracker.sh`
-    Runs FoundationPose from ROS RGB-D topics and publishes `/robot_frame/current_object_pose` for `rl_policy_node.py`. It uses the existing `foundationpose` conda env and does not require `pyzed.sl`.
+    Runs FoundationPose from ROS RGB-D topics and publishes `/robot_frame/current_object_pose` for `rl_policy_node.py`. It uses the existing `foundationpose` conda env and does not require `pyzed.sl`. By default it uses `deployment/calibration/isaac_default_student_camera_T_RC.txt`, which matches the IsaacSim student-camera pose in `PegInHoleDepthStudent.yaml`; override `CALIBRATION_FILE` for real ZED.
 
 93. `93_rl_teacher_policy_node.sh`
     Generic `deployment/rl_policy_node.py` entrypoint. It consumes `/robot_frame/current_object_pose` from either script 90 directly or script 92.
