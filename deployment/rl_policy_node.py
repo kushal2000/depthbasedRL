@@ -20,6 +20,7 @@ from termcolor import colored
 from dextoolbench.objects import (
     NAME_TO_OBJECT,
 )
+import peg_in_hole.objects  # noqa: F401  # registers peg / peg_L in NAME_TO_OBJECT
 from isaacgymenvs.utils.observation_action_utils_sharpa import (
     Q_LOWER_LIMITS_restricted_np as Q_LOWER_LIMITS_np,
 )
