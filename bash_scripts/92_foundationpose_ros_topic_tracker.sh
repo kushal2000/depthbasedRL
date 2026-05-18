@@ -14,7 +14,9 @@ RGB_TOPIC="${RGB_TOPIC:-/zed/zed_node/rgb/image_rect_color}"
 DEPTH_TOPIC="${DEPTH_TOPIC:-/zed/zed_node/depth/depth_registered}"
 CAMERA_INFO_TOPIC="${CAMERA_INFO_TOPIC:-/zed/zed_node/rgb/camera_info}"
 FPS="${FPS:-30}"
-DEBUG="${DEBUG:-1}"
+# Keep debug visualization off by default for closed-loop control latency.
+# Override with DEBUG=1 when you explicitly want the OpenCV overlay window.
+DEBUG="${DEBUG:-0}"
 EST_REFINE_ITER="${EST_REFINE_ITER:-5}"
 TRACK_REFINE_ITER="${TRACK_REFINE_ITER:-2}"
 SAVE_DIR="${SAVE_DIR:-${DEPTHBASED_RL_ROOT}/local_logs/foundationpose_ros_topic}"
