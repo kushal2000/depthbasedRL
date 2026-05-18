@@ -37,6 +37,10 @@ class PegInHoleCfg:
     tightest_n_tol_slots_per_scene: int = -1
     force_peg_idx: int | None = None
 
+    # Deployment/debug-only: keep the wooden table but remove the hole/fixture
+    # geometry from the baked scene URDFs before USD conversion.
+    hide_hole_fixture: bool = False
+
     # Extra initial-object randomization for distillation experiments. "scene"
     # uses the scene file exactly; "yaw_only" keeps the T normal upright and
     # samples yaw around +Z; "full" samples a uniformly random orientation.

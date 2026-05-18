@@ -684,6 +684,15 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--camera_rot_noise_deg", type=float, nargs=3, default=None)
     parser.add_argument("--peg_urdf", default=None)
     parser.add_argument("--peg_goal_mode", default=None)
+    parser.add_argument(
+        "--hide_hole_fixture",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help=(
+            "Peg-in-hole debug mode: keep the wooden table but strip the grey "
+            "hole fixture visual/collision boxes from scene URDFs before USD conversion."
+        ),
+    )
     parser.add_argument("--object_init_orientation_mode", default=None)
     parser.add_argument(
         "--deployment_mode",
@@ -867,6 +876,8 @@ def main() -> None:
             env_cfg.assets.object_name = Path(args.peg_urdf).stem
         if args.peg_goal_mode is not None:
             env_cfg.peg_in_hole.goal_mode = args.peg_goal_mode
+        if hasattr(env_cfg, "peg_in_hole"):
+            env_cfg.peg_in_hole.hide_hole_fixture = bool(args.hide_hole_fixture)
         if args.object_init_orientation_mode is not None and hasattr(env_cfg, "peg_in_hole"):
             env_cfg.peg_in_hole.object_init_orientation_mode = args.object_init_orientation_mode
         if args.deployment_mode:
@@ -884,6 +895,7 @@ def main() -> None:
                 f"enable_depth={args.enable_depth} "
                 f"enable_rgb={args.enable_rgb} "
                 f"camera_info_mode={args.camera_info_mode} "
+                f"hide_hole_fixture={getattr(env_cfg.peg_in_hole, 'hide_hole_fixture', False)} "
                 f"depth_noise_profile={env_cfg.student_obs.depth_noise_profile} "
                 f"published_depth_source={args.published_depth_source} "
                 f"camera_rand={env_cfg.student_obs.camera_pose_randomization_profile} "

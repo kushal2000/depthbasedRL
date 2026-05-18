@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import tempfile
 import time
+import xml.etree.ElementTree as ET
 from pathlib import Path
 
 import torch
@@ -40,6 +41,32 @@ def _scene_key(urdf_path: str) -> str:
     return f"{path.parent.name}_{path.stem}"
 
 
+def _strip_hole_fixture_from_scene_urdf(src_urdf: str, out_dir: Path) -> str:
+    """Write a copy of a peg-in-hole scene URDF with only the wooden table box.
+
+    Generated scene URDFs encode the table and the hole fixture as visual and
+    collision boxes on a single link: the first visual/collision pair is the
+    wooden table, and the remaining visual/collision boxes are the grey hole
+    fixture. Keeping only the first pair preserves table contact/depth while
+    removing the physical/visual hole.
+    """
+    src_path = Path(_asset_path(src_urdf))
+    tree = ET.parse(src_path)
+    root = tree.getroot()
+    for link in root.findall("link"):
+        visuals = list(link.findall("visual"))
+        collisions = list(link.findall("collision"))
+        for elem in visuals[1:]:
+            link.remove(elem)
+        for elem in collisions[1:]:
+            link.remove(elem)
+
+    out_dir.mkdir(parents=True, exist_ok=True)
+    out_path = out_dir / f"{src_path.parent.name}_{src_path.stem}_no_hole.urdf"
+    tree.write(out_path, encoding="utf-8", xml_declaration=True)
+    return str(out_path)
+
+
 def setup_scene(env) -> None:
     """Build robot, peg, per-env hole scenes, goal marker, ground, and light."""
     assets_cfg = env.cfg.assets
@@ -48,7 +75,15 @@ def setup_scene(env) -> None:
 
     env._tmp_asset_dir = tempfile.mkdtemp(prefix="peg_in_hole_assets_")
     env._object_urdf_paths = [_asset_path(assets_cfg.peg_urdf)]
-    env._table_urdf_paths = [_asset_path(path) for path in env._pih_scene_urdfs]
+    table_urdfs = list(env._pih_scene_urdfs)
+    if bool(getattr(env.cfg.peg_in_hole, "hide_hole_fixture", False)):
+        stripped_dir = Path(env._tmp_asset_dir) / "no_hole_scene_urdfs"
+        table_urdfs = [
+            _strip_hole_fixture_from_scene_urdf(path, stripped_dir)
+            for path in table_urdfs
+        ]
+        _log_scene_step(setup_t0, f"stripped hole fixture from {len(set(table_urdfs))} scene URDFs")
+    env._table_urdf_paths = [_asset_path(path) for path in table_urdfs]
 
     usd_work_dir = Path(env._tmp_asset_dir) / "usd"
     bake_root = Path(env._tmp_asset_dir) / "baked_usd"
@@ -101,7 +136,7 @@ def setup_scene(env) -> None:
     )
 
     table_usd_by_urdf = {}
-    for urdf in sorted(set(env._pih_scene_urdfs)):
+    for urdf in sorted(set(table_urdfs)):
         key = _scene_key(urdf)
         raw_usd = _convert_urdf_to_usd(
             _asset_path(urdf), usd_work_dir / "tables" / key, fix_base=False
@@ -116,7 +151,7 @@ def setup_scene(env) -> None:
                 articulation_enabled=False,
             ),
         )
-    table_usd_paths = [table_usd_by_urdf[urdf] for urdf in env._pih_scene_urdfs]
+    table_usd_paths = [table_usd_by_urdf[urdf] for urdf in table_urdfs]
     _log_scene_step(setup_t0, f"converted {len(table_usd_by_urdf)} scene URDFs")
 
     _materialize_env_prims(env)

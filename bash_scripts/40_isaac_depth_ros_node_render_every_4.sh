@@ -24,6 +24,7 @@ if [[ -n "${OBJECT_INIT_ORIENTATION_MODE:-}" ]]; then EXTRA_ARGS+=(--object_init
 if [[ -n "${DEPTH_NOISE_STRENGTH:-}" ]]; then EXTRA_ARGS+=(--depth_noise_strength "${DEPTH_NOISE_STRENGTH}"); fi
 if [[ -n "${CAMERA_POS_NOISE_M:-}" ]]; then EXTRA_ARGS+=(--camera_pos_noise_m ${CAMERA_POS_NOISE_M}); fi
 if [[ -n "${CAMERA_ROT_NOISE_DEG:-}" ]]; then EXTRA_ARGS+=(--camera_rot_noise_deg ${CAMERA_ROT_NOISE_DEG}); fi
+if [[ "${HIDE_HOLE_FIXTURE:-0}" == "1" ]]; then EXTRA_ARGS+=(--hide_hole_fixture); fi
 
 "${ISAACSIM_PYTHON}" deployment/isaac/isaac_depth_env_node.py \
   --enable_depth \

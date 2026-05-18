@@ -132,6 +132,9 @@ intrinsics.
 47. `47_isaac_depth_ros_heavy_noise_no_camrand.sh`
     Strong/obvious metric depth noise with fixed nominal student-camera pose. Publishes the noisy metric depth.
 
+48. `48_isaac_depth_ros_clean_no_hole.sh`
+    Clean raw metric depth and fixed nominal student-camera pose, but strips the grey peg-in-hole fixture from the scene URDFs before USD conversion. The wooden table and peg remain. This tests what the depth student does when the object is visible but the hole/fixture is absent.
+
 90. `90_isaac_pose_only_gt_teacher_source.sh`
     IsaacSim/IsaacLab source for teacher-policy baseline tests. It publishes simulated joint states and Isaac ground-truth object pose on `/robot_frame/current_object_pose`, with RGB/depth rendering disabled.
 
@@ -214,7 +217,7 @@ IsaacSim-backed fake-real pipeline:
 4. Terminal D: `RUN_DURATION_S=30 bash_scripts/33_depth_debug_student_ros_topic_dry_run.sh`
 5. Terminal E, if you want the student to drive IsaacSim: `RUN_DURATION_S=30 PUBLISH_DURATION_S=10 bash_scripts/34_depth_debug_student_ros_topic_publish_3s.sh`
 
-Swap Terminal B for scripts 43, 44, 45, 46, or 47 to isolate whether performance changes are caused by depth noise, camera-pose randomization, or both. The wrappers default to `DEPTH_EVERY_N=2`; override it if you want a different simulated camera rate.
+Swap Terminal B for scripts 43, 44, 45, 46, 47, or 48 to isolate whether performance changes are caused by depth noise, camera-pose randomization, or missing hole geometry. The wrappers default to `DEPTH_EVERY_N=2`; override it if you want a different simulated camera rate.
 
 FoundationPose teacher-pose pipeline:
 
@@ -250,6 +253,7 @@ IsaacSim deployment-mode overrides:
 - `DEPLOYMENT_MODE=0` restores the pre-deployment-mode node path from these wrappers.
 - `DISABLE_ENV_RESETS=0` allows the training env to auto-reset on timeout/fall/hand-far/max-success. Leave it unset for fake-real deployment simulation.
 - `ZERO_TRAINING_RANDOMIZATION=0` restores training-style reset/domain-randomization settings from the teacher config. Leave it unset for fake-real deployment simulation.
+- `HIDE_HOLE_FIXTURE=1` keeps the table but removes the visual/collision boxes for the grey peg-in-hole fixture from the generated scene URDFs. This is the env-var form of `--hide_hole_fixture`.
 
 The IsaacSim scripts source `bash_scripts/isaacsim_ros_env.sh`: this keeps ROS
 on localhost, uses the IsaacSim Python for Isaac Lab, and prepends the ROS
