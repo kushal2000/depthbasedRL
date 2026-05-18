@@ -42,6 +42,7 @@ SHARPA_JOINT_STATE_TOPIC = "/sharpa/joint_states"
 IIWA_JOINT_CMD_TOPIC = "/iiwa/joint_cmd"
 SHARPA_JOINT_CMD_TOPIC = "/sharpa/joint_cmd"
 OBJECT_POSE_TOPIC = "/robot_frame/current_object_pose"
+GOAL_OBJECT_POSE_TOPIC = "/robot_frame/goal_object_pose"
 ISAAC_GT_OBJECT_POSE_TOPIC = "/robot_frame/isaac_gt_object_pose"
 SIM_WORLD_T_ROBOT_POS_M = np.array([0.0, 0.8, 0.0], dtype=np.float64)
 N_ARM = 7
@@ -288,6 +289,7 @@ class RosModules:
     JointState: Any
     Image: Any
     CameraInfo: Any
+    Pose: Any
     PoseStamped: Any
 
 
@@ -334,6 +336,7 @@ class IsaacDepthEnvNode:
         self.camera_info_pub = None
         self.object_pose_pub = None
         self.gt_object_pose_pub = None
+        self.goal_object_pose_pub = None
         if ros is not None:
             ros.rospy.init_node("isaac_depth_env_node", anonymous=True)
             ros.rospy.Subscriber(args.iiwa_joint_cmd_topic, ros.JointState, self._iiwa_cmd_callback, queue_size=1)
@@ -342,6 +345,8 @@ class IsaacDepthEnvNode:
             self.sharpa_state_pub = ros.rospy.Publisher(args.sharpa_joint_state_topic, ros.JointState, queue_size=1)
             if args.publish_object_pose:
                 self.object_pose_pub = ros.rospy.Publisher(args.object_pose_topic, ros.PoseStamped, queue_size=1)
+            if args.publish_goal_object_pose:
+                self.goal_object_pose_pub = ros.rospy.Publisher(args.goal_object_pose_topic, ros.Pose, queue_size=1)
             if args.publish_gt_object_pose_debug:
                 self.gt_object_pose_pub = ros.rospy.Publisher(
                     args.gt_object_pose_topic, ros.PoseStamped, queue_size=1
@@ -465,6 +470,27 @@ class IsaacDepthEnvNode:
         msg.pose.orientation.w = float(quat_xyzw[3])
         return msg
 
+    def _make_goal_object_pose_msg(self):
+        from scipy.spatial.transform import Rotation as R
+
+        ros = self.ros
+        origin = self.inner.scene.env_origins[0]
+        goal_pos_env = _to_numpy(self.inner.goal_viz.data.root_pos_w[0] - origin).astype(np.float64)
+        goal_pos_robot = goal_pos_env - SIM_WORLD_T_ROBOT_POS_M
+        quat_wxyz = _to_numpy(self.inner.goal_viz.data.root_quat_w[0]).astype(np.float64)
+        quat_xyzw = quat_wxyz[[1, 2, 3, 0]]
+        quat_xyzw = R.from_quat(quat_xyzw).as_quat()
+
+        msg = ros.Pose()
+        msg.position.x = float(goal_pos_robot[0])
+        msg.position.y = float(goal_pos_robot[1])
+        msg.position.z = float(goal_pos_robot[2])
+        msg.orientation.x = float(quat_xyzw[0])
+        msg.orientation.y = float(quat_xyzw[1])
+        msg.orientation.z = float(quat_xyzw[2])
+        msg.orientation.w = float(quat_xyzw[3])
+        return msg
+
     def _publish_object_pose(self) -> None:
         if self.ros is None or (self.object_pose_pub is None and self.gt_object_pose_pub is None):
             return
@@ -473,6 +499,11 @@ class IsaacDepthEnvNode:
             self.object_pose_pub.publish(msg)
         if self.gt_object_pose_pub is not None:
             self.gt_object_pose_pub.publish(msg)
+
+    def _publish_goal_object_pose(self) -> None:
+        if self.ros is None or self.goal_object_pose_pub is None:
+            return
+        self.goal_object_pose_pub.publish(self._make_goal_object_pose_msg())
 
     def _render_depth(self) -> np.ndarray:
         if not self.args.enable_depth:
@@ -562,6 +593,7 @@ class IsaacDepthEnvNode:
         self.physics_ms.append(1000.0 * (time.perf_counter() - t0))
         self._publish_joint_states()
         self._publish_object_pose()
+        self._publish_goal_object_pose()
         self._publish_camera_if_due()
         self.loop_ms.append(1000.0 * (time.perf_counter() - t_loop))
         self.step_idx += 1
@@ -596,7 +628,7 @@ class IsaacDepthEnvNode:
 
 def _import_ros() -> RosModules:
     import rospy
-    from geometry_msgs.msg import PoseStamped
+    from geometry_msgs.msg import Pose, PoseStamped
     from sensor_msgs.msg import CameraInfo, Image, JointState
 
     return RosModules(
@@ -604,6 +636,7 @@ def _import_ros() -> RosModules:
         JointState=JointState,
         Image=Image,
         CameraInfo=CameraInfo,
+        Pose=Pose,
         PoseStamped=PoseStamped,
     )
 
@@ -762,11 +795,18 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--iiwa_joint_cmd_topic", default=IIWA_JOINT_CMD_TOPIC)
     parser.add_argument("--sharpa_joint_cmd_topic", default=SHARPA_JOINT_CMD_TOPIC)
     parser.add_argument("--object_pose_topic", default=OBJECT_POSE_TOPIC)
+    parser.add_argument("--goal_object_pose_topic", default=GOAL_OBJECT_POSE_TOPIC)
     parser.add_argument(
         "--publish_object_pose",
         action=argparse.BooleanOptionalAction,
         default=True,
         help="Publish Isaac ground-truth object pose on --object_pose_topic.",
+    )
+    parser.add_argument(
+        "--publish_goal_object_pose",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Publish the active Isaac peg-in-hole goal pose on --goal_object_pose_topic.",
     )
     parser.add_argument("--gt_object_pose_topic", default=ISAAC_GT_OBJECT_POSE_TOPIC)
     parser.add_argument(

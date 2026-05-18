@@ -136,10 +136,10 @@ intrinsics.
     Clean raw metric depth and fixed nominal student-camera pose, but strips the grey peg-in-hole fixture from the scene URDFs before USD conversion. The wooden table and peg remain. This tests what the depth student does when the object is visible but the hole/fixture is absent.
 
 90. `90_isaac_pose_only_gt_teacher_source.sh`
-    IsaacSim/IsaacLab source for teacher-policy baseline tests. It publishes simulated joint states and Isaac ground-truth object pose on `/robot_frame/current_object_pose`, with RGB/depth rendering disabled.
+    IsaacSim/IsaacLab source for teacher-policy baseline tests. It publishes simulated joint states, Isaac ground-truth object pose on `/robot_frame/current_object_pose`, and the active peg-in-hole goal on `/robot_frame/goal_object_pose`, with RGB/depth rendering disabled.
 
 91. `91_isaac_rgbd_foundationpose_source.sh`
-    IsaacSim/IsaacLab RGB-D source for FoundationPose tests. It publishes RGB, metric depth, CameraInfo, joint states, and Isaac GT pose on `/robot_frame/isaac_gt_object_pose`, but deliberately does not publish `/robot_frame/current_object_pose`.
+    IsaacSim/IsaacLab RGB-D source for FoundationPose tests. It publishes RGB, metric depth, CameraInfo, joint states, Isaac GT pose on `/robot_frame/isaac_gt_object_pose`, and the active peg-in-hole goal on `/robot_frame/goal_object_pose`, but deliberately does not publish `/robot_frame/current_object_pose`.
 
 92. `92_foundationpose_ros_topic_tracker.sh`
     Runs FoundationPose from ROS RGB-D topics and publishes `/robot_frame/current_object_pose` for `rl_policy_node.py`. It uses the existing `foundationpose` conda env and does not require `pyzed.sl`.
