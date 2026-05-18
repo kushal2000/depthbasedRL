@@ -35,12 +35,14 @@ if str(REPO_ROOT) not in sys.path:
 
 DEFAULT_TEACHER_DIR = Path("/juno/u/kedia/depthbasedRL/train_dir/Apr28/isaacSim_PegInHole")
 DEPTH_TOPIC = "/zed/zed_node/depth/depth_registered"
+RGB_TOPIC = "/zed/zed_node/rgb/image_rect_color"
 CAMERA_INFO_TOPIC = "/zed/zed_node/rgb/camera_info"
 IIWA_JOINT_STATE_TOPIC = "/iiwa/joint_states"
 SHARPA_JOINT_STATE_TOPIC = "/sharpa/joint_states"
 IIWA_JOINT_CMD_TOPIC = "/iiwa/joint_cmd"
 SHARPA_JOINT_CMD_TOPIC = "/sharpa/joint_cmd"
 OBJECT_POSE_TOPIC = "/robot_frame/current_object_pose"
+ISAAC_GT_OBJECT_POSE_TOPIC = "/robot_frame/isaac_gt_object_pose"
 SIM_WORLD_T_ROBOT_POS_M = np.array([0.0, 0.8, 0.0], dtype=np.float64)
 N_ARM = 7
 N_HAND = 22
@@ -81,6 +83,28 @@ def _student_camera_k(cfg) -> np.ndarray:
         [[fx, 0.0, (width - 1.0) * 0.5], [0.0, fy, (height - 1.0) * 0.5], [0.0, 0.0, 1.0]],
         dtype=np.float32,
     )
+
+
+def _centered_camera_k(k: np.ndarray, *, width: int, height: int) -> np.ndarray:
+    """Use requested focal lengths but centered principal point.
+
+    Isaac/Omniverse currently warns that aperture offsets are not supported for
+    these camera render products, so this mode keeps ROS CameraInfo consistent
+    with what is actually rendered when a non-centered K was requested.
+    """
+    centered = np.asarray(k, dtype=np.float32).copy()
+    centered[0, 2] = (float(width) - 1.0) * 0.5
+    centered[1, 2] = (float(height) - 1.0) * 0.5
+    return centered
+
+
+def _validate_camera_k_for_image(k: np.ndarray, *, width: int, height: int, source: str) -> None:
+    cx, cy = float(k[0, 2]), float(k[1, 2])
+    if not (0.0 <= cx <= float(width) and 0.0 <= cy <= float(height)):
+        raise ValueError(
+            f"{source} has principal point ({cx:.3f}, {cy:.3f}) outside image size "
+            f"{width}x{height}. Use matching --camera_image_width/height or a scaled K."
+        )
 
 
 def _default_object_pose_wxyz(env_cfg) -> tuple[float, float, float, float, float, float, float]:
@@ -226,6 +250,23 @@ def _make_depth_msg(depth_m: np.ndarray, rospy, Image, *, frame_id: str):
     return msg
 
 
+def _make_rgb_msg(rgb: np.ndarray, rospy, Image, *, frame_id: str):
+    rgb = np.asarray(rgb)
+    if rgb.ndim != 3 or rgb.shape[2] < 3:
+        raise ValueError(f"Expected RGB image shape (H, W, >=3), got {rgb.shape}")
+    rgb = np.ascontiguousarray(rgb[..., :3].astype(np.uint8, copy=False))
+    msg = Image()
+    msg.header.stamp = rospy.Time.now()
+    msg.header.frame_id = frame_id
+    msg.height = int(rgb.shape[0])
+    msg.width = int(rgb.shape[1])
+    msg.encoding = "rgb8"
+    msg.is_bigendian = 0
+    msg.step = int(rgb.shape[1] * 3)
+    msg.data = rgb.tobytes()
+    return msg
+
+
 def _make_camera_info_msg(k: np.ndarray, height: int, width: int, rospy, CameraInfo, *, frame_id: str, stamp):
     msg = CameraInfo()
     msg.header.stamp = stamp
@@ -262,10 +303,18 @@ class IsaacDepthEnvNode:
         self.step_idx = 0
         self.depth_publish_count = 0
         self.physics_ms = deque(maxlen=512)
-        self.depth_ms = deque(maxlen=512)
+        self.camera_ms = deque(maxlen=512)
         self.loop_ms = deque(maxlen=512)
         self.last_status_time = time.time()
-        self.camera_k = _student_camera_k(inner.cfg.student_obs) if args.enable_depth else None
+        self.camera_k = None
+        if args.enable_depth or args.enable_rgb:
+            self.camera_k = _student_camera_k(inner.cfg.student_obs)
+            if args.camera_info_mode == "centered":
+                self.camera_k = _centered_camera_k(
+                    self.camera_k,
+                    width=int(inner.cfg.student_obs.image_width),
+                    height=int(inner.cfg.student_obs.image_height),
+                )
 
         self.env.reset()
         if getattr(args, "resolved_object_init_pose_wxyz", None) is not None:
@@ -281,17 +330,27 @@ class IsaacDepthEnvNode:
         self.iiwa_state_pub = None
         self.sharpa_state_pub = None
         self.depth_pub = None
+        self.rgb_pub = None
         self.camera_info_pub = None
         self.object_pose_pub = None
+        self.gt_object_pose_pub = None
         if ros is not None:
             ros.rospy.init_node("isaac_depth_env_node", anonymous=True)
             ros.rospy.Subscriber(args.iiwa_joint_cmd_topic, ros.JointState, self._iiwa_cmd_callback, queue_size=1)
             ros.rospy.Subscriber(args.sharpa_joint_cmd_topic, ros.JointState, self._sharpa_cmd_callback, queue_size=1)
             self.iiwa_state_pub = ros.rospy.Publisher(args.iiwa_joint_state_topic, ros.JointState, queue_size=1)
             self.sharpa_state_pub = ros.rospy.Publisher(args.sharpa_joint_state_topic, ros.JointState, queue_size=1)
-            self.object_pose_pub = ros.rospy.Publisher(args.object_pose_topic, ros.PoseStamped, queue_size=1)
+            if args.publish_object_pose:
+                self.object_pose_pub = ros.rospy.Publisher(args.object_pose_topic, ros.PoseStamped, queue_size=1)
+            if args.publish_gt_object_pose_debug:
+                self.gt_object_pose_pub = ros.rospy.Publisher(
+                    args.gt_object_pose_topic, ros.PoseStamped, queue_size=1
+                )
             if args.enable_depth and args.publish_depth:
                 self.depth_pub = ros.rospy.Publisher(args.depth_topic, ros.Image, queue_size=1)
+            if args.enable_rgb and args.publish_rgb:
+                self.rgb_pub = ros.rospy.Publisher(args.rgb_topic, ros.Image, queue_size=1)
+            if (args.enable_depth and args.publish_depth) or (args.enable_rgb and args.publish_rgb):
                 self.camera_info_pub = ros.rospy.Publisher(args.camera_info_topic, ros.CameraInfo, queue_size=1)
 
     def _iiwa_cmd_callback(self, msg) -> None:
@@ -382,9 +441,7 @@ class IsaacDepthEnvNode:
         sharpa_msg.velocity = qd[N_ARM:].tolist()
         self.sharpa_state_pub.publish(sharpa_msg)
 
-    def _publish_object_pose(self) -> None:
-        if self.ros is None or self.object_pose_pub is None:
-            return
+    def _make_object_pose_msg(self):
         from scipy.spatial.transform import Rotation as R
 
         ros = self.ros
@@ -406,14 +463,20 @@ class IsaacDepthEnvNode:
         msg.pose.orientation.y = float(quat_xyzw[1])
         msg.pose.orientation.z = float(quat_xyzw[2])
         msg.pose.orientation.w = float(quat_xyzw[3])
-        self.object_pose_pub.publish(msg)
+        return msg
+
+    def _publish_object_pose(self) -> None:
+        if self.ros is None or (self.object_pose_pub is None and self.gt_object_pose_pub is None):
+            return
+        msg = self._make_object_pose_msg()
+        if self.object_pose_pub is not None:
+            self.object_pose_pub.publish(msg)
+        if self.gt_object_pose_pub is not None:
+            self.gt_object_pose_pub.publish(msg)
 
     def _render_depth(self) -> np.ndarray:
-        from isaacsimenvs.tasks.simtoolreal.utils.scene_utils import read_student_camera_image
-
         if not self.args.enable_depth:
             raise RuntimeError("Depth rendering requested with --no-enable_depth")
-        read_student_camera_image(self.inner)
         source = str(self.args.published_depth_source).lower()
         if source == "raw":
             depth = self.inner._student_depth_raw_m[0, 0]
@@ -423,32 +486,54 @@ class IsaacDepthEnvNode:
             raise ValueError(f"Unsupported --published_depth_source={self.args.published_depth_source!r}")
         return _to_numpy(depth).astype(np.float32)
 
-    def _publish_depth_if_due(self) -> None:
-        if not self.args.enable_depth:
+    def _render_rgb(self) -> np.ndarray:
+        if not self.args.enable_rgb:
+            raise RuntimeError("RGB rendering requested with --no-enable_rgb")
+        rgb = self.inner.student_camera.data.output.get("rgb")
+        if rgb is None:
+            raise RuntimeError("Student camera has no RGB output. Check image_modality='rgb' or 'rgbd'.")
+        return _to_numpy(rgb[0, ..., :3]).astype(np.uint8)
+
+    def _publish_camera_if_due(self) -> None:
+        if not (self.args.enable_depth or self.args.enable_rgb):
             return
         if self.args.depth_publish_every_n <= 0:
             return
         if self.step_idx % self.args.depth_publish_every_n != 0:
             return
         t0 = time.perf_counter()
-        depth_m = self._render_depth()
-        self.depth_ms.append(1000.0 * (time.perf_counter() - t0))
+        from isaacsimenvs.tasks.simtoolreal.utils.scene_utils import read_student_camera_image
+
+        read_student_camera_image(self.inner)
+        depth_m = self._render_depth() if self.args.enable_depth else None
+        rgb = self._render_rgb() if self.args.enable_rgb else None
+        self.camera_ms.append(1000.0 * (time.perf_counter() - t0))
         self.depth_publish_count += 1
 
-        if self.ros is None or not self.args.publish_depth:
+        if self.ros is None:
             return
         ros = self.ros
-        msg = _make_depth_msg(depth_m, ros.rospy, ros.Image, frame_id=self.args.depth_frame_id)
-        self.depth_pub.publish(msg)
-        if self.camera_info_pub is not None and self.camera_k is not None:
+        stamp = None
+        height = width = None
+        if depth_m is not None and self.depth_pub is not None and self.args.publish_depth:
+            msg = _make_depth_msg(depth_m, ros.rospy, ros.Image, frame_id=self.args.depth_frame_id)
+            self.depth_pub.publish(msg)
+            stamp = msg.header.stamp
+            height, width = depth_m.shape[:2]
+        if rgb is not None and self.rgb_pub is not None and self.args.publish_rgb:
+            msg = _make_rgb_msg(rgb, ros.rospy, ros.Image, frame_id=self.args.depth_frame_id)
+            self.rgb_pub.publish(msg)
+            stamp = msg.header.stamp if stamp is None else stamp
+            height, width = rgb.shape[:2]
+        if self.camera_info_pub is not None and self.camera_k is not None and stamp is not None:
             info_msg = _make_camera_info_msg(
                 self.camera_k,
-                depth_m.shape[0],
-                depth_m.shape[1],
+                height,
+                width,
                 ros.rospy,
                 ros.CameraInfo,
                 frame_id=self.args.depth_frame_id,
-                stamp=msg.header.stamp,
+                stamp=stamp,
             )
             self.camera_info_pub.publish(info_msg)
 
@@ -462,8 +547,8 @@ class IsaacDepthEnvNode:
         q, _ = self._joint_state_canon()
         print(
             "[isaac_depth_env_node] "
-            f"step={self.step_idx} loop_hz_med={loop_hz:.1f} depth_pub_hz_avg={depth_hz:.1f} "
-            f"physics_ms={_fmt_stats(self.physics_ms)} depth_ms={_fmt_stats(self.depth_ms)} "
+            f"step={self.step_idx} loop_hz_med={loop_hz:.1f} camera_pub_hz_avg={depth_hz:.1f} "
+            f"physics_ms={_fmt_stats(self.physics_ms)} camera_ms={_fmt_stats(self.camera_ms)} "
             f"loop_ms={_fmt_stats(self.loop_ms)} q_abs_max={float(np.abs(q).max()):.3f}",
             flush=True,
         )
@@ -477,12 +562,12 @@ class IsaacDepthEnvNode:
         self.physics_ms.append(1000.0 * (time.perf_counter() - t0))
         self._publish_joint_states()
         self._publish_object_pose()
-        self._publish_depth_if_due()
+        self._publish_camera_if_due()
         self.loop_ms.append(1000.0 * (time.perf_counter() - t_loop))
         self.step_idx += 1
         if self.args.benchmark_warmup_steps > 0 and self.step_idx == self.args.benchmark_warmup_steps:
             self.physics_ms.clear()
-            self.depth_ms.clear()
+            self.camera_ms.clear()
             self.loop_ms.clear()
             self.depth_publish_count = 0
             self.start_time = time.time()
@@ -537,8 +622,54 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--realtime", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--enable_depth", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--publish_depth", action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument(
+        "--enable_rgb",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Enable RGB rendering from the same student camera as depth.",
+    )
+    parser.add_argument(
+        "--publish_rgb",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Publish RGB Image messages when --enable_rgb is set.",
+    )
     parser.add_argument("--depth_publish_every_n", type=int, default=1)
     parser.add_argument("--student_camera_preset", default="default")
+    parser.add_argument(
+        "--camera_image_width",
+        type=int,
+        default=None,
+        help="Override rendered camera image width for deployment/debug capture.",
+    )
+    parser.add_argument(
+        "--camera_image_height",
+        type=int,
+        default=None,
+        help="Override rendered camera image height for deployment/debug capture.",
+    )
+    parser.add_argument(
+        "--camera_k_file",
+        type=Path,
+        default=None,
+        help="Optional 3x3 pinhole intrinsics text file matching the rendered image size.",
+    )
+    parser.add_argument(
+        "--camera_intrinsic_matrix",
+        type=float,
+        nargs=9,
+        default=None,
+        help="Optional row-major 3x3 pinhole intrinsics matching the rendered image size.",
+    )
+    parser.add_argument(
+        "--camera_info_mode",
+        choices=("requested", "centered"),
+        default="requested",
+        help=(
+            "requested publishes the configured K. centered keeps fx/fy but centers cx/cy, "
+            "matching Omniverse behavior when aperture offsets are ignored."
+        ),
+    )
     parser.add_argument("--depth_noise_profile", default="off")
     parser.add_argument("--depth_noise_strength", type=float, default=None)
     parser.add_argument(
@@ -614,6 +745,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--status_interval_s", type=float, default=2.0)
     parser.add_argument("--depth_topic", default=DEPTH_TOPIC)
+    parser.add_argument("--rgb_topic", default=RGB_TOPIC)
     parser.add_argument("--camera_info_topic", default=CAMERA_INFO_TOPIC)
     parser.add_argument("--depth_frame_id", default="isaacsim_student_camera")
     parser.add_argument("--iiwa_joint_state_topic", default=IIWA_JOINT_STATE_TOPIC)
@@ -621,15 +753,32 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--iiwa_joint_cmd_topic", default=IIWA_JOINT_CMD_TOPIC)
     parser.add_argument("--sharpa_joint_cmd_topic", default=SHARPA_JOINT_CMD_TOPIC)
     parser.add_argument("--object_pose_topic", default=OBJECT_POSE_TOPIC)
+    parser.add_argument(
+        "--publish_object_pose",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Publish Isaac ground-truth object pose on --object_pose_topic.",
+    )
+    parser.add_argument("--gt_object_pose_topic", default=ISAAC_GT_OBJECT_POSE_TOPIC)
+    parser.add_argument(
+        "--publish_gt_object_pose_debug",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help=(
+            "Also publish Isaac ground-truth object pose on --gt_object_pose_topic. "
+            "Use with --no-publish_object_pose when FoundationPose owns /robot_frame/current_object_pose."
+        ),
+    )
 
     from isaaclab.app import AppLauncher
 
     AppLauncher.add_app_launcher_args(parser)
     args = parser.parse_args()
-    args.enable_cameras = bool(args.enable_depth)
+    args.enable_cameras = bool(args.enable_depth or args.enable_rgb)
     if args.benchmark:
         args.realtime = False
         args.publish_depth = False
+        args.publish_rgb = False
     return args
 
 
@@ -647,7 +796,15 @@ def main() -> None:
 
         env_cfg = _load_env_cfg(args.task, args.teacher_config, args.num_envs, args.sim_device)
         env_cfg.scene.num_envs = int(args.num_envs)
-        env_cfg.student_obs.image_enabled = bool(args.enable_depth)
+        camera_enabled = bool(args.enable_depth or args.enable_rgb)
+        env_cfg.student_obs.image_enabled = camera_enabled
+        if camera_enabled:
+            if args.enable_depth and args.enable_rgb:
+                env_cfg.student_obs.image_modality = "rgbd"
+            elif args.enable_rgb:
+                env_cfg.student_obs.image_modality = "rgb"
+            else:
+                env_cfg.student_obs.image_modality = "depth"
         if args.deployment_mode and args.zero_training_randomization:
             _zero_training_randomization(env_cfg)
         if args.deployment_mode and args.disable_env_resets:
@@ -661,6 +818,39 @@ def main() -> None:
             env_cfg.reset.reset_dof_pos_random_interval_fingers = 0.0
             env_cfg.reset.reset_dof_vel_random_interval = 0.0
         _apply_student_camera_preset(env_cfg, args.student_camera_preset)
+        if args.camera_image_width is not None:
+            env_cfg.student_obs.image_width = int(args.camera_image_width)
+            env_cfg.student_obs.image_input_width = int(args.camera_image_width)
+        if args.camera_image_height is not None:
+            env_cfg.student_obs.image_height = int(args.camera_image_height)
+            env_cfg.student_obs.image_input_height = int(args.camera_image_height)
+        if args.camera_image_width is not None or args.camera_image_height is not None:
+            env_cfg.student_obs.crop_enabled = False
+            env_cfg.student_obs.crop_top_left = (0, 0)
+            env_cfg.student_obs.crop_bottom_right = (
+                int(env_cfg.student_obs.image_width),
+                int(env_cfg.student_obs.image_height),
+            )
+        if args.camera_k_file is not None and args.camera_intrinsic_matrix is not None:
+            raise ValueError("Use only one of --camera_k_file or --camera_intrinsic_matrix.")
+        if args.camera_k_file is not None:
+            k = np.loadtxt(args.camera_k_file, dtype=np.float32).reshape(3, 3)
+            _validate_camera_k_for_image(
+                k,
+                width=int(env_cfg.student_obs.image_width),
+                height=int(env_cfg.student_obs.image_height),
+                source=str(args.camera_k_file),
+            )
+            env_cfg.student_obs.camera_intrinsic_matrix = tuple(float(v) for v in k.reshape(-1))
+        if args.camera_intrinsic_matrix is not None:
+            k = np.asarray(args.camera_intrinsic_matrix, dtype=np.float32).reshape(3, 3)
+            _validate_camera_k_for_image(
+                k,
+                width=int(env_cfg.student_obs.image_width),
+                height=int(env_cfg.student_obs.image_height),
+                source="--camera_intrinsic_matrix",
+            )
+            env_cfg.student_obs.camera_intrinsic_matrix = tuple(float(v) for v in k.reshape(-1))
         env_cfg.student_obs.depth_noise_profile = args.depth_noise_profile
         if args.depth_noise_strength is not None:
             env_cfg.student_obs.depth_noise_strength = float(args.depth_noise_strength)
@@ -691,6 +881,9 @@ def main() -> None:
                 f"zero_training_randomization={args.zero_training_randomization} "
                 f"initial_robot_pose={args.initial_robot_pose} "
                 f"object_init={object_pose_note} "
+                f"enable_depth={args.enable_depth} "
+                f"enable_rgb={args.enable_rgb} "
+                f"camera_info_mode={args.camera_info_mode} "
                 f"depth_noise_profile={env_cfg.student_obs.depth_noise_profile} "
                 f"published_depth_source={args.published_depth_source} "
                 f"camera_rand={env_cfg.student_obs.camera_pose_randomization_profile} "

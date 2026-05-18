@@ -93,6 +93,7 @@ intrinsics.
 
 35. `35_depth_debug_visualization_with_depth.sh`
     Runs the listener-only Viser visualization with live raw depth plus normalized policy-depth frustums. Set `LOAD_POINT_CLOUD=1` to also show a point cloud when CameraInfo is available, or `LOAD_POLICY_DEPTH_IMAGE=0` to hide the student-policy input frustums.
+    Set `PREDICTED_OBJECT_POSE_TOPIC=/robot_frame/isaac_gt_object_pose` during FoundationPose tests to show Isaac GT as the light-blue comparison object while `/robot_frame/current_object_pose` comes from FoundationPose.
 
 36. `36_home_robot_local.sh`
     Runs `deployment/home_robot.py` in the localhost-only debug ROS environment. This publishes `/iiwa/joint_cmd` and `/sharpa/joint_cmd`, so only use it with the fake robot unless you intentionally override the ROS environment for hardware.
@@ -130,6 +131,18 @@ intrinsics.
 
 47. `47_isaac_depth_ros_heavy_noise_no_camrand.sh`
     Strong/obvious metric depth noise with fixed nominal student-camera pose. Publishes the noisy metric depth.
+
+90. `90_isaac_pose_only_gt_teacher_source.sh`
+    IsaacSim/IsaacLab source for teacher-policy baseline tests. It publishes simulated joint states and Isaac ground-truth object pose on `/robot_frame/current_object_pose`, with RGB/depth rendering disabled.
+
+91. `91_isaac_rgbd_foundationpose_source.sh`
+    IsaacSim/IsaacLab RGB-D source for FoundationPose tests. It publishes RGB, metric depth, CameraInfo, joint states, and Isaac GT pose on `/robot_frame/isaac_gt_object_pose`, but deliberately does not publish `/robot_frame/current_object_pose`.
+
+92. `92_foundationpose_ros_topic_tracker.sh`
+    Runs FoundationPose from ROS RGB-D topics and publishes `/robot_frame/current_object_pose` for `rl_policy_node.py`. It uses the existing `foundationpose` conda env and does not require `pyzed.sl`.
+
+93. `93_rl_teacher_policy_node.sh`
+    Generic `deployment/rl_policy_node.py` entrypoint. It consumes `/robot_frame/current_object_pose` from either script 90 directly or script 92.
 
 Recommended student-policy test order:
 
@@ -202,6 +215,21 @@ IsaacSim-backed fake-real pipeline:
 5. Terminal E, if you want the student to drive IsaacSim: `RUN_DURATION_S=30 PUBLISH_DURATION_S=10 bash_scripts/34_depth_debug_student_ros_topic_publish_3s.sh`
 
 Swap Terminal B for scripts 43, 44, 45, 46, or 47 to isolate whether performance changes are caused by depth noise, camera-pose randomization, or both. The wrappers default to `DEPTH_EVERY_N=2`; override it if you want a different simulated camera rate.
+
+FoundationPose teacher-pose pipeline:
+
+1. Terminal A: `bash_scripts/30_depth_debug_roscore_local.sh`
+2. Terminal B baseline GT source: `bash_scripts/90_isaac_pose_only_gt_teacher_source.sh`
+3. Terminal C baseline teacher: `POLICY_PATH=<teacher_policy_dir> OBJECT_NAME=<matching_object> bash_scripts/93_rl_teacher_policy_node.sh`
+
+FoundationPose-estimated pose variant:
+
+1. Terminal A: `bash_scripts/30_depth_debug_roscore_local.sh`
+2. Terminal B RGB-D source: `bash_scripts/91_isaac_rgbd_foundationpose_source.sh`
+3. Terminal C FP tracker: `bash_scripts/92_foundationpose_ros_topic_tracker.sh`
+4. Terminal D teacher: `POLICY_PATH=<teacher_policy_dir> OBJECT_NAME=<matching_object> bash_scripts/93_rl_teacher_policy_node.sh`
+
+Scripts 90/91 default to the peg-in-hole IsaacLab task and L peg. If testing a different teacher, set `TASK`, `TEACHER_CONFIG`, and `PEG_URDF=""` or another task-appropriate object override so the simulated object/task matches the teacher policy. For script 91, the default image size is `960x540` and `CAMERA_K_FILE` points at the Jan 17 `cam_K.txt`. Omniverse currently warns that principal-point aperture offsets are not supported, so script 91 defaults `CAMERA_INFO_MODE=centered` to keep published CameraInfo consistent with the rendered image. Set `CAMERA_INFO_MODE=requested` only when intentionally testing the requested real ZED K despite that render limitation.
 
 Benchmark render frequency before running the full loop:
 
