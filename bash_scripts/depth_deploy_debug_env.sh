@@ -22,6 +22,7 @@ export ROS_MASTER_URI="http://127.0.0.1:11311"
 export ROS_IP="127.0.0.1"
 unset ROS_HOSTNAME
 export LD_LIBRARY_PATH="${LD_LIBRARY_PATH:-}:${CONDA_PREFIX}/lib"
+export PYTHONPATH="${REPO_ROOT}:${REPO_ROOT}/deployment:${PYTHONPATH:-}"
 
 echo "[depth_deploy_debug_env] repo=${REPO_ROOT}"
 echo "[depth_deploy_debug_env] conda=${CONDA_DEFAULT_ENV} python=$(command -v python)"
