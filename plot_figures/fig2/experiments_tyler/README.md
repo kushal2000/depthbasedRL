@@ -69,13 +69,14 @@ CHECKPOINT_FAMILY=TrainingObjective CHECKPOINT_TAG=TranslationOnly
 Run exactly one tiny sanity job first:
 
 ```bash
-NUM_ENVS=256 MINIBATCH_SIZE=2048 MAX_ITERATIONS=2 \
+NUM_ENVS=1536 MINIBATCH_SIZE=2048 MAX_ITERATIONS=2 \
 TASK_TAG=lpeg_tol0p5mm CHECKPOINT_FAMILY=ObjectDiversity CHECKPOINT_TAG=1_obj \
 sbatch --time=1:00:00 plot_figures/fig2/experiments_tyler/panel_a_tyler_finetune.sub
 ```
 
-For small `NUM_ENVS`, the runner automatically reduces
-`EXPL_COEF_BLOCK_SIZE` so rl_games' divisibility check still passes.
+For small sanity jobs, use a `NUM_ENVS` divisible by 6. The runner chooses
+`EXPL_COEF_BLOCK_SIZE=NUM_ENVS/6` so the SAPG network still has the same six
+coefficient blocks as the checkpoints and full panel-a runs.
 
 Monitor:
 
@@ -89,7 +90,7 @@ three task sanity checks:
 
 ```bash
 for task in beam_3x_part_0 beam_3x_part_2 furniture_bench_one_leg; do
-  NUM_ENVS=256 MINIBATCH_SIZE=2048 MAX_ITERATIONS=2 \
+  NUM_ENVS=1536 MINIBATCH_SIZE=2048 MAX_ITERATIONS=2 \
   TASK_TAG="$task" CHECKPOINT_FAMILY=ObjectDiversity CHECKPOINT_TAG=1_obj \
   sbatch --time=1:00:00 plot_figures/fig2/experiments_tyler/panel_a_tyler_finetune.sub
 done

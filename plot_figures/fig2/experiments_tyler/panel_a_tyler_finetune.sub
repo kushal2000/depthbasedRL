@@ -35,8 +35,10 @@ MINIBATCH_SIZE="${MINIBATCH_SIZE:-98304}"
 MAX_ITERATIONS="${MAX_ITERATIONS:-10000000}"
 SEED="${SEED:-0}"
 if [[ -z "${EXPL_COEF_BLOCK_SIZE:-}" ]]; then
-    if (( NUM_ENVS < 2048 )); then
-        EXPL_COEF_BLOCK_SIZE="$NUM_ENVS"
+    if (( NUM_ENVS % 6 == 0 )); then
+        # Keep the SAPG architecture compatible with the ObjectDiversity
+        # checkpoints, which have six learned coefficient blocks.
+        EXPL_COEF_BLOCK_SIZE="$((NUM_ENVS / 6))"
     else
         EXPL_COEF_BLOCK_SIZE="2048"
     fi
