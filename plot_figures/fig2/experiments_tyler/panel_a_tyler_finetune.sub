@@ -4,7 +4,7 @@
 #SBATCH --cpus-per-task=12
 #SBATCH --get-user-env
 #SBATCH --mem=90000
-#SBATCH -t 2-00:00:00
+#SBATCH -t 1-00:00:00
 #SBATCH --partition=move
 #SBATCH --nodelist=move5
 #SBATCH --gres=gpu:1
@@ -13,7 +13,7 @@
 
 # Tyler-local Fig 2 panel-a teacher finetune launcher.
 #
-# Defaults target move5 / RTX PRO 6000 with the RTX-specific clone/env.
+# Defaults target move5 / RTX PRO 6000 with the normal clone and RTX-specific env.
 # Override Slurm placement with sbatch flags and override experiment settings
 # with --export or environment variables.
 
@@ -115,10 +115,8 @@ esac
 HOSTNAME_SHORT="$(hostname -s || true)"
 DEFAULT_REPO_ROOT="/move/u/tylerlum/github_repos/depthbasedRL"
 DEFAULT_ISAACSIM_ENV_DIR="${DEFAULT_REPO_ROOT}/.venv-isaacsim-py311"
-RTX_REPO_ROOT="/move/u/tylerlum/github_repos/depthbasedRL_rtx6000"
-RTX_ISAACSIM_ENV_DIR="${RTX_REPO_ROOT}/.venv-isaacsim-rtx6000-cu128-py311"
+RTX_ISAACSIM_ENV_DIR="/move/u/tylerlum/github_repos/depthbasedRL_rtx6000/.venv-isaacsim-rtx6000-cu128-py311"
 if [[ "$HOSTNAME_SHORT" == move5* && -x "${RTX_ISAACSIM_ENV_DIR}/bin/python" ]]; then
-    DEFAULT_REPO_ROOT="$RTX_REPO_ROOT"
     DEFAULT_ISAACSIM_ENV_DIR="$RTX_ISAACSIM_ENV_DIR"
 fi
 REPO_ROOT="${REPO_ROOT:-$DEFAULT_REPO_ROOT}"

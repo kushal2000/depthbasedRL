@@ -15,7 +15,7 @@ plot_figures/fig2/experiments_tyler/panel_a_tyler_finetune.sub
 The runner defaults to `move5` RTX PRO 6000 with:
 
 ```text
-REPO_ROOT=/move/u/tylerlum/github_repos/depthbasedRL_rtx6000
+REPO_ROOT=/move/u/tylerlum/github_repos/depthbasedRL
 ISAACSIM_ENV_DIR=/move/u/tylerlum/github_repos/depthbasedRL_rtx6000/.venv-isaacsim-rtx6000-cu128-py311
 WANDB_ENTITY=tylerlum
 WANDB_PROJECT=fig2
@@ -77,7 +77,7 @@ Monitor:
 
 ```bash
 squeue -u tylerlum -o "%.18i %.9P %.30j %.8u %.2t %.10M %.10l %.12R"
-tail -f /move/u/tylerlum/github_repos/depthbasedRL_rtx6000/train_dir/fig2/panel_a_teachers_tyler_object_diversity/*/slurm.log
+tail -f /move/u/tylerlum/github_repos/depthbasedRL/train_dir/fig2/panel_a_teachers_tyler_object_diversity/*/slurm.log
 ```
 
 Only after the first sanity job reaches training iterations, run the other
@@ -93,28 +93,20 @@ done
 
 ## First Full Comparison
 
-After all task sanity checks pass, launch only `1_obj` vs `1000_obj` across all
-four tasks. Full jobs use 48 h walltime and high `MAX_ITERATIONS` so they should
-stop by walltime, not by iteration count.
+After all task sanity checks pass, launch all 16 ObjectDiversity jobs. Full jobs
+use 24 h walltime and high `MAX_ITERATIONS` so they should stop by walltime, not
+by iteration count.
 
 ```bash
-for task in lpeg_tol0p5mm beam_3x_part_0 beam_3x_part_2 furniture_bench_one_leg; do
-  for ckpt in 1_obj 1000_obj; do
-    TASK_TAG="$task" CHECKPOINT_FAMILY=ObjectDiversity CHECKPOINT_TAG="$ckpt" \
-    sbatch plot_figures/fig2/experiments_tyler/panel_a_tyler_finetune.sub
-  done
-done
+bash plot_figures/fig2/experiments_tyler/submit_object_diversity_16.sh
 ```
 
-If those jobs are stable, launch `10_obj` and `100_obj` later:
+The submission helper places jobs as:
 
-```bash
-for task in lpeg_tol0p5mm beam_3x_part_0 beam_3x_part_2 furniture_bench_one_leg; do
-  for ckpt in 10_obj 100_obj; do
-    TASK_TAG="$task" CHECKPOINT_FAMILY=ObjectDiversity CHECKPOINT_TAG="$ckpt" \
-    sbatch plot_figures/fig2/experiments_tyler/panel_a_tyler_finetune.sub
-  done
-done
+```text
+7 jobs on move5 RTX PRO 6000, leaving 1 GPU free.
+3 jobs on move4 L40S, leaving several GPUs free.
+6 jobs on juno2 A5000: first 2 on juno, remaining 4 on juno-lo.
 ```
 
 Do not launch the TrainingObjective sweep until the ObjectDiversity jobs are
