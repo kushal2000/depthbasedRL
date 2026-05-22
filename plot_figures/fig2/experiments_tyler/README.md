@@ -15,6 +15,7 @@ plot_figures/fig2/experiments_tyler/panel_a_tyler_finetune.sub
 The runner defaults to `move5` RTX PRO 6000 with:
 
 ```text
+SLURM account/partition/node = move / move / move5
 REPO_ROOT=/move/u/tylerlum/github_repos/depthbasedRL
 ISAACSIM_ENV_DIR=/move/u/tylerlum/github_repos/depthbasedRL_rtx6000/.venv-isaacsim-rtx6000-cu128-py311
 WANDB_ENTITY=tylerlum
@@ -107,6 +108,7 @@ The submission helper places jobs as:
 7 jobs on move5 RTX PRO 6000, leaving 1 GPU free.
 3 jobs on move4 L40S, leaving several GPUs free.
 6 jobs on juno2 A5000: first 2 on juno, remaining 4 on juno-lo.
+All submissions pass the required Slurm account explicitly: move or juno.
 ```
 
 Do not launch the TrainingObjective sweep until the ObjectDiversity jobs are

@@ -27,20 +27,23 @@ submit_one() {
   local idx="$1"
   local task="$2"
   local ckpt="$3"
-  local partition nodelist mem repo env
+  local account partition nodelist mem repo env
 
   repo="/move/u/tylerlum/github_repos/depthbasedRL"
   if (( idx < 7 )); then
+    account="move"
     partition="move"
     nodelist="move5"
     mem="90000"
     env="/move/u/tylerlum/github_repos/depthbasedRL_rtx6000/.venv-isaacsim-rtx6000-cu128-py311"
   elif (( idx < 10 )); then
+    account="move"
     partition="move"
     nodelist="move4"
     mem="100000"
     env="/move/u/tylerlum/github_repos/depthbasedRL/.venv-isaacsim-py311"
   else
+    account="juno"
     if (( idx < 12 )); then
       partition="juno"
     else
@@ -51,13 +54,13 @@ submit_one() {
     env="/move/u/tylerlum/github_repos/depthbasedRL/.venv-isaacsim-py311"
   fi
 
-  echo "[$idx] task=${task} checkpoint=${ckpt} partition=${partition} node=${nodelist} mem=${mem}"
+  echo "[$idx] task=${task} checkpoint=${ckpt} account=${account} partition=${partition} node=${nodelist} mem=${mem}"
   TASK_TAG="$task" \
   CHECKPOINT_FAMILY="ObjectDiversity" \
   CHECKPOINT_TAG="$ckpt" \
   REPO_ROOT="$repo" \
   ISAACSIM_ENV_DIR="$env" \
-  sbatch --partition="$partition" --nodelist="$nodelist" --mem="$mem" "$JOB_SCRIPT"
+  sbatch --account="$account" --partition="$partition" --nodelist="$nodelist" --mem="$mem" "$JOB_SCRIPT"
 }
 
 idx=0
