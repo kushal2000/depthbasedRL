@@ -34,7 +34,13 @@ NUM_ENVS="${NUM_ENVS:-12288}"
 MINIBATCH_SIZE="${MINIBATCH_SIZE:-98304}"
 MAX_ITERATIONS="${MAX_ITERATIONS:-10000000}"
 SEED="${SEED:-0}"
-EXPL_COEF_BLOCK_SIZE="${EXPL_COEF_BLOCK_SIZE:-2048}"
+if [[ -z "${EXPL_COEF_BLOCK_SIZE:-}" ]]; then
+    if (( NUM_ENVS < 2048 )); then
+        EXPL_COEF_BLOCK_SIZE="$NUM_ENVS"
+    else
+        EXPL_COEF_BLOCK_SIZE="2048"
+    fi
+fi
 
 # Common peg-in-hole goal/tolerance knobs. Task presets below override the few
 # values that differ for FurnitureBench.

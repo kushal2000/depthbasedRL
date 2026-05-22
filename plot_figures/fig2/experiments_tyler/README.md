@@ -74,6 +74,9 @@ TASK_TAG=lpeg_tol0p5mm CHECKPOINT_FAMILY=ObjectDiversity CHECKPOINT_TAG=1_obj \
 sbatch --time=1:00:00 plot_figures/fig2/experiments_tyler/panel_a_tyler_finetune.sub
 ```
 
+For small `NUM_ENVS`, the runner automatically reduces
+`EXPL_COEF_BLOCK_SIZE` so rl_games' divisibility check still passes.
+
 Monitor:
 
 ```bash
