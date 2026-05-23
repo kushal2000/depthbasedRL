@@ -23,6 +23,17 @@ All jobs use `CHECKPOINT_FAMILY=ObjectDiversity`, `SEED=2`, `--checkpoint_load_m
 
 The first L-peg `1_obj` job used normal `juno`; the remaining three L-peg jobs were resubmitted to `juno-lo` after `juno` hit `QOSMaxGRESPerUser`.
 
+## Follow-Up Fix
+
+The initial full-scale move3 A5000 beam part-0 jobs `15535764`-`15535767` failed with CUDA OOM after environment setup. They were replaced by half-scale A5000 jobs with `NUM_ENVS=6144`, `MINIBATCH_SIZE=49152`, and auto `EXPL_COEF_BLOCK_SIZE=1024`:
+
+| Job ID | Task | Checkpoint | Node | Partition | Memory |
+| --- | --- | --- | --- | --- | --- |
+| 15535834 | `beam_3x_part_0_finetune_rgf0_dr_seed2_a5000_halfenv` | `1_obj` | `move3` | `move` | 90 GB |
+| 15535835 | `beam_3x_part_0_finetune_rgf0_dr_seed2_a5000_halfenv` | `10_obj` | `move3` | `move` | 90 GB |
+| 15535836 | `beam_3x_part_0_finetune_rgf0_dr_seed2_a5000_halfenv` | `100_obj` | `move3` | `move` | 90 GB |
+| 15535837 | `beam_3x_part_0_finetune_rgf0_dr_seed2_a5000_halfenv` | `1000_obj` | `move3` | `move` | 90 GB |
+
 Run directories are under:
 
 ```text
