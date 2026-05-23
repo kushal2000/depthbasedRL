@@ -88,6 +88,54 @@ def _one_leg_semi_dense_insert_waypoints(final_pose):
     return _one_leg_screw_insert_waypoints(final_pose, turns=(1.0, 0.5))
 
 
+def _one_leg_flat_dense_insert_waypoints(
+    final_pose, pre_insert_above_15t_m: float = 0.005
+):
+    """Waypoint sequence tuned for the flat receiver variant.
+
+    Differs from `super_dense`:
+      - Drops the 2.0-turn waypoint (with a continuous flat surface
+        around the hole, the leg doesn't need a starting waypoint that
+        far above the assembled pose).
+      - The pre-insert / lead-in pose is positioned at the 1.5-turn
+        height plus a small ``pre_insert_above_15t_m`` margin (default
+        5 mm), with the SAME orientation as the 1.5T screw waypoint
+        (i.e. pre-rotated +540° from final) so the policy can transition
+        from pre_insert straight into screwing without a sudden rotation.
+
+    Order: [pre_insert, 1.5T, 1.25T, 1.0T, 0.75T, 0.5T, 0.25T, final].
+    """
+    final_pose = tuple(float(v) for v in final_pose)
+    final_pos = np.asarray(final_pose[:3], dtype=float)
+    final_quat = np.asarray(final_pose[3:7], dtype=float)
+    final_rot = R.from_quat(final_quat)
+    insertion_dir = np.asarray((0.0, 0.0, -1.0), dtype=float)
+
+    # Orientation pre-rotated by +1.5 turns from final, shared by both the
+    # pre_insert waypoint and the 1.5T screw waypoint.
+    first_turn_quat = (R.from_euler("z", 360.0 * 1.5, degrees=True) * final_rot).as_quat()
+    if float(np.dot(first_turn_quat, final_quat)) < 0.0:
+        first_turn_quat = -first_turn_quat
+
+    waypoints = []
+    # Pre-insert: 1.5T height + margin, oriented same as the 1.5T waypoint.
+    pre_insert_backoff = 1.5 * ONE_LEG_THREAD_PITCH_M + float(pre_insert_above_15t_m)
+    pre_insert_pos = final_pos - insertion_dir * pre_insert_backoff
+    waypoints.append((*pre_insert_pos.tolist(), *first_turn_quat.tolist()))
+
+    # Super-dense screw waypoints from 1.5 down to 0.25 (0.25-turn step).
+    for turn in (1.5, 1.25, 1.0, 0.75, 0.5, 0.25):
+        backoff = float(turn) * ONE_LEG_THREAD_PITCH_M
+        pos = final_pos - insertion_dir * backoff
+        quat = (R.from_euler("z", 360.0 * float(turn), degrees=True) * final_rot).as_quat()
+        if float(np.dot(quat, final_quat)) < 0.0:
+            quat = -quat
+        waypoints.append((*pos.tolist(), *quat.tolist()))
+
+    waypoints.append(final_pose)
+    return tuple(waypoints)
+
+
 def _register_problem_variant(
     *,
     name: str,
@@ -292,6 +340,34 @@ def _register_one_leg(
             hole_z_offset=hole_z_offset,
             prelude_lift_offset=0.20,
         )
+        # Flat receiver variant: same matched-mass inserter, but the
+        # receptive is a 45 mm-diameter cylindrical boss around the active
+        # hole (no rim walls / floor slab / inactive cylinders). Useful for
+        # studying slide-into-hole behavior with a continuous flat surface.
+        flat_recv = (
+            _ASSETS_FB / piece / "insertion_fixtures"
+            / "one_leg_sdf_hybrid_flat.urdf"
+        )
+        if flat_recv.is_file():
+            flat_recv_rel = flat_recv.relative_to(_REPO_ROOT / "assets").as_posix()
+            _register_problem_variant(
+                name=f"{matched_sdfh_base}_flat",
+                insertion_object_name=matched_sdfh_key,
+                receptive_urdf=flat_recv_rel,
+                insert_poses=sparse_waypoints,
+                hole_z_offset=hole_z_offset,
+            )
+            # Flat + custom dense screw waypoints: pre-insert at 1.5T + 5 mm
+            # with final orientation, then super-dense (every 0.25T) from
+            # 1.5T down to 0.25T, then final. No 2.0T waypoint.
+            flat_dense_waypoints = _one_leg_flat_dense_insert_waypoints(final_pose)
+            _register_problem_variant(
+                name=f"{matched_sdfh_base}_flat_dense",
+                insertion_object_name=matched_sdfh_key,
+                receptive_urdf=flat_recv_rel,
+                insert_poses=flat_dense_waypoints,
+                hole_z_offset=hole_z_offset,
+            )
 
 
 _register_one_leg()
