@@ -62,6 +62,9 @@ TOLERANCES_MM = [
     # Real-world 3D-print grid extension: 0.05 and 0.25 mm complete the
     # {0.05, 0.1, 0.25, 0.5, 1, 5, 10, 20} mm set sent to the printer.
     0.05, 0.25,
+    # Finer print-grid additions between 0.1 and 0.25 mm — gives the
+    # tight-tolerance regime a denser sweep for real-world testing.
+    0.15, 0.2,
 ]
 
 PEG_COLOR = (204, 40, 40)
