@@ -16,6 +16,7 @@ REPO = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO / "plot_figures" / "fig2"))
 
 from make_lpeg_seed_plots import (  # noqa: E402
+    Curve,
     DEFAULT_DATA_DIR,
     DEFAULT_OUT_DIR,
     DISPLAY,
@@ -29,7 +30,7 @@ from make_lpeg_seed_plots import (  # noqa: E402
 )
 
 sys.path.insert(0, str(REPO / "plot_figures"))
-from _style import configure_rcparams, style_axis  # noqa: E402
+from _style import STYLES, configure_rcparams, style_axis  # noqa: E402
 
 
 METRIC = "episode_final/feasible_normalized_all_goals_hit"
@@ -46,6 +47,20 @@ CHECKPOINT_SEED_FILTERS = {
     ("ObjectDiversityPlay2Win", "100_obj"): {0, 2, 3},
     ("ObjectDiversityPlay2Win", "10_obj"): {0, 2, 3},
     ("ObjectDiversityPlay2Win", "1_obj"): {0, 2, 3},
+}
+DUMMY_STANDALONE_SPECS = {
+    "DummySuccessTolerance": (
+        ("Success tolerance = 1 cm (Ours)", "#2C7BB6", "play2win"),
+        ("5 mm", STYLES["RotationOnly"][0], "zero"),
+        ("2 mm", STYLES["SingleGoal"][0], "zero"),
+        ("1 mm", "#E08214", "zero"),
+    ),
+    "DummyNumTrajectories": (
+        ("Infinite trajectories (Ours)", "#2C7BB6", "play2win"),
+        ("100 trajectories", STYLES["RotationOnly"][0], "zero"),
+        ("10 trajectories", STYLES["SingleGoal"][0], "zero"),
+        ("Random", "#E08214", "zero"),
+    ),
 }
 
 ROW_TITLES = {
@@ -105,6 +120,41 @@ def _iter_curves(family_data: dict, family: str) -> list[tuple[str, str, str, li
                 curves.append(curve)
         if curves:
             grouped.append((checkpoint, display["checkpoint_labels"][checkpoint], display["colors"][checkpoint], curves))
+    return grouped
+
+
+def _zero_curves_like(label: str, curves: list[Curve]) -> list[Curve]:
+    return [
+        Curve(
+            seed=curve.seed,
+            x=curve.x.copy(),
+            y=np.zeros_like(curve.y),
+            run_dir=f"dummy_zero/{label}/seed_{curve.seed}",
+        )
+        for curve in curves
+    ]
+
+
+def _dummy_grouped_from_play2win(family: str) -> list[tuple[str, str, str, list]]:
+    objective_data = _load_family(DEFAULT_DATA_DIR, "TrainingObjective")
+    objective_grouped = _iter_curves(objective_data, "TrainingObjective")
+    play2win_curves = None
+    for checkpoint, _label, _color, curves in objective_grouped:
+        if checkpoint == "Play2Win":
+            play2win_curves = curves
+            break
+    if play2win_curves is None:
+        raise RuntimeError("Could not find Play2Win curves for dummy standalone plot.")
+
+    grouped = []
+    for idx, (label, color, source) in enumerate(DUMMY_STANDALONE_SPECS[family]):
+        if source == "play2win":
+            curves = play2win_curves
+        elif source == "zero":
+            curves = _zero_curves_like(label, play2win_curves)
+        else:
+            raise ValueError(f"Unexpected dummy source: {source}")
+        grouped.append((f"{family}_{idx}", label, color, curves))
     return grouped
 
 
@@ -211,6 +261,10 @@ def _standalone_summary_name(family: str) -> str:
         return "lpeg_middle_right_objectdiversity_1000obj_mean_std_clean_3B.png"
     if family == "ObjectDiversityPlay2Win":
         return "lpeg_bottom_right_objectdiversity_play2perfect_mean_std_clean_3B.png"
+    if family == "DummySuccessTolerance":
+        return "lpeg_dummy_success_tolerance_mean_std_clean_3B.png"
+    if family == "DummyNumTrajectories":
+        return "lpeg_dummy_num_trajectories_mean_std_clean_3B.png"
     raise ValueError(f"Unexpected family: {family}")
 
 
@@ -268,6 +322,9 @@ def main() -> None:
         _plot_summary(axes[row_idx, 1], grouped, show_seed_traces=True, draw_legend=False)
         _plot_summary(axes[row_idx, 2], grouped, show_seed_traces=False, draw_legend=False)
         _save_standalone_clean_summary(family, grouped)
+
+    for family in DUMMY_STANDALONE_SPECS:
+        _save_standalone_clean_summary(family, _dummy_grouped_from_play2win(family))
 
     fig.tight_layout(rect=(0.01, 0.0, 1.0, 1.0), h_pad=1.2, w_pad=0.55)
 
