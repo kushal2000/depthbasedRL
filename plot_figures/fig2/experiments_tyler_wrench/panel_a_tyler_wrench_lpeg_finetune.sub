@@ -50,7 +50,6 @@ ENABLE_RETRACT="${ENABLE_RETRACT:-True}"
 RETRACT_REWARD_SCALE="${RETRACT_REWARD_SCALE:-1.0}"
 RETRACT_DISTANCE_THRESHOLD="${RETRACT_DISTANCE_THRESHOLD:-0.1}"
 RETRACT_SUCCESS_TOLERANCE="${RETRACT_SUCCESS_TOLERANCE:-0.005}"
-ENABLE_DROPPED_ON_TABLE_TERM="${ENABLE_DROPPED_ON_TABLE_TERM:-False}"
 
 # Full observation/action/object-state DR from the previous *_dr teachers.
 USE_OBS_DELAY="${USE_OBS_DELAY:-True}"
@@ -66,12 +65,6 @@ FORCE_SCALE="${FORCE_SCALE:-20.0}"
 TORQUE_SCALE="${TORQUE_SCALE:-2.0}"
 FORCE_ONLY_WHEN_LIFTED="${FORCE_ONLY_WHEN_LIFTED:-False}"
 TORQUE_ONLY_WHEN_LIFTED="${TORQUE_ONLY_WHEN_LIFTED:-False}"
-FORCE_PROB_RANGE="${FORCE_PROB_RANGE:-[0.001,0.1]}"
-TORQUE_PROB_RANGE="${TORQUE_PROB_RANGE:-[0.001,0.1]}"
-
-# Keep the phys-DR and drop variants OFF for this first wrench rerun.
-OBJECT_FRICTION_SCALE_RANGE="${OBJECT_FRICTION_SCALE_RANGE:-[1.0,1.0]}"
-FINGERTIP_FRICTION_SCALE_RANGE="${FINGERTIP_FRICTION_SCALE_RANGE:-[1.0,1.0]}"
 
 # Reset / reward knobs.
 RESET_POSITION_NOISE_X="${RESET_POSITION_NOISE_X:-0.1}"
@@ -152,8 +145,6 @@ echo "Num envs:             $NUM_ENVS"
 echo "Minibatch size:       $MINIBATCH_SIZE"
 echo "Force scale:          $FORCE_SCALE"
 echo "Torque scale:         $TORQUE_SCALE"
-echo "Force prob range:     $FORCE_PROB_RANGE"
-echo "Torque prob range:    $TORQUE_PROB_RANGE"
 echo "Force only lifted:    $FORCE_ONLY_WHEN_LIFTED"
 echo "Torque only lifted:   $TORQUE_ONLY_WHEN_LIFTED"
 echo "W&B:                  ${WANDB_ENTITY}/${WANDB_PROJECT}/${WANDB_GROUP}"
@@ -225,15 +216,10 @@ ISAACSIM_ENV_DIR="$ISAACSIM_ENV_DIR" ./scripts/run_in_isaacsim_env.sh python -u 
     env.peg_in_hole.retract_reward_scale="$RETRACT_REWARD_SCALE" \
     env.peg_in_hole.retract_distance_threshold="$RETRACT_DISTANCE_THRESHOLD" \
     env.peg_in_hole.retract_success_tolerance="$RETRACT_SUCCESS_TOLERANCE" \
-    env.peg_in_hole.enable_dropped_on_table_term="$ENABLE_DROPPED_ON_TABLE_TERM" \
     env.domain_randomization.force_scale="$FORCE_SCALE" \
     env.domain_randomization.torque_scale="$TORQUE_SCALE" \
     env.domain_randomization.force_only_when_lifted="$FORCE_ONLY_WHEN_LIFTED" \
     env.domain_randomization.torque_only_when_lifted="$TORQUE_ONLY_WHEN_LIFTED" \
-    "env.domain_randomization.force_prob_range=$FORCE_PROB_RANGE" \
-    "env.domain_randomization.torque_prob_range=$TORQUE_PROB_RANGE" \
-    "env.domain_randomization.object_friction_scale_range=$OBJECT_FRICTION_SCALE_RANGE" \
-    "env.domain_randomization.fingertip_friction_scale_range=$FINGERTIP_FRICTION_SCALE_RANGE" \
     env.domain_randomization.use_obs_delay="$USE_OBS_DELAY" \
     env.domain_randomization.use_action_delay="$USE_ACTION_DELAY" \
     env.domain_randomization.use_object_state_delay_noise="$USE_OBJECT_STATE_DELAY_NOISE" \

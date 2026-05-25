@@ -31,8 +31,6 @@ FORCE_SCALE="${FORCE_SCALE:-20.0}"
 TORQUE_SCALE="${TORQUE_SCALE:-2.0}"
 FORCE_ONLY_WHEN_LIFTED="${FORCE_ONLY_WHEN_LIFTED:-False}"
 TORQUE_ONLY_WHEN_LIFTED="${TORQUE_ONLY_WHEN_LIFTED:-False}"
-FORCE_PROB_RANGE="${FORCE_PROB_RANGE:-[0.001,0.1]}"
-TORQUE_PROB_RANGE="${TORQUE_PROB_RANGE:-[0.001,0.1]}"
 
 OBJECT_DIVERSITY_CHECKPOINTS=(1000_obj 100_obj 10_obj 1_obj)
 TRAINING_OBJECTIVE_CHECKPOINTS=(Play2Win RotationOnly SingleGoal TranslationOnly)
@@ -132,12 +130,6 @@ submit_one() {
   local mem_mb="${SLOT_MEM_MB[$slot_idx]}"
   local env_dir="${SLOT_ENVS[$slot_idx]}"
   local experiment_tag="lpeg_tol0p5mm_finetune_rgf0_dr_wrench_seed${seed}"
-  local env_prefix=(
-    env
-    FORCE_PROB_RANGE="$FORCE_PROB_RANGE"
-    TORQUE_PROB_RANGE="$TORQUE_PROB_RANGE"
-  )
-
   local cmd=(
     sbatch
     --account="$account"
@@ -154,11 +146,10 @@ submit_one() {
 
   if [[ "$DRY_RUN" == "1" ]]; then
     printf '  DRY_RUN:'
-    printf ' %q' "${env_prefix[@]}"
     printf ' %q' "${cmd[@]}"
     printf '\n'
   else
-    "${env_prefix[@]}" "${cmd[@]}"
+    "${cmd[@]}"
   fi
 }
 

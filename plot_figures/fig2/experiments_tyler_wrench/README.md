@@ -12,8 +12,6 @@ env.domain_randomization.force_scale=20.0
 env.domain_randomization.torque_scale=2.0
 env.domain_randomization.force_only_when_lifted=False
 env.domain_randomization.torque_only_when_lifted=False
-env.domain_randomization.force_prob_range=[0.001,0.1]
-env.domain_randomization.torque_prob_range=[0.001,0.1]
 ```
 
 The merged env code also gates wrench perturbations off during retract phase via
