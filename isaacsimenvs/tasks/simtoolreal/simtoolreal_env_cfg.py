@@ -388,6 +388,19 @@ class ResetCfg:
     # Used by debug_differences/* to keep both envs visually aligned.
     fixed_goal_pose: tuple[float, float, float, float, float, float, float] | None = None
 
+    # Fixed-trajectory ablation: when ``fixed_trajectory_file`` is non-empty,
+    # the env ignores ``goal_sampling_type`` and instead draws goal sequences
+    # from a pre-generated pool of (N_total, K, 3+4) trajectories in the JSON
+    # file. ``fixed_trajectory_count`` truncates the pool to the first N
+    # (0 = use the whole file). Pair with ``termination.max_consecutive_
+    # successes == K`` so episodes end exactly when a trajectory is exhausted.
+    #
+    # Empty-string / 0 defaults are deliberate: isaaclab's configclass type-
+    # checks hydra overrides against the default value's *runtime* type, so a
+    # ``str | None = None`` field rejects string overrides at parse time.
+    fixed_trajectory_file: str = ""
+    fixed_trajectory_count: int = 0
+
 
 # ----------------------------------------------------------------------------
 # termination (includes tolerance curriculum — governs success criterion)
