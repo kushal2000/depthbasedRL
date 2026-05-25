@@ -239,6 +239,7 @@ def _plot_family(
     show_seeds: bool,
     seeds: set[int] | None,
     x_max_billions: float | None,
+    no_title: bool,
 ) -> Path:
     configure_rcparams()
     fig, ax = plt.subplots(figsize=(5.4, 3.0))
@@ -297,7 +298,8 @@ def _plot_family(
     if not any_curve:
         raise RuntimeError(f"No curves found for {family} metric={metric}")
 
-    ax.set_title(display["title"], fontsize=12)
+    if not no_title:
+        ax.set_title(display["title"], fontsize=12)
     _format_env_step_axis(ax, x_max_billions=x_max_billions)
     ax.set_ylabel(display["ylabel"])
     ax.set_ylim(-2, 104)
@@ -323,6 +325,7 @@ def _plot_family_individual(
     out_dir: Path,
     seeds: set[int] | None,
     x_max_billions: float | None,
+    no_title: bool,
 ) -> Path:
     configure_rcparams()
     fig, ax = plt.subplots(figsize=(5.6, 3.1))
@@ -366,7 +369,8 @@ def _plot_family_individual(
     if not line_handles:
         raise RuntimeError(f"No individual curves found for {family} metric={metric}")
 
-    ax.set_title(f"{display['title']} (individual seeds)", fontsize=12)
+    if not no_title:
+        ax.set_title(f"{display['title']} (individual seeds)", fontsize=12)
     _format_env_step_axis(ax, x_max_billions=x_max_billions)
     ax.set_ylabel(display["ylabel"])
     ax.set_ylim(-2, 104)
@@ -432,6 +436,7 @@ def main() -> None:
         action="store_true",
         help="Render individual seed curves instead of mean/std aggregate curves.",
     )
+    parser.add_argument("--no-title", action="store_true", help="Do not draw axis titles.")
     args = parser.parse_args()
     seed_filter = set(args.seeds) if args.seeds else None
 
@@ -446,6 +451,7 @@ def main() -> None:
                 out_dir=args.out_dir,
                 seeds=seed_filter,
                 x_max_billions=args.x_max_billions,
+                no_title=args.no_title,
             )
         else:
             out = _plot_family(
@@ -460,6 +466,7 @@ def main() -> None:
                 show_seeds=args.show_seeds,
                 seeds=seed_filter,
                 x_max_billions=args.x_max_billions,
+                no_title=args.no_title,
             )
         print(f"wrote {out}")
 

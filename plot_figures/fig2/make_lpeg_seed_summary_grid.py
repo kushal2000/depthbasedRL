@@ -34,15 +34,15 @@ from _style import configure_rcparams, style_axis  # noqa: E402
 
 METRIC = "episode_final/feasible_normalized_all_goals_hit"
 X_AXIS = "relative_env_frames"
-SUMMARY_X_MAX_BILLIONS = 2.75
+SUMMARY_X_MAX_BILLIONS = 3.0
 FAMILY_SEED_FILTERS = {
-    "ObjectDiversity": {0, 1, 2},
+    "ObjectDiversity": {0, 1, 3},
 }
 CHECKPOINT_SEED_FILTERS = {
     ("ObjectDiversityPlay2Win", "Play2Win"): {0, 1, 3},
-    ("ObjectDiversityPlay2Win", "100_obj"): {0, 1, 2},
-    ("ObjectDiversityPlay2Win", "10_obj"): {0, 1, 2},
-    ("ObjectDiversityPlay2Win", "1_obj"): {0, 1, 2},
+    ("ObjectDiversityPlay2Win", "100_obj"): {0, 1, 3},
+    ("ObjectDiversityPlay2Win", "10_obj"): {0, 1, 3},
+    ("ObjectDiversityPlay2Win", "1_obj"): {0, 1, 3},
 }
 
 ROW_TITLES = {
@@ -113,7 +113,7 @@ def _plot_individual(ax: plt.Axes, grouped: list[tuple[str, str, str, list]]) ->
             color_labels.append(label)
 
     ax.set_xlim(0.0, _format_billions(np.asarray([x_plot_max]))[0] * 1.04)
-    _style_common_axis(ax, x_max_billions=None, show_ylabel=True)
+    _style_common_axis(ax, x_max_billions=SUMMARY_X_MAX_BILLIONS, show_ylabel=True)
     color_legend = ax.legend(color_handles, color_labels, frameon=False, loc="lower right", fontsize=7.0)
     ax.add_artist(color_legend)
 
@@ -184,10 +184,9 @@ def main() -> None:
         _plot_summary(axes[row_idx, 1], grouped, show_seed_traces=True)
         _plot_summary(axes[row_idx, 2], grouped, show_seed_traces=False)
 
-    fig.suptitle("L-peg finetuning ablations", fontsize=16, y=0.995)
-    fig.tight_layout(rect=(0.025, 0.0, 1.0, 0.975), h_pad=1.2, w_pad=0.9)
+    fig.tight_layout(rect=(0.025, 0.0, 1.0, 1.0), h_pad=1.2, w_pad=0.9)
 
-    output = DEFAULT_OUT_DIR / "lpeg_seed_ablation_summary_grid_3x3_relative_frames_objectdiv_seeds0-1-2_summary2p75B.png"
+    output = DEFAULT_OUT_DIR / "lpeg_seed_ablation_summary_grid_3x3_relative_frames_objectdiv_seeds0-1-3_summary3B.png"
     output.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(output, bbox_inches="tight", pad_inches=0.12, facecolor="white")
     plt.close(fig)
