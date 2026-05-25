@@ -35,6 +35,7 @@ from _style import configure_rcparams, style_axis  # noqa: E402
 METRIC = "episode_final/feasible_normalized_all_goals_hit"
 X_AXIS = "relative_env_frames"
 SUMMARY_X_MAX_BILLIONS = 3.0
+AXIS_LABEL_FONT_SIZE = 15
 FAMILY_SEED_FILTERS = {
     "ObjectDiversity": {0, 2, 3},
 }
@@ -56,6 +57,34 @@ COLUMN_TITLES = (
     "Mean +/- std + seed traces",
     "Mean +/- std",
 )
+
+
+def _configure_big_text() -> None:
+    configure_rcparams()
+    matplotlib.rcParams.update(
+        {
+            "font.size": 13,
+            "axes.labelsize": AXIS_LABEL_FONT_SIZE,
+            "axes.titlesize": 16,
+            "xtick.labelsize": 12,
+            "ytick.labelsize": 12,
+            "legend.fontsize": AXIS_LABEL_FONT_SIZE,
+        }
+    )
+
+
+def _save_png_pdf(fig: plt.Figure, output: Path) -> None:
+    output.parent.mkdir(parents=True, exist_ok=True)
+    for suffix in (".png", ".pdf"):
+        path = output.with_suffix(suffix)
+        fig.savefig(
+            path,
+            bbox_inches="tight",
+            pad_inches=0.025,
+            facecolor="white",
+            edgecolor="none",
+        )
+        print(f"wrote {path}")
 
 
 def _iter_curves(family_data: dict, family: str) -> list[tuple[str, str, str, list]]:
@@ -114,7 +143,7 @@ def _plot_individual(ax: plt.Axes, grouped: list[tuple[str, str, str, list]]) ->
 
     ax.set_xlim(0.0, _format_billions(np.asarray([x_plot_max]))[0] * 1.04)
     _style_common_axis(ax, x_max_billions=SUMMARY_X_MAX_BILLIONS, show_ylabel=True)
-    color_legend = ax.legend(color_handles, color_labels, frameon=False, loc="lower right", fontsize=7.0)
+    color_legend = ax.legend(color_handles, color_labels, frameon=False, loc="lower right", fontsize=AXIS_LABEL_FONT_SIZE)
     ax.add_artist(color_legend)
 
     seed_handles = []
@@ -124,7 +153,7 @@ def _plot_individual(ax: plt.Axes, grouped: list[tuple[str, str, str, list]]) ->
         h, = ax.plot([], [], color="#444444", linestyle=SEED_STYLES.get(seed, "-"), linewidth=1.2)
         seed_handles.append(h)
         seed_labels.append(f"seed {seed}")
-    ax.legend(seed_handles, seed_labels, frameon=False, loc="center right", fontsize=6.8)
+    ax.legend(seed_handles, seed_labels, frameon=False, loc="center right", fontsize=AXIS_LABEL_FONT_SIZE)
 
 
 def _plot_summary(
@@ -158,7 +187,7 @@ def _plot_summary(
         ax.fill_between(x, mean - std, mean + std, color=color, alpha=0.17, linewidth=0)
 
     _style_common_axis(ax, x_max_billions=SUMMARY_X_MAX_BILLIONS, show_ylabel=show_ylabel)
-    ax.legend(frameon=False, loc="lower right", fontsize=7.0)
+    ax.legend(frameon=False, loc="lower right", fontsize=AXIS_LABEL_FONT_SIZE)
 
 
 def _standalone_summary_name(family: str) -> str:
@@ -172,48 +201,44 @@ def _standalone_summary_name(family: str) -> str:
 
 
 def _save_standalone_clean_summary(family: str, grouped: list[tuple[str, str, str, list]]) -> None:
-    fig, ax = plt.subplots(figsize=(5.4, 3.0), dpi=220)
+    fig, ax = plt.subplots(figsize=(5.4, 3.05), dpi=220)
     _plot_summary(ax, grouped, show_seed_traces=False, show_ylabel=True)
-    fig.tight_layout()
     output = DEFAULT_OUT_DIR / _standalone_summary_name(family)
-    output.parent.mkdir(parents=True, exist_ok=True)
-    fig.savefig(output, bbox_inches="tight", pad_inches=0.12, facecolor="white")
+    fig.tight_layout(pad=0.08)
+    _save_png_pdf(fig, output)
     plt.close(fig)
-    print(f"wrote {output}")
 
 
 def main() -> None:
-    configure_rcparams()
-    fig, axes = plt.subplots(3, 3, figsize=(14.5, 9.6), dpi=220)
+    _configure_big_text()
+    fig, axes = plt.subplots(3, 3, figsize=(14.1, 9.1), dpi=220)
 
     for col_idx, title in enumerate(COLUMN_TITLES):
-        axes[0, col_idx].set_title(title, fontsize=13, pad=10)
+        axes[0, col_idx].set_title(title, fontsize=16, pad=8)
 
     for row_idx, family in enumerate(("TrainingObjective", "ObjectDiversity", "ObjectDiversityPlay2Win")):
         family_data = _load_family(DEFAULT_DATA_DIR, family)
         grouped = _iter_curves(family_data, family)
         axes[row_idx, 0].text(
-            -0.22,
+            -0.16,
             0.5,
             ROW_TITLES[family],
             transform=axes[row_idx, 0].transAxes,
             rotation=90,
             ha="center",
             va="center",
-            fontsize=13,
+            fontsize=15,
         )
         _plot_individual(axes[row_idx, 0], grouped)
         _plot_summary(axes[row_idx, 1], grouped, show_seed_traces=True)
         _plot_summary(axes[row_idx, 2], grouped, show_seed_traces=False)
         _save_standalone_clean_summary(family, grouped)
 
-    fig.tight_layout(rect=(0.025, 0.0, 1.0, 1.0), h_pad=1.2, w_pad=0.9)
+    fig.tight_layout(rect=(0.01, 0.0, 1.0, 1.0), h_pad=0.75, w_pad=0.55)
 
     output = DEFAULT_OUT_DIR / "lpeg_seed_ablation_summary_grid_3x3_relative_frames_objectdiv_seeds0-2-3_summary3B.png"
-    output.parent.mkdir(parents=True, exist_ok=True)
-    fig.savefig(output, bbox_inches="tight", pad_inches=0.12, facecolor="white")
+    _save_png_pdf(fig, output)
     plt.close(fig)
-    print(f"wrote {output}")
 
 
 if __name__ == "__main__":
