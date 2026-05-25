@@ -51,7 +51,7 @@ CHECKPOINT_SEED_FILTERS = {
 ROW_TITLES = {
     "TrainingObjective": "Training objective",
     "ObjectDiversity": "Object diversity",
-    "ObjectDiversityPlay2Win": "Object diversity, 1000 objects (ours) as baseline",
+    "ObjectDiversityPlay2Win": "Object diversity + ours baseline",
 }
 
 COLUMN_TITLES = (
@@ -120,7 +120,7 @@ def _style_common_axis(ax: plt.Axes, *, x_max_billions: float | None, show_ylabe
     style_axis(ax)
 
 
-def _plot_individual(ax: plt.Axes, grouped: list[tuple[str, str, str, list]]) -> None:
+def _plot_individual(ax: plt.Axes, grouped: list[tuple[str, str, str, list]], *, draw_legend: bool = True) -> None:
     x_plot_max = 0.0
     color_handles = []
     color_labels = []
@@ -145,17 +145,18 @@ def _plot_individual(ax: plt.Axes, grouped: list[tuple[str, str, str, list]]) ->
 
     ax.set_xlim(0.0, _format_billions(np.asarray([x_plot_max]))[0] * 1.04)
     _style_common_axis(ax, x_max_billions=SUMMARY_X_MAX_BILLIONS, show_ylabel=True)
-    color_legend = ax.legend(color_handles, color_labels, frameon=False, loc="lower right", fontsize=AXIS_LABEL_FONT_SIZE)
-    ax.add_artist(color_legend)
+    if draw_legend:
+        color_legend = ax.legend(color_handles, color_labels, frameon=False, loc="lower right", fontsize=AXIS_LABEL_FONT_SIZE)
+        ax.add_artist(color_legend)
 
-    seed_handles = []
-    seed_labels = []
-    used_seeds = sorted({curve.seed for _ckpt, _label, _color, curves in grouped for curve in curves})
-    for seed in used_seeds:
-        h, = ax.plot([], [], color="#444444", linestyle=SEED_STYLES.get(seed, "-"), linewidth=1.2)
-        seed_handles.append(h)
-        seed_labels.append(f"seed {seed}")
-    ax.legend(seed_handles, seed_labels, frameon=False, loc="center right", fontsize=AXIS_LABEL_FONT_SIZE)
+        seed_handles = []
+        seed_labels = []
+        used_seeds = sorted({curve.seed for _ckpt, _label, _color, curves in grouped for curve in curves})
+        for seed in used_seeds:
+            h, = ax.plot([], [], color="#444444", linestyle=SEED_STYLES.get(seed, "-"), linewidth=1.2)
+            seed_handles.append(h)
+            seed_labels.append(f"seed {seed}")
+        ax.legend(seed_handles, seed_labels, frameon=False, loc="center right", fontsize=AXIS_LABEL_FONT_SIZE)
 
 
 def _plot_summary(
@@ -164,6 +165,7 @@ def _plot_summary(
     *,
     show_seed_traces: bool,
     show_ylabel: bool = False,
+    draw_legend: bool = True,
 ) -> None:
     for _checkpoint, label, color, curves in grouped:
         aggregate = _aggregate(curves, num_points=300, smooth_window=1, min_seeds=0)
@@ -189,16 +191,17 @@ def _plot_summary(
         ax.fill_between(x, mean - std, mean + std, color=color, alpha=0.17, linewidth=0)
 
     _style_common_axis(ax, x_max_billions=SUMMARY_X_MAX_BILLIONS, show_ylabel=show_ylabel)
-    ax.legend(
-        frameon=False,
-        loc="upper center",
-        bbox_to_anchor=(0.5, -0.58),
-        ncol=2,
-        fontsize=AXIS_LABEL_FONT_SIZE,
-        columnspacing=0.9,
-        handlelength=1.6,
-        handletextpad=0.4,
-    )
+    if draw_legend:
+        ax.legend(
+            frameon=False,
+            loc="upper center",
+            bbox_to_anchor=(0.5, -0.58),
+            ncol=2,
+            fontsize=AXIS_LABEL_FONT_SIZE,
+            columnspacing=1.4,
+            handlelength=1.6,
+            handletextpad=0.4,
+        )
 
 
 def _standalone_summary_name(family: str) -> str:
@@ -212,10 +215,23 @@ def _standalone_summary_name(family: str) -> str:
 
 
 def _save_standalone_clean_summary(family: str, grouped: list[tuple[str, str, str, list]]) -> None:
-    fig, ax = plt.subplots(figsize=(5.4, 3.55), dpi=220)
-    _plot_summary(ax, grouped, show_seed_traces=False, show_ylabel=True)
+    fig, ax = plt.subplots(figsize=(6.0, 4.8), dpi=220)
+    _plot_summary(ax, grouped, show_seed_traces=False, show_ylabel=True, draw_legend=False)
+    handles, labels = ax.get_legend_handles_labels()
+    fig.legend(
+        handles,
+        labels,
+        frameon=False,
+        loc="lower center",
+        bbox_to_anchor=(0.5, 0.035),
+        ncol=2,
+        fontsize=AXIS_LABEL_FONT_SIZE,
+        columnspacing=1.5,
+        handlelength=1.6,
+        handletextpad=0.4,
+    )
     output = DEFAULT_OUT_DIR / _standalone_summary_name(family)
-    fig.tight_layout(pad=0.08, rect=(0.0, 0.30, 1.0, 1.0))
+    fig.subplots_adjust(left=0.16, right=0.98, top=0.98, bottom=0.42)
     _save_png_pdf(fig, output)
     plt.close(fig)
 
@@ -231,21 +247,21 @@ def main() -> None:
         family_data = _load_family(DEFAULT_DATA_DIR, family)
         grouped = _iter_curves(family_data, family)
         axes[row_idx, 0].text(
-            -0.16,
-            0.5,
+            0.02,
+            0.97,
             ROW_TITLES[family],
             transform=axes[row_idx, 0].transAxes,
-            rotation=90,
-            ha="center",
-            va="center",
+            ha="left",
+            va="top",
             fontsize=12,
+            bbox={"facecolor": "white", "edgecolor": "none", "alpha": 0.80, "pad": 1.5},
         )
-        _plot_individual(axes[row_idx, 0], grouped)
-        _plot_summary(axes[row_idx, 1], grouped, show_seed_traces=True)
-        _plot_summary(axes[row_idx, 2], grouped, show_seed_traces=False)
+        _plot_individual(axes[row_idx, 0], grouped, draw_legend=False)
+        _plot_summary(axes[row_idx, 1], grouped, show_seed_traces=True, draw_legend=False)
+        _plot_summary(axes[row_idx, 2], grouped, show_seed_traces=False, draw_legend=False)
         _save_standalone_clean_summary(family, grouped)
 
-    fig.tight_layout(rect=(0.01, 0.18, 1.0, 1.0), h_pad=4.0, w_pad=0.55)
+    fig.tight_layout(rect=(0.01, 0.0, 1.0, 1.0), h_pad=1.2, w_pad=0.55)
 
     output = DEFAULT_OUT_DIR / "lpeg_seed_ablation_summary_grid_3x3_relative_frames_objectdiv_seeds0-2-3_summary3B.png"
     _save_png_pdf(fig, output)
