@@ -50,16 +50,16 @@ CHECKPOINT_SEED_FILTERS = {
 }
 DUMMY_STANDALONE_SPECS = {
     "DummySuccessTolerance": (
-        ("Success tolerance = 1 cm (Ours)", "#2C7BB6", "play2win"),
-        ("5 mm", STYLES["RotationOnly"][0], "zero"),
-        ("2 mm", STYLES["SingleGoal"][0], "zero"),
-        ("1 mm", "#E08214", "zero"),
+        ("Success threshold = 1 cm (Ours)", "#2C7BB6", "play2win"),
+        ("2.5 cm", STYLES["RotationOnly"][0], "zero"),
+        ("5 cm", STYLES["SingleGoal"][0], "zero"),
+        ("10 cm", "#E08214", "zero"),
     ),
     "DummyNumTrajectories": (
-        ("Infinite trajectories (Ours)", "#2C7BB6", "play2win"),
+        ("Random trajectories (Ours)", "#2C7BB6", "play2win"),
         ("100 trajectories", STYLES["RotationOnly"][0], "zero"),
         ("10 trajectories", STYLES["SingleGoal"][0], "zero"),
-        ("Random", "#E08214", "zero"),
+        ("1 trajectory", "#E08214", "zero"),
     ),
 }
 
