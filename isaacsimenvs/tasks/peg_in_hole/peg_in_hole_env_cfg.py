@@ -65,6 +65,16 @@ class PegInHoleCfg:
     # prelude stage.
     force_lift_reward_active: bool = False
 
+    # Terminate when the peg has slipped out of the gripper and is sitting on
+    # the table. The check fires when (1) object z is within
+    # ``dropped_on_table_z_margin`` of the table top AND (2) the mean
+    # fingertip-to-object distance exceeds ``dropped_on_table_ft_distance``,
+    # AND (3) the env is not in retract_phase (the deliberate finger-pull-away
+    # would otherwise false-trigger this). Off by default — opt in per .sub.
+    enable_dropped_on_table_term: bool = False
+    dropped_on_table_z_margin: float = 0.05
+    dropped_on_table_ft_distance: float = 0.15
+
 
 def _default_peg_in_hole_sim_cfg() -> SimulationCfg:
     """Return a render-overlay-compatible sim cfg for teacher and student tasks."""

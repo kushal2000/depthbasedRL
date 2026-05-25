@@ -578,6 +578,15 @@ class PegInHoleEnv(SimToolRealEnv):
             return None
         return float(pih_cfg.random_goal_curriculum_success_threshold)
 
+    def _wrench_dr_active_mask(self) -> torch.Tensor:
+        """Disable wrench DR once the final insert is achieved (retract phase).
+
+        The peg is unconstrained inside the hole during retract — random
+        impulses there would knock it out before the fingers clear the
+        keepout, defeating the retract reward.
+        """
+        return ~self.retract_phase
+
     def _get_dones(self) -> tuple[torch.Tensor, torch.Tensor]:
         update_tolerance_curriculum(self)
         compute_intermediate_values(self)
@@ -644,12 +653,24 @@ class PegInHoleEnv(SimToolRealEnv):
             max_successes = self._successes >= self.env_max_goals
             hand_far = self._curr_fingertip_distances.max(dim=-1).values > 1.5
 
-        terminated = fall | max_successes | hand_far
+        if pih_cfg.enable_dropped_on_table_term:
+            table_top_local = self._table_z_per_env + TABLE_HALF_HEIGHT
+            mean_ft_dist = self._curr_fingertip_distances.mean(dim=-1)
+            dropped = (
+                (object_z_local < table_top_local + pih_cfg.dropped_on_table_z_margin)
+                & (mean_ft_dist > pih_cfg.dropped_on_table_ft_distance)
+                & ~self.retract_phase
+            )
+        else:
+            dropped = torch.zeros_like(fall)
+
+        terminated = fall | max_successes | hand_far | dropped
         truncated = self.episode_length_buf >= self.max_episode_length
         self._termination_reasons = {
             "fall": fall,
             "max_successes": max_successes,
             "hand_far": hand_far,
+            "dropped": dropped,
             "timeout": truncated,
         }
         return terminated, truncated

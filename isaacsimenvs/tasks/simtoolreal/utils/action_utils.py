@@ -112,6 +112,17 @@ def apply_wrench_dr(env) -> None:
     if dr.torque_only_when_lifted:
         env._object_torques *= env._lifted_object.float().view(-1, 1, 1)
 
+    # Optional task-level gate: subclasses can disable wrench DR per env (e.g.
+    # peg_in_hole zeros impulses once the final insert is achieved so the part
+    # doesn't fly out of the hole during retract). Same opt-in convention as
+    # _curriculum_eligible_mask in termination_utils.
+    if hasattr(env, "_wrench_dr_active_mask"):
+        active = env._wrench_dr_active_mask()
+        if active is not None:
+            active_f = active.float().view(-1, 1, 1)
+            env._object_forces *= active_f
+            env._object_torques *= active_f
+
     env.object.set_external_force_and_torque(
         forces=env._object_forces,
         torques=env._object_torques,
