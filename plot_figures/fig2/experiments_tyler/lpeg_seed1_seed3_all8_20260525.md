@@ -1,6 +1,7 @@
 # L-Peg Seed-1/Seed-3 Sweep, 2026-05-25
 
-Submitted from branch `2026-05-21_TylerJobs`.
+Submitted from branch `2026-05-21_TylerJobs` at commit
+`2a9e9958c2b6d9d3975fa565a51f7d51cffd598c`.
 
 This sweep runs only the L-peg task and covers two new random seeds for all
 eight checkpoints:
@@ -30,22 +31,22 @@ lpeg_tol0p5mm_finetune_rgf0_dr_seed${SEED}
 
 | Job ID | Family | Checkpoint | Seed | Node | Partition | Memory |
 | --- | --- | --- | --- | --- | --- | --- |
-| TBD | `TrainingObjective` | `Play2Win` | `1` | `move5` | `move` | 90 GB |
-| TBD | `TrainingObjective` | `RotationOnly` | `1` | `move5` | `move` | 90 GB |
-| TBD | `TrainingObjective` | `SingleGoal` | `1` | `move5` | `move` | 90 GB |
-| TBD | `TrainingObjective` | `TranslationOnly` | `1` | `move5` | `move` | 90 GB |
-| TBD | `TrainingObjective` | `Play2Win` | `3` | `move5` | `move` | 90 GB |
-| TBD | `TrainingObjective` | `RotationOnly` | `3` | `move5` | `move` | 90 GB |
-| TBD | `TrainingObjective` | `SingleGoal` | `3` | `move5` | `move` | 90 GB |
-| TBD | `TrainingObjective` | `TranslationOnly` | `3` | `move5` | `move` | 90 GB |
-| TBD | `ObjectDiversity` | `1_obj` | `1` | `move4` | `move` | 80 GB |
-| TBD | `ObjectDiversity` | `10_obj` | `1` | `move4` | `move` | 80 GB |
-| TBD | `ObjectDiversity` | `100_obj` | `1` | `move4` | `move` | 80 GB |
-| TBD | `ObjectDiversity` | `1000_obj` | `1` | `move4` | `move` | 80 GB |
-| TBD | `ObjectDiversity` | `1_obj` | `3` | `juno2` | `juno` | 100 GB |
-| TBD | `ObjectDiversity` | `10_obj` | `3` | `juno2` | `juno` | 100 GB |
-| TBD | `ObjectDiversity` | `100_obj` | `3` | `juno2` | `juno-lo` | 100 GB |
-| TBD | `ObjectDiversity` | `1000_obj` | `3` | `juno2` | `juno-lo` | 100 GB |
+| 15551054 | `TrainingObjective` | `Play2Win` | `1` | `move5` | `move` | 90 GB |
+| 15551055 | `TrainingObjective` | `RotationOnly` | `1` | `move5` | `move` | 90 GB |
+| 15551056 | `TrainingObjective` | `SingleGoal` | `1` | `move5` | `move` | 90 GB |
+| 15551057 | `TrainingObjective` | `TranslationOnly` | `1` | `move5` | `move` | 90 GB |
+| 15551058 | `TrainingObjective` | `Play2Win` | `3` | `move5` | `move` | 90 GB |
+| 15551059 | `TrainingObjective` | `RotationOnly` | `3` | `move5` | `move` | 90 GB |
+| 15551060 | `TrainingObjective` | `SingleGoal` | `3` | `move5` | `move` | 90 GB |
+| 15551061 | `TrainingObjective` | `TranslationOnly` | `3` | `move5` | `move` | 90 GB |
+| 15551062 | `ObjectDiversity` | `1_obj` | `1` | `move4` | `move` | 80 GB |
+| 15551063 | `ObjectDiversity` | `10_obj` | `1` | `move4` | `move` | 80 GB |
+| 15551064 | `ObjectDiversity` | `100_obj` | `1` | `move4` | `move` | 80 GB |
+| 15551065 | `ObjectDiversity` | `1000_obj` | `1` | `move4` | `move` | 80 GB |
+| 15551066 | `ObjectDiversity` | `1_obj` | `3` | `juno2` | `juno` | 100 GB |
+| 15551067 | `ObjectDiversity` | `10_obj` | `3` | `juno2` | `juno` | 100 GB |
+| 15551068 | `ObjectDiversity` | `100_obj` | `3` | `juno2` | `juno-lo` | 100 GB |
+| 15551069 | `ObjectDiversity` | `1000_obj` | `3` | `juno2` | `juno-lo` | 100 GB |
 
 Run directories are under:
 
