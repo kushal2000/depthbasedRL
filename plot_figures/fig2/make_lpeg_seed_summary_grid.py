@@ -231,7 +231,7 @@ def _save_standalone_clean_summary(family: str, grouped: list[tuple[str, str, st
         labels,
         frameon=False,
         loc="lower center",
-        bbox_to_anchor=(0.5, 0.070),
+        bbox_to_anchor=(0.5, 0.045),
         ncol=2,
         fontsize=standalone_label_size,
         columnspacing=1.5,
@@ -239,7 +239,7 @@ def _save_standalone_clean_summary(family: str, grouped: list[tuple[str, str, st
         handletextpad=0.4,
     )
     output = DEFAULT_OUT_DIR / _standalone_summary_name(family)
-    fig.subplots_adjust(left=0.15, right=0.985, top=0.91, bottom=0.45)
+    fig.subplots_adjust(left=0.15, right=0.985, top=0.91, bottom=0.465)
     _save_png_pdf(fig, output)
     plt.close(fig)
 
