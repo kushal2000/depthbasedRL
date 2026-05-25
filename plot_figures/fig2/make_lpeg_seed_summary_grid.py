@@ -36,6 +36,7 @@ METRIC = "episode_final/feasible_normalized_all_goals_hit"
 X_AXIS = "relative_env_frames"
 SUMMARY_X_MAX_BILLIONS = 3.0
 AXIS_LABEL_FONT_SIZE = 15
+TICK_LABEL_FONT_SIZE = 15
 FAMILY_SEED_FILTERS = {
     "ObjectDiversity": {0, 2, 3},
 }
@@ -66,8 +67,8 @@ def _configure_big_text() -> None:
             "font.size": 13,
             "axes.labelsize": AXIS_LABEL_FONT_SIZE,
             "axes.titlesize": 16,
-            "xtick.labelsize": 12,
-            "ytick.labelsize": 12,
+            "xtick.labelsize": TICK_LABEL_FONT_SIZE,
+            "ytick.labelsize": TICK_LABEL_FONT_SIZE,
             "legend.fontsize": AXIS_LABEL_FONT_SIZE,
         }
     )
@@ -187,7 +188,16 @@ def _plot_summary(
         ax.fill_between(x, mean - std, mean + std, color=color, alpha=0.17, linewidth=0)
 
     _style_common_axis(ax, x_max_billions=SUMMARY_X_MAX_BILLIONS, show_ylabel=show_ylabel)
-    ax.legend(frameon=False, loc="lower right", fontsize=AXIS_LABEL_FONT_SIZE)
+    ax.legend(
+        frameon=False,
+        loc="upper center",
+        bbox_to_anchor=(0.5, -0.24),
+        ncol=2,
+        fontsize=AXIS_LABEL_FONT_SIZE,
+        columnspacing=0.9,
+        handlelength=1.6,
+        handletextpad=0.4,
+    )
 
 
 def _standalone_summary_name(family: str) -> str:
@@ -204,7 +214,7 @@ def _save_standalone_clean_summary(family: str, grouped: list[tuple[str, str, st
     fig, ax = plt.subplots(figsize=(5.4, 3.05), dpi=220)
     _plot_summary(ax, grouped, show_seed_traces=False, show_ylabel=True)
     output = DEFAULT_OUT_DIR / _standalone_summary_name(family)
-    fig.tight_layout(pad=0.08)
+    fig.tight_layout(pad=0.08, rect=(0.0, 0.11, 1.0, 1.0))
     _save_png_pdf(fig, output)
     plt.close(fig)
 
@@ -234,7 +244,7 @@ def main() -> None:
         _plot_summary(axes[row_idx, 2], grouped, show_seed_traces=False)
         _save_standalone_clean_summary(family, grouped)
 
-    fig.tight_layout(rect=(0.01, 0.0, 1.0, 1.0), h_pad=0.75, w_pad=0.55)
+    fig.tight_layout(rect=(0.01, 0.06, 1.0, 1.0), h_pad=2.0, w_pad=0.55)
 
     output = DEFAULT_OUT_DIR / "lpeg_seed_ablation_summary_grid_3x3_relative_frames_objectdiv_seeds0-2-3_summary3B.png"
     _save_png_pdf(fig, output)
