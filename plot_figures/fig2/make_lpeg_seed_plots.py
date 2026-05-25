@@ -272,7 +272,7 @@ def _plot_family(
         any_curve = True
         x_plot_max = max(x_plot_max, float(np.nanmax(aggregate["x"])))
         color = display["colors"][checkpoint]
-        label = f"{display['checkpoint_labels'][checkpoint]} (n={len(curves)})"
+        label = display["checkpoint_labels"][checkpoint]
 
         if show_seeds:
             agg_min = float(np.nanmin(aggregate["x"]))

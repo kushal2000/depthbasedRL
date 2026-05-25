@@ -153,7 +153,7 @@ def _plot_summary(
         x = _format_billions(aggregate["x"])
         mean = 100.0 * aggregate["mean"]
         std = 100.0 * aggregate["std"]
-        ax.plot(x, mean, color=color, linewidth=1.8, label=f"{label} (n={len(curves)})")
+        ax.plot(x, mean, color=color, linewidth=1.8, label=label)
         ax.fill_between(x, mean - std, mean + std, color=color, alpha=0.17, linewidth=0)
 
     _style_common_axis(ax, x_max_billions=SUMMARY_X_MAX_BILLIONS, show_ylabel=False)
