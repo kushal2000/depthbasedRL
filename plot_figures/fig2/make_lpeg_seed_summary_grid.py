@@ -36,13 +36,13 @@ METRIC = "episode_final/feasible_normalized_all_goals_hit"
 X_AXIS = "relative_env_frames"
 SUMMARY_X_MAX_BILLIONS = 3.0
 FAMILY_SEED_FILTERS = {
-    "ObjectDiversity": {0, 1, 3},
+    "ObjectDiversity": {0, 2, 3},
 }
 CHECKPOINT_SEED_FILTERS = {
     ("ObjectDiversityPlay2Win", "Play2Win"): {0, 1, 3},
-    ("ObjectDiversityPlay2Win", "100_obj"): {0, 1, 3},
-    ("ObjectDiversityPlay2Win", "10_obj"): {0, 1, 3},
-    ("ObjectDiversityPlay2Win", "1_obj"): {0, 1, 3},
+    ("ObjectDiversityPlay2Win", "100_obj"): {0, 2, 3},
+    ("ObjectDiversityPlay2Win", "10_obj"): {0, 2, 3},
+    ("ObjectDiversityPlay2Win", "1_obj"): {0, 2, 3},
 }
 
 ROW_TITLES = {
@@ -132,6 +132,7 @@ def _plot_summary(
     grouped: list[tuple[str, str, str, list]],
     *,
     show_seed_traces: bool,
+    show_ylabel: bool = False,
 ) -> None:
     for _checkpoint, label, color, curves in grouped:
         aggregate = _aggregate(curves, num_points=300, smooth_window=1, min_seeds=0)
@@ -156,8 +157,29 @@ def _plot_summary(
         ax.plot(x, mean, color=color, linewidth=1.8, label=label)
         ax.fill_between(x, mean - std, mean + std, color=color, alpha=0.17, linewidth=0)
 
-    _style_common_axis(ax, x_max_billions=SUMMARY_X_MAX_BILLIONS, show_ylabel=False)
+    _style_common_axis(ax, x_max_billions=SUMMARY_X_MAX_BILLIONS, show_ylabel=show_ylabel)
     ax.legend(frameon=False, loc="lower right", fontsize=7.0)
+
+
+def _standalone_summary_name(family: str) -> str:
+    if family == "TrainingObjective":
+        return "lpeg_top_right_trainingobjective_mean_std_clean_3B.png"
+    if family == "ObjectDiversity":
+        return "lpeg_middle_right_objectdiversity_1000obj_mean_std_clean_3B.png"
+    if family == "ObjectDiversityPlay2Win":
+        return "lpeg_bottom_right_objectdiversity_play2perfect_mean_std_clean_3B.png"
+    raise ValueError(f"Unexpected family: {family}")
+
+
+def _save_standalone_clean_summary(family: str, grouped: list[tuple[str, str, str, list]]) -> None:
+    fig, ax = plt.subplots(figsize=(5.4, 3.0), dpi=220)
+    _plot_summary(ax, grouped, show_seed_traces=False, show_ylabel=True)
+    fig.tight_layout()
+    output = DEFAULT_OUT_DIR / _standalone_summary_name(family)
+    output.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(output, bbox_inches="tight", pad_inches=0.12, facecolor="white")
+    plt.close(fig)
+    print(f"wrote {output}")
 
 
 def main() -> None:
@@ -183,10 +205,11 @@ def main() -> None:
         _plot_individual(axes[row_idx, 0], grouped)
         _plot_summary(axes[row_idx, 1], grouped, show_seed_traces=True)
         _plot_summary(axes[row_idx, 2], grouped, show_seed_traces=False)
+        _save_standalone_clean_summary(family, grouped)
 
     fig.tight_layout(rect=(0.025, 0.0, 1.0, 1.0), h_pad=1.2, w_pad=0.9)
 
-    output = DEFAULT_OUT_DIR / "lpeg_seed_ablation_summary_grid_3x3_relative_frames_objectdiv_seeds0-1-3_summary3B.png"
+    output = DEFAULT_OUT_DIR / "lpeg_seed_ablation_summary_grid_3x3_relative_frames_objectdiv_seeds0-2-3_summary3B.png"
     output.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(output, bbox_inches="tight", pad_inches=0.12, facecolor="white")
     plt.close(fig)
