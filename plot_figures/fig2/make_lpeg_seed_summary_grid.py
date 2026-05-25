@@ -218,23 +218,28 @@ def _save_standalone_clean_summary(family: str, grouped: list[tuple[str, str, st
     # Keep the standalone panels close to the paper-style reference crop:
     # compact axes, two-row legend underneath, and a small but readable gap
     # between the x-axis label and legend.
-    fig, ax = plt.subplots(figsize=(6.5, 3.3), dpi=220)
+    standalone_label_size = 14
+    standalone_tick_size = 11
+    fig, ax = plt.subplots(figsize=(6.4, 3.0), dpi=220)
     _plot_summary(ax, grouped, show_seed_traces=False, show_ylabel=True, draw_legend=False)
+    ax.xaxis.label.set_size(standalone_label_size)
+    ax.yaxis.label.set_size(standalone_label_size)
+    ax.tick_params(axis="both", which="major", labelsize=standalone_tick_size)
     handles, labels = ax.get_legend_handles_labels()
     fig.legend(
         handles,
         labels,
         frameon=False,
         loc="lower center",
-        bbox_to_anchor=(0.5, 0.055),
+        bbox_to_anchor=(0.5, 0.070),
         ncol=2,
-        fontsize=AXIS_LABEL_FONT_SIZE,
+        fontsize=standalone_label_size,
         columnspacing=1.5,
         handlelength=1.6,
         handletextpad=0.4,
     )
     output = DEFAULT_OUT_DIR / _standalone_summary_name(family)
-    fig.subplots_adjust(left=0.15, right=0.985, top=0.91, bottom=0.50)
+    fig.subplots_adjust(left=0.15, right=0.985, top=0.91, bottom=0.45)
     _save_png_pdf(fig, output)
     plt.close(fig)
 
