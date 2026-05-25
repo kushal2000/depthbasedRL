@@ -60,10 +60,10 @@ DISPLAY = {
         "colors": COMPARISON_COLORS,
     },
     "ObjectDiversityPlay2Win": {
-        "title": "L-peg: object diversity, Play2Perfect replacing 1000 objects",
+        "title": "L-peg: object diversity, 1000 objects (ours) replacing 1000 objects",
         "ylabel": "Success Rate (%)",
         "checkpoint_labels": {
-            "Play2Win": "Play2Perfect (1000 objects)",
+            "Play2Win": "1000 objects (ours)",
             "100_obj": "100 objects",
             "10_obj": "10 objects",
             "1_obj": "1 object",
@@ -74,7 +74,7 @@ DISPLAY = {
         "title": "L-peg: pretraining objective ablation",
         "ylabel": "Success Rate (%)",
         "checkpoint_labels": {
-            "Play2Win": "Play2Perfect",
+            "Play2Win": "Full Pose (Ours)",
             "RotationOnly": "Rotation only",
             "SingleGoal": "Single goal",
             "TranslationOnly": "Translation only",

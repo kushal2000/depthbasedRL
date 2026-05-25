@@ -14,7 +14,7 @@ render mean/std shaded curves.
 
 The plotter also renders a hybrid ObjectDiversity comparison where the
 `1000_obj` curve is replaced by the TrainingObjective `Play2Win` run data,
-displayed as `Play2Perfect (1000 objects)`. This is useful because those two
+displayed as `1000 objects (ours)`. This is useful because those two
 checkpoints are intended to be comparable.
 
 ## Full Collection
