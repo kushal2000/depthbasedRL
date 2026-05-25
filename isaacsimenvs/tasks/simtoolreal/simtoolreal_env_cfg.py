@@ -478,6 +478,14 @@ class DomainRandomizationCfg:
     torque_decay_interval: float = 0.08
     torque_only_when_lifted: bool = True
 
+    # Per-env physics randomization at episode reset (multiplicative scales
+    # of the base values from AssetsCfg / URDF default mass). Default
+    # (1.0, 1.0) is a no-op so existing runs are unaffected. Scale is
+    # uniform-random per env, sampled once per reset.
+    object_mass_scale_range: tuple[float, float] = (1.0, 1.0)
+    object_friction_scale_range: tuple[float, float] = (1.0, 1.0)
+    fingertip_friction_scale_range: tuple[float, float] = (1.0, 1.0)
+
 
 # ----------------------------------------------------------------------------
 # Top-level configclass — composes the above, plus DirectRLEnvCfg requireds

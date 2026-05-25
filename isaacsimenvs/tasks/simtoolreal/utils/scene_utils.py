@@ -1469,12 +1469,14 @@ def apply_physx_material_properties(env) -> None:
     robot_materials = robot_view.get_material_properties()
     robot_materials[:] = default
 
+    fingertip_mask = torch.zeros(robot_view.max_shapes, dtype=torch.bool, device="cpu")
     shape_start = 0
     for link_name, link_path in zip(robot_view.shared_metatype.link_names, robot_view.link_paths[0]):
         link_view = env.robot._physics_sim_view.create_rigid_body_view(link_path)
         shape_end = shape_start + link_view.max_shapes
         if link_name in FINGERTIP_LINK_NAMES:
             robot_materials[:, shape_start:shape_end] = fingertip
+            fingertip_mask[shape_start:shape_end] = True
         shape_start = shape_end
     if shape_start != robot_view.max_shapes:
         raise RuntimeError(
@@ -1483,6 +1485,11 @@ def apply_physx_material_properties(env) -> None:
         )
     robot_view.set_material_properties(robot_materials, env_ids)
 
+    # Cache for per-env friction randomization at reset.
+    env._robot_fingertip_shape_mask = fingertip_mask  # (n_robot_shapes,) bool on CPU
+    env._base_finger_tip_friction = float(assets_cfg.finger_tip_friction)
+    env._base_robot_friction = float(assets_cfg.robot_friction)
+
     for name in ("table", "object", "goal_viz", "hole"):
         if not hasattr(env, name):
             continue
@@ -1490,6 +1497,11 @@ def apply_physx_material_properties(env) -> None:
         materials = view.get_material_properties()
         materials[:] = default
         view.set_material_properties(materials, env_ids)
+
+    # Cache object shape count + base friction for per-env reset randomization.
+    if hasattr(env, "object"):
+        env._n_object_shapes = int(env.object.root_physx_view.max_shapes)
+        env._base_object_friction = float(assets_cfg.robot_friction)
 
     _log_scene_step(t0, "applied PhysX material properties")
 
