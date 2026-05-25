@@ -1465,6 +1465,13 @@ def apply_physx_material_properties(env) -> None:
     )
     env_ids = torch.arange(env.num_envs, dtype=torch.int64, device="cpu")
 
+    dr = env.cfg.domain_randomization
+    n_buckets = int(dr.friction_n_buckets)
+    ft_lo, ft_hi = float(dr.fingertip_friction_scale_range[0]), float(dr.fingertip_friction_scale_range[1])
+    obj_lo, obj_hi = float(dr.object_friction_scale_range[0]), float(dr.object_friction_scale_range[1])
+    ft_active = (ft_lo, ft_hi) != (1.0, 1.0)
+    obj_active = (obj_lo, obj_hi) != (1.0, 1.0)
+
     robot_view = env.robot.root_physx_view
     robot_materials = robot_view.get_material_properties()
     robot_materials[:] = default
@@ -1483,12 +1490,21 @@ def apply_physx_material_properties(env) -> None:
             f"Robot shape count mismatch while assigning materials: "
             f"computed {shape_start}, view reports {robot_view.max_shapes}."
         )
-    robot_view.set_material_properties(robot_materials, env_ids)
 
-    # Cache for per-env friction randomization at reset.
-    env._robot_fingertip_shape_mask = fingertip_mask  # (n_robot_shapes,) bool on CPU
-    env._base_finger_tip_friction = float(assets_cfg.finger_tip_friction)
-    env._base_robot_friction = float(assets_cfg.robot_friction)
+    # Per-env bucketed fingertip friction (init-only). Quantizing to
+    # `n_buckets` distinct values caps the PhysX material count regardless
+    # of n_envs.
+    if ft_active:
+        ft_base = float(assets_cfg.finger_tip_friction)
+        bucket_vals = torch.linspace(ft_lo, ft_hi, n_buckets) * ft_base  # (B,)
+        bucket_idx = torch.randint(0, n_buckets, (env.num_envs,))
+        per_env_ft = bucket_vals[bucket_idx]  # (N_envs,)
+        ft_indices = fingertip_mask.nonzero(as_tuple=True)[0]
+        if ft_indices.numel() > 0:
+            robot_materials[:, ft_indices, 0] = per_env_ft.unsqueeze(-1)
+            robot_materials[:, ft_indices, 1] = per_env_ft.unsqueeze(-1)
+
+    robot_view.set_material_properties(robot_materials, env_ids)
 
     for name in ("table", "object", "goal_viz", "hole"):
         if not hasattr(env, name):
@@ -1496,12 +1512,14 @@ def apply_physx_material_properties(env) -> None:
         view = getattr(env, name).root_physx_view
         materials = view.get_material_properties()
         materials[:] = default
+        if name == "object" and obj_active:
+            obj_base = float(assets_cfg.robot_friction)
+            bucket_vals = torch.linspace(obj_lo, obj_hi, n_buckets) * obj_base
+            bucket_idx = torch.randint(0, n_buckets, (env.num_envs,))
+            per_env_obj = bucket_vals[bucket_idx]  # (N_envs,)
+            materials[:, :, 0] = per_env_obj.unsqueeze(-1)
+            materials[:, :, 1] = per_env_obj.unsqueeze(-1)
         view.set_material_properties(materials, env_ids)
-
-    # Cache object shape count + base friction for per-env reset randomization.
-    if hasattr(env, "object"):
-        env._n_object_shapes = int(env.object.root_physx_view.max_shapes)
-        env._base_object_friction = float(assets_cfg.robot_friction)
 
     _log_scene_step(t0, "applied PhysX material properties")
 

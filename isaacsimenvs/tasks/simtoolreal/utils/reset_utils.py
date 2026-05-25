@@ -381,64 +381,6 @@ def reset_goal_trackers(env, env_ids: torch.Tensor) -> None:
     _reset_goal_pose(env, env_ids, mode=env.cfg.reset.goal_sampling_type)
 
 
-def _randomize_object_physics(env, env_ids: torch.Tensor) -> None:
-    """Per-env mass + friction randomization at episode reset.
-
-    Multiplicative scales from ``cfg.domain_randomization.*_scale_range``;
-    all default to (1.0, 1.0) for no-op behavior. PhysX tensor views live on
-    CPU, so we move indices/tensors accordingly. Object-mass cache used by
-    ``apply_wrench_dr`` is kept in sync so the impulse magnitudes scale with
-    the simulated mass.
-    """
-    dr = env.cfg.domain_randomization
-    n = env_ids.numel()
-    env_ids_cpu = env_ids.detach().cpu()
-
-    mass_lo, mass_hi = float(dr.object_mass_scale_range[0]), float(dr.object_mass_scale_range[1])
-    obj_fric_lo, obj_fric_hi = float(dr.object_friction_scale_range[0]), float(dr.object_friction_scale_range[1])
-    ft_fric_lo, ft_fric_hi = float(dr.fingertip_friction_scale_range[0]), float(dr.fingertip_friction_scale_range[1])
-
-    mass_active = (mass_lo, mass_hi) != (1.0, 1.0)
-    obj_fric_active = (obj_fric_lo, obj_fric_hi) != (1.0, 1.0)
-    ft_fric_active = (ft_fric_lo, ft_fric_hi) != (1.0, 1.0)
-    if not (mass_active or obj_fric_active or ft_fric_active):
-        return
-
-    if mass_active and hasattr(env, "object"):
-        obj_view = env.object.root_physx_view
-        default_masses = env.object.data.default_mass.detach().cpu()  # (N_envs, N_bodies)
-        scale = torch.empty(n, 1, device="cpu").uniform_(mass_lo, mass_hi)
-        new_masses = default_masses[env_ids_cpu] * scale
-        obj_view.set_masses(new_masses, env_ids_cpu)
-        # Keep wrench-DR cache (used to scale impulses) in sync.
-        env._object_mass[env_ids] = new_masses[:, 0:1].to(env.device)
-
-    if obj_fric_active and hasattr(env, "object") and hasattr(env, "_n_object_shapes"):
-        obj_view = env.object.root_physx_view
-        materials = obj_view.get_material_properties()  # (N_envs, N_shapes, 3)
-        base = float(env._base_object_friction)
-        scale = torch.empty(n, env._n_object_shapes, device="cpu").uniform_(obj_fric_lo, obj_fric_hi)
-        new_fric = base * scale
-        materials[env_ids_cpu, :, 0] = new_fric  # static
-        materials[env_ids_cpu, :, 1] = new_fric  # dynamic
-        obj_view.set_material_properties(materials, env_ids_cpu)
-
-    if ft_fric_active and hasattr(env, "_robot_fingertip_shape_mask"):
-        robot_view = env.robot.root_physx_view
-        materials = robot_view.get_material_properties()
-        ft_indices = env._robot_fingertip_shape_mask.nonzero(as_tuple=True)[0]  # (n_ft,)
-        n_ft = ft_indices.numel()
-        if n_ft > 0:
-            base = float(env._base_finger_tip_friction)
-            scale = torch.empty(n, n_ft, device="cpu").uniform_(ft_fric_lo, ft_fric_hi)
-            new_fric = base * scale
-            row_idx = env_ids_cpu.unsqueeze(-1).expand(-1, n_ft)   # (n, n_ft)
-            col_idx = ft_indices.unsqueeze(0).expand(n, -1)        # (n, n_ft)
-            materials[row_idx, col_idx, 0] = new_fric
-            materials[row_idx, col_idx, 1] = new_fric
-            robot_view.set_material_properties(materials, env_ids_cpu)
-
-
 def reset_env_state(env, env_ids: torch.Tensor) -> None:
     """Full per-env reset after ``super()._reset_idx``."""
     n = env_ids.numel()
@@ -446,7 +388,6 @@ def reset_env_state(env, env_ids: torch.Tensor) -> None:
     _randomize_robot_dof_state(env, env_ids)
     _reset_table_pose(env, env_ids)
     _reset_object_pose(env, env_ids)
-    _randomize_object_physics(env, env_ids)
     _reset_goal_pose(env, env_ids, mode="absolute")  # full reset → always absolute
 
     env._prev_episode_successes[env_ids] = env._successes[env_ids]

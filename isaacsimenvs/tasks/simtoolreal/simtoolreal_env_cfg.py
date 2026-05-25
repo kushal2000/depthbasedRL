@@ -478,13 +478,23 @@ class DomainRandomizationCfg:
     torque_decay_interval: float = 0.08
     torque_only_when_lifted: bool = True
 
-    # Per-env physics randomization at episode reset (multiplicative scales
-    # of the base values from AssetsCfg / URDF default mass). Default
-    # (1.0, 1.0) is a no-op so existing runs are unaffected. Scale is
-    # uniform-random per env, sampled once per reset.
-    object_mass_scale_range: tuple[float, float] = (1.0, 1.0)
+    # Per-env friction randomization, sampled ONCE at scene init (not at
+    # reset). Multiplicative scales of the AssetsCfg base values. Default
+    # (1.0, 1.0) is a no-op so existing runs are unaffected.
+    #
+    # Why init-only with bucketing: PhysX caps live materials at 64K and
+    # set_material_properties creates a new material per distinct
+    # (static, dynamic, restitution) tuple, so per-reset randomization
+    # exhausts the limit in seconds. Init-only with discrete buckets caps
+    # the material count at ~`friction_n_buckets` per axis.
+    #
+    # Mass randomization is not exposed: set_masses raises
+    # "Failed to set rigid body masses in backend" in this Isaac Lab /
+    # PhysX configuration. The proper path is Isaac Lab's
+    # EventCfg.ActorMassRandomization, which is a larger refactor.
     object_friction_scale_range: tuple[float, float] = (1.0, 1.0)
     fingertip_friction_scale_range: tuple[float, float] = (1.0, 1.0)
+    friction_n_buckets: int = 16
 
 
 # ----------------------------------------------------------------------------

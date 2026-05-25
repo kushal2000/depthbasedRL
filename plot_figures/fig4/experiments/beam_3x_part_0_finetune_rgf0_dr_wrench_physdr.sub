@@ -64,9 +64,10 @@ TORQUE_SCALE=2.0
 FORCE_ONLY_WHEN_LIFTED=False
 TORQUE_ONLY_WHEN_LIFTED=False
 
-# ── Per-env physics DR (mass + friction) ─────────────────────
-# Multiplicative scales of the URDF/cfg base values, sampled per-env at reset.
-OBJECT_MASS_SCALE_RANGE="[0.8,1.2]"
+# ── Per-env friction DR (init-only, bucketed) ────────────────
+# Multiplicative scales of AssetsCfg base friction (object 0.5, fingertip 1.5),
+# sampled per env ONCE at scene init. Quantized to 16 buckets to stay under
+# PhysX's 64K-material cap. Mass DR is unsupported in this PhysX configuration.
 OBJECT_FRICTION_SCALE_RANGE="[0.7,1.5]"
 FINGERTIP_FRICTION_SCALE_RANGE="[0.55,1.5]"
 
@@ -187,7 +188,6 @@ python -u isaacsimenvs/train.py \
     env.domain_randomization.torque_scale=$TORQUE_SCALE \
     env.domain_randomization.force_only_when_lifted=$FORCE_ONLY_WHEN_LIFTED \
     env.domain_randomization.torque_only_when_lifted=$TORQUE_ONLY_WHEN_LIFTED \
-    "env.domain_randomization.object_mass_scale_range=$OBJECT_MASS_SCALE_RANGE" \
     "env.domain_randomization.object_friction_scale_range=$OBJECT_FRICTION_SCALE_RANGE" \
     "env.domain_randomization.fingertip_friction_scale_range=$FINGERTIP_FRICTION_SCALE_RANGE" \
     env.domain_randomization.use_obs_delay=$USE_OBS_DELAY \
