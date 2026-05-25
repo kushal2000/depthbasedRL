@@ -60,10 +60,10 @@ DISPLAY = {
         "colors": COMPARISON_COLORS,
     },
     "ObjectDiversityPlay2Win": {
-        "title": "L-peg: object diversity, 1000 objects (ours) replacing 1000 objects",
+        "title": "L-peg: object diversity, 1000 objects (Ours) replacing 1000 objects",
         "ylabel": "Success Rate (%)",
         "checkpoint_labels": {
-            "Play2Win": "1000 objects (ours)",
+            "Play2Win": "1000 objects (Ours)",
             "100_obj": "100 objects",
             "10_obj": "10 objects",
             "1_obj": "1 object",

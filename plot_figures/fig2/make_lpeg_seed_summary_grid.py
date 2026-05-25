@@ -51,7 +51,7 @@ CHECKPOINT_SEED_FILTERS = {
 ROW_TITLES = {
     "TrainingObjective": "Training objective",
     "ObjectDiversity": "Object diversity",
-    "ObjectDiversityPlay2Win": "Object diversity + ours baseline",
+    "ObjectDiversityPlay2Win": "Object diversity + Ours baseline",
 }
 
 COLUMN_TITLES = (
