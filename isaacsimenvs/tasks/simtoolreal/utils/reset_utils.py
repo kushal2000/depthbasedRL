@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import json
+from pathlib import Path
+
 import torch
 
 from isaaclab.utils.math import random_orientation
@@ -169,6 +172,27 @@ def allocate_state_buffers(env) -> None:
         env.num_envs, dtype=torch.bool, device=env.device
     )
 
+    # --- Fixed-trajectory pool (trajectory_count ablation) ---
+    # Loaded once at init from the JSON file. Different runs share the same
+    # file and pick the first N via cfg.reset.fixed_trajectory_count
+    # (0 = take all). Empty filename = ablation disabled (baseline path).
+    if env.cfg.reset.fixed_trajectory_file:
+        path = Path(env.cfg.reset.fixed_trajectory_file)
+        with open(path) as f:
+            payload = json.load(f)
+        all_pos = torch.tensor(payload["pos"], device=env.device, dtype=torch.float32)
+        all_quat = torch.tensor(payload["quat_wxyz"], device=env.device, dtype=torch.float32)
+        n_total = all_pos.shape[0]
+        n_take = env.cfg.reset.fixed_trajectory_count or n_total
+        if n_take > n_total:
+            raise ValueError(
+                f"fixed_trajectory_count={n_take} exceeds pool size {n_total} in {path}"
+            )
+        env._fixed_traj_pos = all_pos[:n_take].contiguous()    # (N, K, 3)
+        env._fixed_traj_quat = all_quat[:n_take].contiguous()  # (N, K, 4)
+        env._traj_id = torch.zeros(env.num_envs, dtype=torch.long, device=env.device)
+        env._traj_step = torch.zeros(env.num_envs, dtype=torch.long, device=env.device)
+
     # set the reward buffer to 0
     env.reward_buf = torch.zeros(env.num_envs, device=env.device)
 
@@ -287,6 +311,33 @@ def _reset_goal_pose(env, env_ids: torch.Tensor, mode: str) -> None:
         fixed = torch.as_tensor(cfg.fixed_goal_pose, device=env.device, dtype=torch.float32)
         new_pos_local = fixed[:3].unsqueeze(0).expand(n, -1)
         new_quat = fixed[3:].unsqueeze(0).expand(n, -1)
+        pose = torch.cat([new_pos_local + env_origins, new_quat], dim=-1)
+        env.goal_viz.write_root_pose_to_sim(pose, env_ids=env_ids)
+        return
+
+    # Fixed-trajectory ablation: ignore goal_sampling_type, draw from the
+    # pre-loaded pool. mode acts as the "hard reset vs intra-episode" signal:
+    #   "absolute" → fresh episode → pick new traj_id, reset step to 0
+    #   anything else → intra-episode goal-hit → advance step
+    # The K-th success briefly calls this with step=K (out of bounds) before
+    # max_consecutive_successes terminates the episode; the clamp keeps the
+    # lookup safe — the goal we write is then immediately overwritten by the
+    # full reset.
+    if cfg.fixed_trajectory_file:
+        K = env._fixed_traj_pos.shape[1]
+        if mode == "absolute":
+            n_traj = env._fixed_traj_pos.shape[0]
+            env._traj_id[env_ids] = torch.randint(
+                0, n_traj, (n,), device=env.device, dtype=torch.long,
+            )
+            env._traj_step[env_ids] = 0
+        else:
+            env._traj_step[env_ids] = env._traj_step[env_ids] + 1
+
+        traj_id = env._traj_id[env_ids]
+        step_clamped = env._traj_step[env_ids].clamp(max=K - 1)
+        new_pos_local = env._fixed_traj_pos[traj_id, step_clamped]
+        new_quat = env._fixed_traj_quat[traj_id, step_clamped]
         pose = torch.cat([new_pos_local + env_origins, new_quat], dim=-1)
         env.goal_viz.write_root_pose_to_sim(pose, env_ids=env_ids)
         return
