@@ -35,8 +35,9 @@ from _style import configure_rcparams, style_axis  # noqa: E402
 METRIC = "episode_final/feasible_normalized_all_goals_hit"
 X_AXIS = "relative_env_frames"
 SUMMARY_X_MAX_BILLIONS = 3.0
-AXIS_LABEL_FONT_SIZE = 15
-TICK_LABEL_FONT_SIZE = 15
+AXIS_LABEL_FONT_SIZE = 12
+TICK_LABEL_FONT_SIZE = 10
+TITLE_FONT_SIZE = 13
 FAMILY_SEED_FILTERS = {
     "ObjectDiversity": {0, 2, 3},
 }
@@ -66,7 +67,7 @@ def _configure_big_text() -> None:
         {
             "font.size": 13,
             "axes.labelsize": AXIS_LABEL_FONT_SIZE,
-            "axes.titlesize": 16,
+            "axes.titlesize": TITLE_FONT_SIZE,
             "xtick.labelsize": TICK_LABEL_FONT_SIZE,
             "ytick.labelsize": TICK_LABEL_FONT_SIZE,
             "legend.fontsize": AXIS_LABEL_FONT_SIZE,
@@ -113,7 +114,7 @@ def _style_common_axis(ax: plt.Axes, *, x_max_billions: float | None, show_ylabe
     ax.set_yticks([0, 25, 50, 75, 100])
     ax.set_yticklabels([f"{v}%" for v in [0, 25, 50, 75, 100]])
     if show_ylabel:
-        ax.set_ylabel("Success Rate (%)")
+        ax.set_ylabel("Success Rate")
     else:
         ax.set_ylabel("")
     style_axis(ax)
@@ -191,7 +192,7 @@ def _plot_summary(
     ax.legend(
         frameon=False,
         loc="upper center",
-        bbox_to_anchor=(0.5, -0.24),
+        bbox_to_anchor=(0.5, -0.34),
         ncol=2,
         fontsize=AXIS_LABEL_FONT_SIZE,
         columnspacing=0.9,
@@ -214,7 +215,7 @@ def _save_standalone_clean_summary(family: str, grouped: list[tuple[str, str, st
     fig, ax = plt.subplots(figsize=(5.4, 3.05), dpi=220)
     _plot_summary(ax, grouped, show_seed_traces=False, show_ylabel=True)
     output = DEFAULT_OUT_DIR / _standalone_summary_name(family)
-    fig.tight_layout(pad=0.08, rect=(0.0, 0.11, 1.0, 1.0))
+    fig.tight_layout(pad=0.08, rect=(0.0, 0.18, 1.0, 1.0))
     _save_png_pdf(fig, output)
     plt.close(fig)
 
@@ -224,7 +225,7 @@ def main() -> None:
     fig, axes = plt.subplots(3, 3, figsize=(14.1, 9.1), dpi=220)
 
     for col_idx, title in enumerate(COLUMN_TITLES):
-        axes[0, col_idx].set_title(title, fontsize=16, pad=8)
+        axes[0, col_idx].set_title(title, fontsize=TITLE_FONT_SIZE, pad=8)
 
     for row_idx, family in enumerate(("TrainingObjective", "ObjectDiversity", "ObjectDiversityPlay2Win")):
         family_data = _load_family(DEFAULT_DATA_DIR, family)
@@ -237,14 +238,14 @@ def main() -> None:
             rotation=90,
             ha="center",
             va="center",
-            fontsize=15,
+            fontsize=12,
         )
         _plot_individual(axes[row_idx, 0], grouped)
         _plot_summary(axes[row_idx, 1], grouped, show_seed_traces=True)
         _plot_summary(axes[row_idx, 2], grouped, show_seed_traces=False)
         _save_standalone_clean_summary(family, grouped)
 
-    fig.tight_layout(rect=(0.01, 0.06, 1.0, 1.0), h_pad=2.0, w_pad=0.55)
+    fig.tight_layout(rect=(0.01, 0.10, 1.0, 1.0), h_pad=2.6, w_pad=0.55)
 
     output = DEFAULT_OUT_DIR / "lpeg_seed_ablation_summary_grid_3x3_relative_frames_objectdiv_seeds0-2-3_summary3B.png"
     _save_png_pdf(fig, output)
