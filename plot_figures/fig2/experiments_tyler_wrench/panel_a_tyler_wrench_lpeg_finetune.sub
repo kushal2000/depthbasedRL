@@ -26,6 +26,7 @@ GOAL_MODE="${GOAL_MODE:-preInsertAndFinal}"
 CHECKPOINT_FAMILY="${CHECKPOINT_FAMILY:-ObjectDiversity}"
 CHECKPOINT_TAG="${CHECKPOINT_TAG:-1_obj}"
 CHECKPOINT="${CHECKPOINT:-/juno/u/kedia/depthbasedRL/train_dir/${CHECKPOINT_FAMILY}/${CHECKPOINT_TAG}/model.pth}"
+CONDITION_TAG="${CONDITION_TAG:-wrench}"
 
 # Full L-peg teacher scale. Jobs should be walltime-limited, not iteration-limited.
 NUM_ENVS="${NUM_ENVS:-12288}"
@@ -115,7 +116,7 @@ CHECKPOINT_SLUG="${CHECKPOINT_SLUG//\//_}"
 DATETIME="$(date +"%Y-%m-%d_%H-%M-%S")"
 EXPERIMENT_NAME="${EXPERIMENT_TAG}_${CHECKPOINT_SLUG}_${DATETIME}"
 if [[ -n "${SLURM_JOB_ID:-}" ]]; then
-    scontrol update JobId="$SLURM_JOB_ID" JobName="lpeg-wrench-${CHECKPOINT_TAG}-s${SEED}" || true
+    scontrol update JobId="$SLURM_JOB_ID" JobName="lpeg-${CONDITION_TAG}-${CHECKPOINT_TAG}-s${SEED}" || true
 fi
 
 RUN_ROOT="${RUN_ROOT:-${REPO_ROOT}/train_dir}"
@@ -140,6 +141,7 @@ echo "Run dir:              $HYDRA_RUN_DIR"
 echo "Checkpoint family:    $CHECKPOINT_FAMILY"
 echo "Checkpoint tag:       $CHECKPOINT_TAG"
 echo "Checkpoint:           $CHECKPOINT"
+echo "Condition tag:        $CONDITION_TAG"
 echo "Seed:                 $SEED"
 echo "Num envs:             $NUM_ENVS"
 echo "Minibatch size:       $MINIBATCH_SIZE"
