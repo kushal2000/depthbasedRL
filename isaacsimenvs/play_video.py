@@ -41,6 +41,11 @@ def main() -> None:
     parser.add_argument("--out", default=None, help="Output mp4 path (default: videos/<task>_rollout.mp4)")
     parser.add_argument("--rl_device", default="cuda:0")
     parser.add_argument("--deterministic", action="store_true", help="Use deterministic policy (mean)")
+    parser.add_argument(
+        "--goal_mode",
+        default=None,
+        help="Override env_cfg.peg_in_hole.goal_mode before instantiation (e.g. 'dense').",
+    )
     my_args = parser.parse_args()
 
     from isaaclab.app import AppLauncher
@@ -66,6 +71,8 @@ def main() -> None:
     # step/reset semantics needed, and DirectRLEnv exposes .scene / .sim directly.
     env_cfg = load_cfg_from_registry(my_args.task, "env_cfg_entry_point")
     env_cfg.scene.num_envs = my_args.num_envs
+    if my_args.goal_mode is not None and hasattr(env_cfg, "peg_in_hole"):
+        env_cfg.peg_in_hole.goal_mode = my_args.goal_mode
 
     spec = gym.spec(my_args.task)
     mod_name, cls_name = spec.entry_point.split(":")
@@ -78,8 +85,8 @@ def main() -> None:
     camera_cfg = CameraCfg(
         prim_path="/World/RecordCamera",
         update_period=0,
-        height=480,
-        width=640,
+        height=1080,
+        width=1920,
         data_types=["rgb"],
         spawn=sim_utils.PinholeCameraCfg(
             focal_length=24.0,
@@ -140,11 +147,20 @@ def main() -> None:
     # `has_batch_dimension` is only set inside `player.run()`, which we bypass.
     # Our obs are always batched (num_envs, obs_dim), so set it explicitly.
     player.has_batch_dimension = True
+    # Allocate LSTM hidden state (no-op for non-RNN models). Without this,
+    # `player.get_action` for an LSTM checkpoint crashes inside
+    # `network_builder.py` with `len(states)` on None.
+    player.reset()
 
     # --- Rollout + capture ---
     obs = player.env_reset(wrapped)
-    dt = env.sim.get_physics_dt()
-    capture_every = max(1, round((1.0 / my_args.video_fps) / dt))
+    # Use the policy dt (sim_dt × decimation), not the raw physics dt:
+    # the rollout loop advances one policy step (= `decimation` physics steps)
+    # per `env.step()`. Capturing every Nth physics step would oversample.
+    physics_dt = env.sim.get_physics_dt()
+    decimation = int(getattr(env.cfg, "decimation", 1) or 1)
+    policy_dt = physics_dt * decimation
+    capture_every = max(1, round((1.0 / my_args.video_fps) / policy_dt))
 
     frames = []
     print(f"[play_video] Rolling out {my_args.steps} steps on {my_args.num_envs} envs...", flush=True)
@@ -153,7 +169,7 @@ def main() -> None:
         obs, rew, dones, infos = player.env_step(wrapped, action)
 
         if step_i % capture_every == 0:
-            camera.update(capture_every * dt)
+            camera.update(capture_every * policy_dt)
             rgb = camera.data.output["rgb"]
             if rgb is not None and rgb.shape[0] > 0:
                 frame = rgb[0].cpu().numpy()[:, :, :3]

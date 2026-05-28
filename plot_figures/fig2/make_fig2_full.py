@@ -35,19 +35,19 @@ OUT = REPO / "plot_figures" / "fig2" / "outputs"
 COLORS = {
     "Play2Win": "#2C7BB6",
     "Scratch_dense": "#E08214",
-    "Scratch_task": "#D6604D",
+    "Scratch_task": "#8C8C8C",
 }
 TASKS_A = ["Peg-In-Hole", "Asm-Pillar", "Asm-Beam", "Screw-Leg"]
 NFRAMES = 4
 
 LABEL_PB = {
-    "Play2Win":           ("Play2Win",                "#2C7BB6"),
-    "Scratch_multistage": ("Scratch (dense reward)",  "#E08214"),
-    "Scratch_task":       ("Scratch (task reward)",   "#D6604D"),
+    "Play2Win":           ("Play2Perfect (sparse reward)", "#2C7BB6"),
+    "Scratch_multistage": ("Scratch (dense reward)",       "#E08214"),
+    "Scratch_task":       ("Scratch (sparse reward)",      "#8C8C8C"),
 }
 LABEL_PC = {
-    "play2win":           ("Play2Win",                "#2C7BB6"),
-    "scratch_multistage": ("Scratch (dense reward)",  "#E08214"),
+    "play2win":           ("Play2Perfect (sparse reward)", "#2C7BB6"),
+    "scratch_multistage": ("Scratch (dense reward)",       "#E08214"),
 }
 
 
@@ -86,7 +86,7 @@ def main():
         pts = panel_a[task]["pts"]
         xs = [p[0] for p in pts]
         ys = [100 * p[1] for p in pts]
-        h0, = ax.plot(xs, ys, color=COLORS["Play2Win"], linewidth=lw_a_main, label="Play2Win")
+        h0, = ax.plot(xs, ys, color=COLORS["Play2Win"], linewidth=lw_a_main, label="Play2Perfect (sparse reward)")
         if xs[-1] < 24.0:
             ax.plot([xs[-1], 24.0], [ys[-1], ys[-1]], color=COLORS["Play2Win"], linewidth=lw_a_main)
         h1, = ax.plot(
@@ -95,7 +95,7 @@ def main():
         )
         h2, = ax.plot(
             [0, 24.0], [2.0, 2.0], color=COLORS["Scratch_task"], linewidth=lw_a_base,
-            label="Scratch (task reward)",
+            label="Scratch (sparse reward)",
         )
         if handles_a is None:
             handles_a = [h0, h1, h2]

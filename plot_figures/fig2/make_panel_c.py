@@ -2,7 +2,7 @@
 
 Methods (each is one curve with hollow circle markers at the 11 force scales
 {0, 5, 10, 15, 20, 25, 30, 35, 40, 45, 50} N):
-    Play2Win (blue)
+    Play2Perfect (sparse reward) (blue)
     Scratch (dense reward) (orange)
 
 Each data point is a single forceScale eval with 128 parallel envs (no
@@ -28,8 +28,8 @@ DATA_DIR = REPO / "outputs" / "fig2_panel_bcd"
 OUT = REPO / "plot_figures" / "fig2" / "outputs"
 
 LABELS = {
-    "play2win":           ("Play2Win",                "#2C7BB6"),
-    "scratch_multistage": ("Scratch (dense reward)",  "#E08214"),
+    "play2win":           ("Play2Perfect (sparse reward)", "#2C7BB6"),
+    "scratch_multistage": ("Scratch (dense reward)",       "#E08214"),
 }
 
 

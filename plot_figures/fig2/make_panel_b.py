@@ -1,13 +1,13 @@
 """Render panel (b) of fig 2: training-time success curves on the toy fixtured task.
 
 Methods:
-    Play2Win (blue)
+    Play2Perfect (sparse reward) (blue)
     Scratch (dense reward) (orange)
-    Scratch (task reward) (red)
+    Scratch (sparse reward) (red)
 
 Annotation "Matches Scratch in 4.1h (Nx faster)" is drawn in the bottom-left
 interior at (x=40h, y=13%). A short dashed vertical at the crossing time marks
-where Play2Win first reaches Scratch (dense reward)'s terminal success rate.
+where Play2Perfect first reaches Scratch (dense reward)'s terminal success rate.
 
 Reads:
     outputs/fig2_panel_bcd/panel_b_curves.json
@@ -28,9 +28,9 @@ DATA_DIR = REPO / "outputs" / "fig2_panel_bcd"
 OUT = REPO / "plot_figures" / "fig2" / "outputs"
 
 LABELS = {
-    "Play2Win":           ("Play2Win",                "#2C7BB6"),
-    "Scratch_multistage": ("Scratch (dense reward)",  "#E08214"),
-    "Scratch_task":       ("Scratch (task reward)",   "#D6604D"),
+    "Play2Win":           ("Play2Perfect (sparse reward)", "#2C7BB6"),
+    "Scratch_multistage": ("Scratch (dense reward)",       "#E08214"),
+    "Scratch_task":       ("Scratch (sparse reward)",      "#8C8C8C"),
 }
 X_MAX = 140.0
 LW = 1.5

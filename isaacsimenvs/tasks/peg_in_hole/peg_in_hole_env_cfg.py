@@ -16,6 +16,10 @@ VALID_GOAL_MODES = (
     "preInsertAndFinal",
     "finalGoalOnly",
     "transportPreInsertFinal",
+    # Fixtured-env-only mode: trajectory waypoints come from scenes.npz
+    # (per-scene precomputed dense paths). Validation happens via the
+    # fixtured env's _configure_problem override.
+    "dense",
 )
 
 
