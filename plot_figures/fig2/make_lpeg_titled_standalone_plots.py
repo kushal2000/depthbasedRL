@@ -35,22 +35,22 @@ PANEL_SPECS = (
     (
         "ObjectDiversityPlay2Win",
         "(a) Object Diversity",
-        "lpeg_panel_a_object_diversity_titled_3B.png",
+        "lpeg_panel_a_object_diversity_titled_4B.png",
     ),
     (
         "TrainingObjective",
         "(b) Training Objective",
-        "lpeg_panel_b_training_objective_titled_3B.png",
+        "lpeg_panel_b_training_objective_titled_4B.png",
     ),
     (
         "DummyNumTrajectories",
         "(c) Trajectory Diversity",
-        "lpeg_panel_c_trajectory_diversity_titled_3B.png",
+        "lpeg_panel_c_trajectory_diversity_titled_4B.png",
     ),
     (
         "DummySuccessTolerance",
         "(d) Play Precision",
-        "lpeg_panel_d_play_precision_titled_3B.png",
+        "lpeg_panel_d_play_precision_titled_4B.png",
     ),
 )
 

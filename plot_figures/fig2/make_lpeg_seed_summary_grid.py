@@ -35,7 +35,8 @@ from _style import STYLES, configure_rcparams, style_axis  # noqa: E402
 
 METRIC = "episode_final/feasible_normalized_all_goals_hit"
 X_AXIS = "relative_env_frames"
-SUMMARY_X_MAX_BILLIONS = 3.0
+SUMMARY_X_MAX_BILLIONS = 4.0
+SUMMARY_X_MAX_SLUG = "4B"
 AXIS_LABEL_FONT_SIZE = 12
 TICK_LABEL_FONT_SIZE = 10
 TITLE_FONT_SIZE = 13
@@ -50,23 +51,23 @@ CHECKPOINT_SEED_FILTERS = {
 }
 DUMMY_STANDALONE_SPECS = {
     "DummySuccessTolerance": (
-        ("Success threshold = 1 cm (Ours)", "#2C7BB6", "play2win"),
+        ("Success Threshold = 1 cm (Ours)", "#2C7BB6", "play2win"),
         ("2.5 cm", STYLES["RotationOnly"][0], "zero"),
         ("5 cm", STYLES["SingleGoal"][0], "zero"),
         ("10 cm", "#E08214", "zero"),
     ),
     "DummyNumTrajectories": (
-        ("Random trajectories (Ours)", "#2C7BB6", "play2win"),
-        ("100 trajectories", STYLES["RotationOnly"][0], "zero"),
-        ("10 trajectories", STYLES["SingleGoal"][0], "zero"),
-        ("1 trajectory", "#E08214", "zero"),
+        ("Random Trajectories (Ours)", "#2C7BB6", "play2win"),
+        ("100 Trajectories", STYLES["RotationOnly"][0], "zero"),
+        ("10 Trajectories", STYLES["SingleGoal"][0], "zero"),
+        ("1 Trajectory", "#E08214", "zero"),
     ),
 }
 
 ROW_TITLES = {
-    "TrainingObjective": "Training objective",
-    "ObjectDiversity": "Object diversity",
-    "ObjectDiversityPlay2Win": "Object diversity + Ours baseline",
+    "TrainingObjective": "Training Objective",
+    "ObjectDiversity": "Object Diversity",
+    "ObjectDiversityPlay2Win": "Object Diversity + 1000 Objects (Ours)",
 }
 
 COLUMN_TITLES = (
@@ -256,15 +257,15 @@ def _plot_summary(
 
 def _standalone_summary_name(family: str) -> str:
     if family == "TrainingObjective":
-        return "lpeg_top_right_trainingobjective_mean_std_clean_3B.png"
+        return f"lpeg_top_right_trainingobjective_mean_std_clean_{SUMMARY_X_MAX_SLUG}.png"
     if family == "ObjectDiversity":
-        return "lpeg_middle_right_objectdiversity_1000obj_mean_std_clean_3B.png"
+        return f"lpeg_middle_right_objectdiversity_1000obj_mean_std_clean_{SUMMARY_X_MAX_SLUG}.png"
     if family == "ObjectDiversityPlay2Win":
-        return "lpeg_bottom_right_objectdiversity_play2perfect_mean_std_clean_3B.png"
+        return f"lpeg_bottom_right_objectdiversity_play2perfect_mean_std_clean_{SUMMARY_X_MAX_SLUG}.png"
     if family == "DummySuccessTolerance":
-        return "lpeg_dummy_success_tolerance_mean_std_clean_3B.png"
+        return f"lpeg_dummy_success_tolerance_mean_std_clean_{SUMMARY_X_MAX_SLUG}.png"
     if family == "DummyNumTrajectories":
-        return "lpeg_dummy_num_trajectories_mean_std_clean_3B.png"
+        return f"lpeg_dummy_num_trajectories_mean_std_clean_{SUMMARY_X_MAX_SLUG}.png"
     raise ValueError(f"Unexpected family: {family}")
 
 
@@ -328,7 +329,7 @@ def main() -> None:
 
     fig.tight_layout(rect=(0.01, 0.0, 1.0, 1.0), h_pad=1.2, w_pad=0.55)
 
-    output = DEFAULT_OUT_DIR / "lpeg_seed_ablation_summary_grid_3x3_relative_frames_objectdiv_seeds0-2-3_summary3B.png"
+    output = DEFAULT_OUT_DIR / f"lpeg_seed_ablation_summary_grid_3x3_relative_frames_objectdiv_seeds0-2-3_summary{SUMMARY_X_MAX_SLUG}.png"
     _save_png_pdf(fig, output)
     plt.close(fig)
 
