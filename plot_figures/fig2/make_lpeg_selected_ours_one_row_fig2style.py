@@ -101,6 +101,29 @@ def _use_wrench_training_objective(panels: list[narrow.PanelSpec], wrench: dict)
     )
 
 
+def _set_trajectory_10_condition(
+    panels: list[narrow.PanelSpec],
+    traj_precision: dict,
+    *,
+    condition: str,
+) -> None:
+    """Swap the Trajectory Diversity 10-trajectory curve condition."""
+    if condition == "wrench":
+        return
+    panels[2].series[2] = base.SeriesSpec(
+        "10",
+        FIG2_COLORS["tertiary"],
+        base._curves_from_traj_precision(
+            traj_precision,
+            condition=condition,
+            family="Trajectory_Count",
+            checkpoint="10",
+            seeds=(0, 1, 2),
+            name=f"{condition}_10_traj",
+        ),
+    )
+
+
 def _add_temporary_fourth_curves(
     panels: list[narrow.PanelSpec],
     *,
@@ -438,6 +461,12 @@ def main() -> None:
         help="Whether the RotationOnly/TranslationOnly baselines use no-wrench or wrench curves.",
     )
     parser.add_argument(
+        "--trajectory-10-condition",
+        choices=["wrench", "no_wrench"],
+        default="wrench",
+        help="Whether the Trajectory Diversity 10-trajectory curve uses wrench or no-wrench runs.",
+    )
+    parser.add_argument(
         "--legend-layouts",
         nargs="+",
         default=["ours_first", "one_row", "three_row"],
@@ -458,6 +487,7 @@ def main() -> None:
     panels = narrow._build_panels(wrench, traj_precision, no_training)
     if args.training_objective_condition == "wrench":
         _use_wrench_training_objective(panels, wrench)
+    _set_trajectory_10_condition(panels, traj_precision, condition=args.trajectory_10_condition)
     if args.include_temp_fourth_curves:
         _add_temporary_fourth_curves(
             panels,

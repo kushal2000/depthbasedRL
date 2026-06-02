@@ -149,14 +149,78 @@ def _plot_2x2(curves: list[Curve], output: Path, *, x_max_billions: float) -> No
     plt.close(fig)
 
 
+def _plot_traj10_overlay(data: dict[str, Any], output: Path, *, x_max_billions: float) -> None:
+    configure_rcparams()
+    plt.rcParams.update(
+        {
+            "font.family": "sans-serif",
+            "font.sans-serif": ["DejaVu Sans", "Liberation Sans", "Arial"],
+            "mathtext.fontset": "dejavusans",
+        }
+    )
+    colors = {"wrench": "#E08214", "no_wrench": "#8C8C8C"}
+    condition_labels = {"wrench": "Wrench", "no_wrench": "No Wrench"}
+    linestyles = {0: "-", 1: "--", 2: "-.", 3: ":"}
+
+    fig, ax = plt.subplots(1, 1, figsize=(4.2, 3.0), dpi=240)
+    for condition in ("wrench", "no_wrench"):
+        bucket = data["conditions"][condition]["Trajectory_Count"]["runs"].get("10", {})
+        for seed_key, seed_data in sorted(bucket.items(), key=lambda kv: int(kv[0])):
+            seed = int(seed_key)
+            if seed not in (0, 1, 2):
+                continue
+            curve = _curve(condition, "Trajectory_Count", "10", seed_data)
+            if curve is None:
+                continue
+            x_b = curve.x / 1e9
+            visible = x_b <= x_max_billions
+            if not np.any(visible):
+                continue
+            ax.plot(
+                x_b[visible],
+                100.0 * curve.y[visible],
+                color=colors[condition],
+                linestyle=linestyles.get(seed, "-"),
+                linewidth=1.8,
+                alpha=0.95,
+                label=f"{condition_labels[condition]} seed {seed}",
+            )
+
+    ax.set_title("10 Trajectory Seeds", fontsize=12)
+    ax.set_xlim(0.0, x_max_billions)
+    ax.set_ylim(-3.0, 104.0)
+    xticks = np.arange(0.0, x_max_billions + 0.5, 1.0)
+    ax.set_xticks(xticks)
+    ax.set_xticklabels(["0"] + [f"{int(v)}B" for v in xticks[1:]], fontsize=9)
+    ax.set_yticks([0, 25, 50, 75, 100])
+    ax.set_yticklabels([f"{v}%" for v in [0, 25, 50, 75, 100]], fontsize=9)
+    ax.set_xlabel("Env steps", fontsize=10)
+    ax.set_ylabel("Success rate", fontsize=10)
+    style_axis(ax)
+    ax.legend(frameon=False, loc="lower right", fontsize=8)
+    fig.subplots_adjust(left=0.16, right=0.98, top=0.88, bottom=0.16)
+    _save(fig, output)
+    plt.close(fig)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--data", type=Path, default=DATA_PATH)
     parser.add_argument("--x-max-billions", type=float, default=4.0)
     parser.add_argument("--slug", default="4B")
+    parser.add_argument("--traj10-overlay", action="store_true")
     args = parser.parse_args()
 
-    curves = _curves(_load_data(args.data))
+    data = _load_data(args.data)
+    if args.traj10_overlay:
+        _plot_traj10_overlay(
+            data,
+            OUT_DIR / f"lpeg_traj10_wrench_vs_no_wrench_seed_overlay_{args.slug}.png",
+            x_max_billions=args.x_max_billions,
+        )
+        return
+
+    curves = _curves(data)
     _plot_2x2(
         curves,
         OUT_DIR / f"lpeg_traj_precision_seed_traces_2x2_{args.slug}.png",
