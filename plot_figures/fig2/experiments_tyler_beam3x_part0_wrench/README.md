@@ -46,8 +46,12 @@ Jobs default to full scale:
 NUM_ENVS=12288
 MINIBATCH_SIZE=98304
 EXPL_COEF_BLOCK_SIZE=2048
-TIME_LIMIT=1-12:00:00
+MOVE_TIME_LIMIT=1-00:00:00
+LONG_TIME_LIMIT=1-12:00:00
 ```
+
+The `move` partition rejects 36 hour jobs with `PartitionTimeLimit`, so move
+jobs use 24 hours. `humanoid`, `juno`, and `juno-lo` jobs use 36 hours.
 
 Previous full-scale `beam_3x_part_0` move3 A5000 jobs OOMed immediately after
 environment setup. If that repeats, resubmit failed A5000 jobs with:

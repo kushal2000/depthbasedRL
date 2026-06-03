@@ -13,8 +13,10 @@ ENV_BASE="${ENV_BASE:-/move/u/tylerlum/github_repos/depthbasedRL/.venv-isaacsim-
 ENV_RTX="${ENV_RTX:-/move/u/tylerlum/github_repos/depthbasedRL_rtx6000/.venv-isaacsim-rtx6000-cu128-py311}"
 
 DRY_RUN="${DRY_RUN:-1}"
-TIME_LIMIT="${TIME_LIMIT:-1-12:00:00}"
+MOVE_TIME_LIMIT="${MOVE_TIME_LIMIT:-1-00:00:00}"
+LONG_TIME_LIMIT="${LONG_TIME_LIMIT:-1-12:00:00}"
 WANDB_GROUP="${WANDB_GROUP:-panel_a_teachers_tyler_beam3x_part0_wrench}"
+JOB_INDICES="${JOB_INDICES:-}"
 
 NUM_ENVS="${NUM_ENVS:-12288}"
 MINIBATCH_SIZE="${MINIBATCH_SIZE:-98304}"
@@ -112,6 +114,10 @@ submit_one() {
   local node="${NODES[$idx]}"
   local mem="${MEM_MB[$idx]}"
   local env_dir="${ENVS[$idx]}"
+  local time_limit="$LONG_TIME_LIMIT"
+  if [[ "$partition" == "move" ]]; then
+    time_limit="$MOVE_TIME_LIMIT"
+  fi
 
   validate_job "$family" "$tag"
 
@@ -127,13 +133,13 @@ submit_one() {
     --partition="$partition"
     --nodelist="$node"
     --mem="$mem"
-    --time="$TIME_LIMIT"
+    --time="$time_limit"
     --export=ALL,EXPERIMENT_TAG="$experiment_tag",CHECKPOINT_FAMILY="$family",CHECKPOINT_TAG="$tag",CONDITION_TAG=wrench,SEED="$seed",NUM_ENVS="$NUM_ENVS",MINIBATCH_SIZE="$MINIBATCH_SIZE",EXPL_COEF_BLOCK_SIZE="$EXPL_COEF_BLOCK_SIZE",MAX_ITERATIONS="$MAX_ITERATIONS",REPO_ROOT="$REPO",ISAACSIM_ENV_DIR="$env_dir",WANDB_GROUP="$WANDB_GROUP",FORCE_SCALE="$FORCE_SCALE",TORQUE_SCALE="$TORQUE_SCALE",FORCE_ONLY_WHEN_LIFTED="$FORCE_ONLY_WHEN_LIFTED",TORQUE_ONLY_WHEN_LIFTED="$TORQUE_ONLY_WHEN_LIFTED"
     "$JOB_SCRIPT"
   )
 
-  printf '[%02d] %-18s %-16s seed=%s account=%s partition=%s node=%s mem=%s env=%s\n' \
-    "$idx" "$family" "$tag" "$seed" "$account" "$partition" "$node" "$mem" "$env_dir"
+  printf '[%02d] %-18s %-16s seed=%s account=%s partition=%s node=%s mem=%s time=%s env=%s\n' \
+    "$idx" "$family" "$tag" "$seed" "$account" "$partition" "$node" "$mem" "$time_limit" "$env_dir"
   if [[ "$DRY_RUN" == "1" ]]; then
     printf '  DRY_RUN:'
     printf ' %q' "${cmd[@]}"
@@ -148,7 +154,7 @@ if [[ ! -f "$JOB_SCRIPT" ]]; then
   exit 1
 fi
 
-echo "DRY_RUN=$DRY_RUN time=$TIME_LIMIT"
+echo "DRY_RUN=$DRY_RUN move_time=$MOVE_TIME_LIMIT long_time=$LONG_TIME_LIMIT job_indices=${JOB_INDICES:-all}"
 echo "repo=$REPO"
 echo "env=$ENV_BASE"
 echo "env_rtx=$ENV_RTX"
@@ -157,6 +163,12 @@ echo "num_envs=$NUM_ENVS minibatch=$MINIBATCH_SIZE expl_block=$EXPL_COEF_BLOCK_S
 echo "wrench force/torque=$FORCE_SCALE/$TORQUE_SCALE only_lifted=$FORCE_ONLY_WHEN_LIFTED/$TORQUE_ONLY_WHEN_LIFTED"
 echo ""
 
-for idx in "${!FAMILIES[@]}"; do
-  submit_one "$idx"
-done
+if [[ -n "$JOB_INDICES" ]]; then
+  for idx in $JOB_INDICES; do
+    submit_one "$idx"
+  done
+else
+  for idx in "${!FAMILIES[@]}"; do
+    submit_one "$idx"
+  done
+fi
