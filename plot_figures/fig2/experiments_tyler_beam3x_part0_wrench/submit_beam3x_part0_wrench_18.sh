@@ -17,6 +17,7 @@ MOVE_TIME_LIMIT="${MOVE_TIME_LIMIT:-1-00:00:00}"
 LONG_TIME_LIMIT="${LONG_TIME_LIMIT:-1-12:00:00}"
 WANDB_GROUP="${WANDB_GROUP:-panel_a_teachers_tyler_beam3x_part0_wrench}"
 JOB_INDICES="${JOB_INDICES:-}"
+EXPERIMENT_SUFFIX="${EXPERIMENT_SUFFIX:-}"
 
 NUM_ENVS="${NUM_ENVS:-12288}"
 MINIBATCH_SIZE="${MINIBATCH_SIZE:-98304}"
@@ -124,7 +125,7 @@ submit_one() {
   local job_name="b3x0-wrench-${family}-${tag}-s${seed}"
   job_name="${job_name//_/-}"
   job_name="${job_name//\//-}"
-  local experiment_tag="beam_3x_part_0_finetune_rgf0_dr_wrench_seed${seed}"
+  local experiment_tag="beam_3x_part_0_finetune_rgf0_dr_wrench_seed${seed}${EXPERIMENT_SUFFIX}"
 
   local cmd=(
     sbatch
