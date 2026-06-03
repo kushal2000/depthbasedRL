@@ -1,0 +1,245 @@
+#!/bin/bash
+#SBATCH -N 1
+#SBATCH -n 1
+#SBATCH --cpus-per-task=12
+#SBATCH --get-user-env
+#SBATCH --mem=90000
+#SBATCH -t 1-12:00:00
+#SBATCH --account=move
+#SBATCH --partition=move
+#SBATCH --nodelist=move4
+#SBATCH --gres=gpu:1
+#SBATCH -o /dev/null
+#SBATCH -e /dev/null
+
+# Tyler-local Fig. 2 Fabrica beam_3x part 0 teacher finetune with wrench DR.
+# This keeps the original Fig. 2 beam part-0 task settings, but applies the
+# Fig. 4 wrench perturbation settings.
+
+set -euo pipefail
+
+TASK_ID="${TASK_ID:-Isaacsimenvs-PegInHole-Direct-v0}"
+AGENT_KEY="${AGENT_KEY:-rl_games_sapg_cfg_entry_point}"
+GOAL_MODE="${GOAL_MODE:-preInsertAndFinal}"
+
+CHECKPOINT_FAMILY="${CHECKPOINT_FAMILY:-TrainingObjective}"
+CHECKPOINT_TAG="${CHECKPOINT_TAG:-Play2Win}"
+CHECKPOINT="${CHECKPOINT:-/juno/u/kedia/depthbasedRL/train_dir/${CHECKPOINT_FAMILY}/${CHECKPOINT_TAG}/model.pth}"
+CONDITION_TAG="${CONDITION_TAG:-wrench}"
+
+# Full teacher scale. Jobs should be walltime-limited, not iteration-limited.
+NUM_ENVS="${NUM_ENVS:-12288}"
+MINIBATCH_SIZE="${MINIBATCH_SIZE:-98304}"
+MAX_ITERATIONS="${MAX_ITERATIONS:-10000000}"
+SEED="${SEED:-0}"
+EXPL_COEF_BLOCK_SIZE="${EXPL_COEF_BLOCK_SIZE:-2048}"
+
+# Fabrica beam_3x part 0 task knobs match the original Fig. 2 _dr teacher.
+PROBLEM="${PROBLEM:-fabrica.beam_3x.part_0_matchedmass_sdf_hybrid}"
+EXPERIMENT_TAG="${EXPERIMENT_TAG:-beam_3x_part_0_finetune_rgf0_dr_wrench_seed${SEED}}"
+GOAL_XY_OBS_NOISE="${GOAL_XY_OBS_NOISE:-0.002}"
+GOAL_YAW_OBS_NOISE_DEG="${GOAL_YAW_OBS_NOISE_DEG:-1.0}"
+RANDOM_GOAL_FRACTION="${RANDOM_GOAL_FRACTION:-0.0}"
+RANDOM_GOAL_MAX_SUCCESSES="${RANDOM_GOAL_MAX_SUCCESSES:-5}"
+INSERTION_SUCCESS_TOLERANCE="${INSERTION_SUCCESS_TOLERANCE:-0.010}"
+HOLE_YAW_RANGE_DEG="${HOLE_YAW_RANGE_DEG:-10.0}"
+SUCCESS_TOLERANCE="${SUCCESS_TOLERANCE:-0.01}"
+TARGET_SUCCESS_TOLERANCE="${TARGET_SUCCESS_TOLERANCE:-0.01}"
+SUCCESS_STEPS="${SUCCESS_STEPS:-1}"
+ENABLE_RETRACT="${ENABLE_RETRACT:-True}"
+RETRACT_REWARD_SCALE="${RETRACT_REWARD_SCALE:-1.0}"
+RETRACT_DISTANCE_THRESHOLD="${RETRACT_DISTANCE_THRESHOLD:-0.1}"
+RETRACT_SUCCESS_TOLERANCE="${RETRACT_SUCCESS_TOLERANCE:-0.005}"
+
+# Full observation/action/object-state DR from the previous *_dr teachers.
+USE_OBS_DELAY="${USE_OBS_DELAY:-True}"
+USE_ACTION_DELAY="${USE_ACTION_DELAY:-True}"
+USE_OBJECT_STATE_DELAY_NOISE="${USE_OBJECT_STATE_DELAY_NOISE:-True}"
+OBJECT_STATE_XYZ_NOISE_STD="${OBJECT_STATE_XYZ_NOISE_STD:-0.01}"
+OBJECT_STATE_ROTATION_NOISE_DEG="${OBJECT_STATE_ROTATION_NOISE_DEG:-5.0}"
+JOINT_VELOCITY_OBS_NOISE_STD="${JOINT_VELOCITY_OBS_NOISE_STD:-0.1}"
+OBJECT_SCALE_NOISE_RANGE="${OBJECT_SCALE_NOISE_RANGE:-[0.9,1.1]}"
+
+# Wrench perturbation DR from the collaborator Fig. 4 wrench script.
+FORCE_SCALE="${FORCE_SCALE:-20.0}"
+TORQUE_SCALE="${TORQUE_SCALE:-2.0}"
+FORCE_ONLY_WHEN_LIFTED="${FORCE_ONLY_WHEN_LIFTED:-False}"
+TORQUE_ONLY_WHEN_LIFTED="${TORQUE_ONLY_WHEN_LIFTED:-False}"
+
+# Reset / reward knobs.
+RESET_POSITION_NOISE_X="${RESET_POSITION_NOISE_X:-0.1}"
+RESET_POSITION_NOISE_Y="${RESET_POSITION_NOISE_Y:-0.1}"
+RESET_POSITION_NOISE_Z="${RESET_POSITION_NOISE_Z:-0.02}"
+RESET_DOF_POS_NOISE_ARM="${RESET_DOF_POS_NOISE_ARM:-0.1}"
+RESET_DOF_POS_NOISE_FINGERS="${RESET_DOF_POS_NOISE_FINGERS:-0.1}"
+RESET_DOF_VEL_NOISE="${RESET_DOF_VEL_NOISE:-0.5}"
+TABLE_RESET_Z_RANGE="${TABLE_RESET_Z_RANGE:-0.01}"
+LIFTING_REW_SCALE="${LIFTING_REW_SCALE:-20.0}"
+LIFTING_BONUS="${LIFTING_BONUS:-300.0}"
+FORCE_CONSECUTIVE_NEAR_GOAL="${FORCE_CONSECUTIVE_NEAR_GOAL:-True}"
+
+HOSTNAME_SHORT="$(hostname -s || true)"
+DEFAULT_REPO_ROOT="/move/u/tylerlum/github_repos/depthbasedRL"
+DEFAULT_ISAACSIM_ENV_DIR="${DEFAULT_REPO_ROOT}/.venv-isaacsim-py311"
+REPO_ROOT="${REPO_ROOT:-$DEFAULT_REPO_ROOT}"
+ISAACSIM_ENV_DIR="${ISAACSIM_ENV_DIR:-$DEFAULT_ISAACSIM_ENV_DIR}"
+
+WANDB_ENTITY="${WANDB_ENTITY:-tylerlum}"
+WANDB_PROJECT="${WANDB_PROJECT:-fig2}"
+WANDB_GROUP="${WANDB_GROUP:-panel_a_teachers_tyler_beam3x_part0_wrench}"
+
+CAPTURE_VIEWER_LEN="${CAPTURE_VIEWER_LEN:-600}"
+CAPTURE_VIEWER_INTERVAL="${CAPTURE_VIEWER_INTERVAL:-6000}"
+CAPTURE_VIEWER_ENV_ID="${CAPTURE_VIEWER_ENV_ID:-0}"
+CAPTURE_VIEWER_WANDB_KEY="${CAPTURE_VIEWER_WANDB_KEY:-interactive_viewer}"
+
+if [[ ! -d "$REPO_ROOT/.git" ]]; then
+    echo "Repo not found: $REPO_ROOT" >&2
+    exit 1
+fi
+if [[ ! -x "$ISAACSIM_ENV_DIR/bin/python" ]]; then
+    echo "Isaac Sim env not found: $ISAACSIM_ENV_DIR" >&2
+    exit 1
+fi
+if [[ ! -f "$CHECKPOINT" ]]; then
+    echo "Checkpoint not found: $CHECKPOINT" >&2
+    exit 1
+fi
+
+CHECKPOINT_SLUG="${CHECKPOINT_FAMILY}_${CHECKPOINT_TAG}"
+CHECKPOINT_SLUG="${CHECKPOINT_SLUG//\//_}"
+DATETIME="$(date +"%Y-%m-%d_%H-%M-%S")"
+EXPERIMENT_NAME="${EXPERIMENT_TAG}_${CHECKPOINT_SLUG}_${DATETIME}"
+if [[ -n "${SLURM_JOB_ID:-}" ]]; then
+    scontrol update JobId="$SLURM_JOB_ID" JobName="b3x0-${CONDITION_TAG}-${CHECKPOINT_TAG}-s${SEED}" || true
+fi
+
+RUN_ROOT="${RUN_ROOT:-${REPO_ROOT}/train_dir}"
+HYDRA_RUN_DIR="${RUN_ROOT}/${WANDB_PROJECT}/${WANDB_GROUP}/${EXPERIMENT_NAME}"
+mkdir -p "$HYDRA_RUN_DIR"
+exec > "${HYDRA_RUN_DIR}/slurm.log" 2> "${HYDRA_RUN_DIR}/slurm.err"
+
+if [[ -f /juno/u/tylerlum/.wandb_api_key && -z "${WANDB_API_KEY:-}" ]]; then
+    export WANDB_API_KEY="$(cat /juno/u/tylerlum/.wandb_api_key)"
+fi
+export OMNI_KIT_ACCEPT_EULA="${OMNI_KIT_ACCEPT_EULA:-YES}"
+export OMNI_KIT_CACHE_PATH="${OMNI_KIT_CACHE_PATH:-/tmp/${USER}_ov_cache_${SLURM_JOB_ID:-manual}}"
+mkdir -p "$OMNI_KIT_CACHE_PATH"
+
+echo "=== Tyler Fig2 beam_3x part 0 wrench finetune ==="
+echo "Date:                 $(date)"
+echo "Host:                 $HOSTNAME_SHORT"
+echo "Slurm job:            ${SLURM_JOB_ID:-manual}"
+echo "Repo:                 $REPO_ROOT"
+echo "Isaac Sim env:        $ISAACSIM_ENV_DIR"
+echo "Run dir:              $HYDRA_RUN_DIR"
+echo "Problem:              $PROBLEM"
+echo "Checkpoint family:    $CHECKPOINT_FAMILY"
+echo "Checkpoint tag:       $CHECKPOINT_TAG"
+echo "Checkpoint:           $CHECKPOINT"
+echo "Condition tag:        $CONDITION_TAG"
+echo "Seed:                 $SEED"
+echo "Num envs:             $NUM_ENVS"
+echo "Minibatch size:       $MINIBATCH_SIZE"
+echo "Expl coef block size: $EXPL_COEF_BLOCK_SIZE"
+echo "Force scale:          $FORCE_SCALE"
+echo "Torque scale:         $TORQUE_SCALE"
+echo "Force only lifted:    $FORCE_ONLY_WHEN_LIFTED"
+echo "Torque only lifted:   $TORQUE_ONLY_WHEN_LIFTED"
+echo "W&B:                  ${WANDB_ENTITY}/${WANDB_PROJECT}/${WANDB_GROUP}"
+echo ""
+echo "=== Initial GPU State ==="
+nvidia-smi || true
+echo ""
+echo "=== Initial RAM State ==="
+free -m || true
+echo ""
+
+GPU_LOG="${HYDRA_RUN_DIR}/gpu_usage.log"
+(
+    while true; do
+        echo "=== $(date '+%Y-%m-%d %H:%M:%S') ===" >> "$GPU_LOG"
+        nvidia-smi --query-gpu=memory.used,memory.total,memory.free,utilization.gpu,temperature.gpu \
+            --format=csv,noheader >> "$GPU_LOG" 2>&1
+        sleep 30
+    done
+) &
+GPU_MONITOR_PID=$!
+
+RAM_LOG="${HYDRA_RUN_DIR}/ram_usage.log"
+(
+    while true; do
+        echo "=== $(date '+%Y-%m-%d %H:%M:%S') ===" >> "$RAM_LOG"
+        free -m | head -2 >> "$RAM_LOG" 2>&1
+        ps -eo pid,rss,comm --sort=-rss --no-headers 2>/dev/null | head -5 >> "$RAM_LOG"
+        if [[ -n "${SLURM_JOB_ID:-}" ]] && command -v sstat >/dev/null 2>&1; then
+            sstat -j "$SLURM_JOB_ID" --format=MaxRSS,AveRSS --noheader 2>/dev/null >> "$RAM_LOG" || true
+        fi
+        sleep 30
+    done
+) &
+RAM_MONITOR_PID=$!
+
+trap 'kill "$GPU_MONITOR_PID" "$RAM_MONITOR_PID" 2>/dev/null || true' EXIT
+
+cd "$REPO_ROOT"
+ISAACSIM_ENV_DIR="$ISAACSIM_ENV_DIR" ./scripts/run_in_isaacsim_env.sh python -u isaacsimenvs/train.py \
+    --task "$TASK_ID" \
+    --agent "$AGENT_KEY" \
+    --checkpoint "$CHECKPOINT" \
+    --checkpoint_load_mode weights \
+    --headless \
+    --capture_viewer \
+    --capture_viewer_len "$CAPTURE_VIEWER_LEN" \
+    --capture_viewer_interval "$CAPTURE_VIEWER_INTERVAL" \
+    --capture_viewer_env_id "$CAPTURE_VIEWER_ENV_ID" \
+    --capture_viewer_wandb_key "$CAPTURE_VIEWER_WANDB_KEY" \
+    --wandb_activate \
+    --wandb_project "$WANDB_PROJECT" \
+    --wandb_group "$WANDB_GROUP" \
+    --wandb_entity "$WANDB_ENTITY" \
+    --wandb_name "$EXPERIMENT_NAME" \
+    env.scene.num_envs="$NUM_ENVS" \
+    env.peg_in_hole.problem="$PROBLEM" \
+    env.peg_in_hole.goal_mode="$GOAL_MODE" \
+    env.peg_in_hole.goal_xy_obs_noise="$GOAL_XY_OBS_NOISE" \
+    env.peg_in_hole.goal_yaw_obs_noise_deg="$GOAL_YAW_OBS_NOISE_DEG" \
+    env.peg_in_hole.random_goal_fraction="$RANDOM_GOAL_FRACTION" \
+    env.peg_in_hole.random_goal_max_successes="$RANDOM_GOAL_MAX_SUCCESSES" \
+    env.peg_in_hole.insertion_success_tolerance="$INSERTION_SUCCESS_TOLERANCE" \
+    env.peg_in_hole.hole_yaw_range_deg="$HOLE_YAW_RANGE_DEG" \
+    env.termination.success_tolerance="$SUCCESS_TOLERANCE" \
+    env.termination.target_success_tolerance="$TARGET_SUCCESS_TOLERANCE" \
+    env.termination.success_steps="$SUCCESS_STEPS" \
+    env.peg_in_hole.enable_retract="$ENABLE_RETRACT" \
+    env.peg_in_hole.retract_reward_scale="$RETRACT_REWARD_SCALE" \
+    env.peg_in_hole.retract_distance_threshold="$RETRACT_DISTANCE_THRESHOLD" \
+    env.peg_in_hole.retract_success_tolerance="$RETRACT_SUCCESS_TOLERANCE" \
+    env.domain_randomization.force_scale="$FORCE_SCALE" \
+    env.domain_randomization.torque_scale="$TORQUE_SCALE" \
+    env.domain_randomization.force_only_when_lifted="$FORCE_ONLY_WHEN_LIFTED" \
+    env.domain_randomization.torque_only_when_lifted="$TORQUE_ONLY_WHEN_LIFTED" \
+    env.domain_randomization.use_obs_delay="$USE_OBS_DELAY" \
+    env.domain_randomization.use_action_delay="$USE_ACTION_DELAY" \
+    env.domain_randomization.use_object_state_delay_noise="$USE_OBJECT_STATE_DELAY_NOISE" \
+    env.domain_randomization.object_state_xyz_noise_std="$OBJECT_STATE_XYZ_NOISE_STD" \
+    env.domain_randomization.object_state_rotation_noise_degrees="$OBJECT_STATE_ROTATION_NOISE_DEG" \
+    env.domain_randomization.joint_velocity_obs_noise_std="$JOINT_VELOCITY_OBS_NOISE_STD" \
+    "env.domain_randomization.object_scale_noise_multiplier_range=$OBJECT_SCALE_NOISE_RANGE" \
+    env.reset.reset_position_noise_x="$RESET_POSITION_NOISE_X" \
+    env.reset.reset_position_noise_y="$RESET_POSITION_NOISE_Y" \
+    env.reset.reset_position_noise_z="$RESET_POSITION_NOISE_Z" \
+    env.reset.reset_dof_pos_random_interval_arm="$RESET_DOF_POS_NOISE_ARM" \
+    env.reset.reset_dof_pos_random_interval_fingers="$RESET_DOF_POS_NOISE_FINGERS" \
+    env.reset.reset_dof_vel_random_interval="$RESET_DOF_VEL_NOISE" \
+    env.reset.table_reset_z_range="$TABLE_RESET_Z_RANGE" \
+    env.reward.lifting_rew_scale="$LIFTING_REW_SCALE" \
+    env.reward.lifting_bonus="$LIFTING_BONUS" \
+    env.termination.force_consecutive_near_goal_steps="$FORCE_CONSECUTIVE_NEAR_GOAL" \
+    agent.params.config.max_epochs="$MAX_ITERATIONS" \
+    agent.params.config.minibatch_size="$MINIBATCH_SIZE" \
+    agent.params.config.central_value_config.minibatch_size="$MINIBATCH_SIZE" \
+    agent.params.config.expl_coef_block_size="$EXPL_COEF_BLOCK_SIZE" \
+    agent.params.config.name="0_${EXPERIMENT_NAME}" \
+    agent.params.seed="$SEED" \
+    hydra.run.dir="$HYDRA_RUN_DIR"
