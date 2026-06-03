@@ -436,22 +436,31 @@ def _configure_rcparams() -> None:
     )
 
 
-def _plot_series(ax: plt.Axes, series: list[SeriesSpec], *, x_max_billions: float, num_points: int) -> None:
+def _plot_series(
+    ax: plt.Axes,
+    series: list[SeriesSpec],
+    *,
+    x_max_billions: float,
+    num_points: int,
+    x_axis_mode: str,
+    hours_at_xmax: float,
+) -> None:
     for item in series:
         aggregate = _aggregate(item.curves, num_points=num_points)
         if aggregate is None:
             print(f"warning: no aggregate for {item.label}")
             continue
         x = aggregate["x"] / 1e9
+        plot_x = x if x_axis_mode == "env_steps" else x / x_max_billions * hours_at_xmax
         mean = 100.0 * aggregate["mean"]
         std = 100.0 * aggregate["std"]
         visible = x <= x_max_billions
         if not np.any(visible):
             print(f"warning: no visible points for {item.label}")
             continue
-        ax.plot(x[visible], mean[visible], color=item.color, linewidth=1.5, zorder=3)
+        ax.plot(plot_x[visible], mean[visible], color=item.color, linewidth=1.5, zorder=3)
         ax.fill_between(
-            x[visible],
+            plot_x[visible],
             mean[visible] - std[visible],
             mean[visible] + std[visible],
             color=item.color,
@@ -461,13 +470,20 @@ def _plot_series(ax: plt.Axes, series: list[SeriesSpec], *, x_max_billions: floa
         )
 
 
-def _style_axes(ax: plt.Axes, *, x_max_billions: float) -> None:
-    ax.set_xlim(0.0, x_max_billions)
+def _style_axes(ax: plt.Axes, *, x_max_billions: float, x_axis_mode: str, hours_at_xmax: float) -> None:
+    x_limit = x_max_billions if x_axis_mode == "env_steps" else hours_at_xmax
+    ax.set_xlim(0.0, x_limit)
     ax.set_ylim(-3.0, 104.0)
-    xticks = np.arange(0.0, x_max_billions + 0.5, 1.0)
-    ax.set_xticks(xticks)
-    ax.set_xticklabels(["0"] + [f"{int(v)}B" for v in xticks[1:]], fontsize=7)
-    ax.set_xlabel("Env steps", fontsize=8.5, labelpad=1.5)
+    if x_axis_mode == "env_steps":
+        xticks = np.arange(0.0, x_max_billions + 0.5, 1.0)
+        ax.set_xticks(xticks)
+        ax.set_xticklabels(["0"] + [f"{int(v)}B" for v in xticks[1:]], fontsize=7)
+        ax.set_xlabel("Env steps", fontsize=8.5, labelpad=1.5)
+    else:
+        xticks = np.arange(0.0, hours_at_xmax + 0.5, 6.0)
+        ax.set_xticks(xticks)
+        ax.set_xticklabels([f"{int(v)} h" for v in xticks], fontsize=7)
+        ax.set_xlabel("Training time", fontsize=8.5, labelpad=1.5)
     ax.set_yticks([0, 25, 50, 75, 100])
     ax.set_yticklabels(["0%", "25%", "50%", "75%", "100%"], fontsize=7)
     ax.set_ylabel("Success rate", fontsize=8.5, labelpad=1.5)
@@ -511,12 +527,32 @@ def _save_outputs(fig: plt.Figure, output: Path) -> None:
         print(f"wrote {path}")
 
 
-def _plot(panels: list[PanelSpec], output: Path, *, x_max_billions: float, num_points: int) -> None:
+def _plot(
+    panels: list[PanelSpec],
+    output: Path,
+    *,
+    x_max_billions: float,
+    num_points: int,
+    x_axis_mode: str,
+    hours_at_xmax: float,
+) -> None:
     _configure_rcparams()
     fig, axes = plt.subplots(1, 4, figsize=(7.6, 2.76), dpi=240)
     for ax, panel in zip(axes, panels, strict=True):
-        _plot_series(ax, panel.series, x_max_billions=x_max_billions, num_points=num_points)
-        _style_axes(ax, x_max_billions=x_max_billions)
+        _plot_series(
+            ax,
+            panel.series,
+            x_max_billions=x_max_billions,
+            num_points=num_points,
+            x_axis_mode=x_axis_mode,
+            hours_at_xmax=hours_at_xmax,
+        )
+        _style_axes(
+            ax,
+            x_max_billions=x_max_billions,
+            x_axis_mode=x_axis_mode,
+            hours_at_xmax=hours_at_xmax,
+        )
         ax.set_title(panel.title, fontsize=8, pad=2.0)
         _add_legend(ax, panel.series, legend_font_size=6.0)
     fig.subplots_adjust(left=0.065, right=0.995, top=0.83, bottom=0.47, wspace=0.45)
@@ -573,6 +609,13 @@ def main() -> None:
     parser.add_argument("--x-max-billions", type=float, default=4.0)
     parser.add_argument("--num-points", type=int, default=500)
     parser.add_argument("--slug", default="current_4B")
+    parser.add_argument("--x-axis-mode", choices=["env_steps", "hours"], default="env_steps")
+    parser.add_argument(
+        "--hours-at-xmax",
+        type=float,
+        default=24.0,
+        help="When --x-axis-mode=hours, map --x-max-billions to this many hours.",
+    )
     args = parser.parse_args()
 
     collected = _collect_runs()
@@ -583,6 +626,8 @@ def main() -> None:
         OUT_DIR / f"beam3x_part0_wrench_one_row_{args.slug}.png",
         x_max_billions=args.x_max_billions,
         num_points=args.num_points,
+        x_axis_mode=args.x_axis_mode,
+        hours_at_xmax=args.hours_at_xmax,
     )
     _print_summary(collected)
 
