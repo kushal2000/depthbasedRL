@@ -32,7 +32,11 @@ _OBJECT_BASE_SIZE = 0.04
 
 _FORCED_SIMPLE_CUBOID_MAX_CROSS_SECTION_M = 0.05
 _FORCED_SIMPLE_CUBOID_MIN_CROSS_SECTION_M = 0.012
-_FORCED_SIMPLE_CYLINDER_CROSS_SECTION_SCALE = 1.0 / 3.0
+# Simple cylinders should look like training-distribution handles with the head
+# removed, not needle-thin probes. The assembly-renderer figure used 1/3 here
+# for an illustrative graphic, but for Isaac Sim videos we keep the sampled
+# training handle cross-section directly.
+_FORCED_SIMPLE_CYLINDER_CROSS_SECTION_SCALE = 1.0
 
 
 # ----------------------------------------------------------------------------
