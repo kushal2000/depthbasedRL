@@ -526,6 +526,112 @@ def _apply_sky_background(
     raise ValueError(f"Unsupported sky background style: {style}")
 
 
+def _apply_backdrop_walls(
+    env,
+    *,
+    style: str,
+    color: tuple[float, float, float],
+    distance: float,
+    height: float,
+    extent_margin: float,
+) -> dict[str, Any]:
+    """Add visual-only blue walls behind the grid to read like a clean sky backdrop."""
+    if style == "none":
+        return {"style": style, "applied": False}
+    if style not in {"blue_wall", "blue_walls"}:
+        raise ValueError(f"Unsupported backdrop style: {style}")
+
+    from pxr import Gf, UsdGeom
+    from isaaclab.sim.utils import get_current_stage
+
+    stage = get_current_stage()
+    origins = env.scene.env_origins.detach().cpu()
+    min_x = float(origins[:, 0].min())
+    max_x = float(origins[:, 0].max())
+    min_y = float(origins[:, 1].min())
+    max_y = float(origins[:, 1].max())
+    z_center = 0.5 * float(height)
+    thickness = 0.04
+    rgb = Gf.Vec3f(*[float(v) for v in color])
+
+    # The SAPG reference pan looks mostly from -x/-y toward +x/+y.
+    # A single diagonal wall avoids the obvious corner seam of two axis-aligned walls.
+    center_x = 0.5 * (min_x + max_x)
+    center_y = 0.5 * (min_y + max_y)
+    span_x = max_x - min_x
+    span_y = max_y - min_y
+    if style == "blue_wall":
+        normal = 2.0 ** -0.5
+        max_projection = 0.5 * (span_x + span_y) * normal
+        wall_center = (
+            center_x + normal * (max_projection + float(distance)),
+            center_y + normal * (max_projection + float(distance)),
+            z_center,
+        )
+        walls = [
+            {
+                "path": "/World/BlueBackdropDiagonal",
+                "translate": wall_center,
+                "rotate_z_deg": -45.0,
+                "scale": (
+                    (span_x**2 + span_y**2) ** 0.5 + 2.0 * float(extent_margin),
+                    thickness,
+                    float(height),
+                ),
+            }
+        ]
+    else:
+        walls = [
+            {
+                "path": "/World/BlueBackdropY",
+                "translate": (
+                    center_x,
+                    max_y + float(distance),
+                    z_center,
+                ),
+                "scale": (
+                    span_x + 2.0 * float(extent_margin),
+                    thickness,
+                    float(height),
+                ),
+            },
+            {
+                "path": "/World/BlueBackdropX",
+                "translate": (
+                    max_x + float(distance),
+                    center_y,
+                    z_center,
+                ),
+                "scale": (
+                    thickness,
+                    span_y + 2.0 * float(extent_margin),
+                    float(height),
+                ),
+            },
+        ]
+    for wall in walls:
+        prim = stage.DefinePrim(wall["path"], "Cube")
+        cube = UsdGeom.Cube(prim)
+        cube.CreateSizeAttr(1.0)
+        xform = UsdGeom.Xformable(prim)
+        xform.ClearXformOpOrder()
+        xform.AddTranslateOp().Set(Gf.Vec3d(*wall["translate"]))
+        if "rotate_z_deg" in wall:
+            xform.AddRotateZOp().Set(float(wall["rotate_z_deg"]))
+        xform.AddScaleOp().Set(Gf.Vec3d(*wall["scale"]))
+        UsdGeom.Gprim(prim).GetDisplayColorAttr().Set([rgb])
+
+    return {
+        "style": style,
+        "applied": True,
+        "color": [float(v) for v in color],
+        "distance": float(distance),
+        "height": float(height),
+        "extent_margin": float(extent_margin),
+        "walls": walls,
+    }
+
+
 def _make_camera_cfg(width: int, height: int):
     import isaaclab.sim as sim_utils
     from isaaclab.sensors import CameraCfg
@@ -717,6 +823,16 @@ def main() -> None:
     parser.add_argument("--sky_color", type=float, nargs=3, default=(0.58, 0.74, 0.98))
     parser.add_argument("--sky_dome_intensity", type=float, default=1200.0)
     parser.add_argument(
+        "--backdrop_style",
+        choices=("none", "blue_wall", "blue_walls"),
+        default="none",
+        help="Render-only background geometry for stronger sky contrast.",
+    )
+    parser.add_argument("--backdrop_color", type=float, nargs=3, default=(0.36, 0.58, 0.90))
+    parser.add_argument("--backdrop_distance", type=float, default=5.0)
+    parser.add_argument("--backdrop_height", type=float, default=18.0)
+    parser.add_argument("--backdrop_extent_margin", type=float, default=10.0)
+    parser.add_argument(
         "--robot_urdf",
         type=Path,
         default=None,
@@ -900,6 +1016,16 @@ def main() -> None:
     )
     if sky_summary["applied"]:
         print(f"[render_simtoolreal_pretrained] applied sky background: {sky_summary}")
+    backdrop_summary = _apply_backdrop_walls(
+        env,
+        style=my_args.backdrop_style,
+        color=tuple(float(v) for v in my_args.backdrop_color),
+        distance=float(my_args.backdrop_distance),
+        height=float(my_args.backdrop_height),
+        extent_margin=float(my_args.backdrop_extent_margin),
+    )
+    if backdrop_summary["applied"]:
+        print(f"[render_simtoolreal_pretrained] applied backdrop: {backdrop_summary}")
     goal_style_summary = None
     if my_args.hide_goal_viz:
         goal_style_summary = _style_prim_trees(
@@ -947,6 +1073,7 @@ def main() -> None:
     print(f"[diag] quality = {my_args.quality}, width = {width}, height = {height}")
     print(f"[diag] render_quality = {render_quality_summary}")
     print(f"[diag] sky = {sky_summary}")
+    print(f"[diag] backdrop = {backdrop_summary}")
     print(f"[diag] robot_urdf = {env_cfg.assets.robot_urdf}")
     print(f"[diag] camera eye = {eye.detach().cpu().tolist()}")
     print(f"[diag] camera target = {target.detach().cpu().tolist()}")
@@ -1051,6 +1178,7 @@ def main() -> None:
         "table_style_summary": table_style_summary,
         "floor_style_summary": floor_style_summary,
         "sky_summary": sky_summary,
+        "backdrop_summary": backdrop_summary,
         "goal_style_summary": goal_style_summary,
         "lighting_summary": lighting_summary,
         "hide_goal_viz": bool(my_args.hide_goal_viz),
@@ -1065,6 +1193,11 @@ def main() -> None:
         "sky_style": my_args.sky_style,
         "sky_color": list(my_args.sky_color),
         "sky_dome_intensity": float(my_args.sky_dome_intensity),
+        "backdrop_style": my_args.backdrop_style,
+        "backdrop_color": list(my_args.backdrop_color),
+        "backdrop_distance": float(my_args.backdrop_distance),
+        "backdrop_height": float(my_args.backdrop_height),
+        "backdrop_extent_margin": float(my_args.backdrop_extent_margin),
         "requested_out_dir": str(requested_out_dir) if requested_out_dir is not None else None,
         "effective_out_dir": str(out_dir),
         "outputs": {"pngs": [], "video": None},
