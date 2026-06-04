@@ -270,13 +270,48 @@ def _apply_training_distribution(env_cfg, args) -> None:
     env_cfg.assets.handle_head_types = args.handle_head_types
 
 
+def _tensor_to_list(value) -> list[float]:
+    if value is None:
+        return []
+    try:
+        import torch
+
+        if isinstance(value, torch.Tensor):
+            return value.detach().float().cpu().reshape(-1).tolist()
+    except Exception:
+        pass
+    try:
+        import numpy as np
+
+        return np.asarray(value, dtype=float).reshape(-1).tolist()
+    except Exception:
+        return []
+
+
+def _mean_or_none(values: list[float]) -> float | None:
+    if not values:
+        return None
+    return float(sum(values) / len(values))
+
+
+def _summarize_metric_values(values: list[float]) -> dict[str, float | int | None]:
+    if not values:
+        return {"count": 0, "mean": None, "min": None, "max": None}
+    return {
+        "count": len(values),
+        "mean": float(sum(values) / len(values)),
+        "min": float(min(values)),
+        "max": float(max(values)),
+    }
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--checkpoint", default=DEFAULT_PLAY2WIN_CHECKPOINT)
     parser.add_argument("--task", default="Isaacsimenvs-SimToolReal-Direct-v0")
     parser.add_argument("--agent", default="rl_games_sapg_cfg_entry_point")
     parser.add_argument("--num_envs", type=int, default=16)
-    parser.add_argument("--env_spacing", type=float, default=1.0)
+    parser.add_argument("--env_spacing", type=float, default=1.2)
     parser.add_argument("--env_spacing_xy", type=float, nargs=2, default=None)
     parser.add_argument("--steps", type=int, default=360)
     parser.add_argument("--video_fps", type=int, default=30)
@@ -298,6 +333,12 @@ def main() -> None:
         default=_parse_step_list("0,60,180,360"),
     )
     parser.add_argument("--make_video", action="store_true")
+    parser.add_argument(
+        "--metrics_interval",
+        type=int,
+        default=60,
+        help="Print rollout metrics every N policy steps. Set <=0 to disable periodic prints.",
+    )
     parser.add_argument("--camera_eye", type=float, nargs=3, default=None)
     parser.add_argument("--camera_target", type=float, nargs=3, default=None)
     parser.add_argument(
@@ -353,6 +394,7 @@ def main() -> None:
     from isaaclab_tasks.utils.parse_cfg import load_cfg_from_registry
 
     import isaacsimenvs  # noqa: F401  triggers gym.register
+    from isaacsimenvs.tasks.simtoolreal.utils.obs_utils import compute_intermediate_values
     from isaacsimenvs.utils.rlgames_utils import register_rlgames_env
     from rl_games.torch_runner import Runner
 
@@ -472,9 +514,105 @@ def main() -> None:
         "effective_out_dir": str(out_dir),
         "outputs": {"pngs": [], "video": None},
         "timings": {"captures": [], "video_write_ms": None},
+        "metrics": None,
     }
 
     frames = []
+    metric_history: list[dict[str, float | int | None]] = []
+    episode_final_values: dict[str, list[float]] = {}
+    done_reason_counts: dict[str, int] = {}
+    completed_episode_count = 0
+    previous_successes = None
+    max_successes_seen = None
+    cumulative_goal_hits = 0
+
+    def record_metrics(step_i: int, *, dones=None, infos=None) -> None:
+        nonlocal completed_episode_count, previous_successes, max_successes_seen, cumulative_goal_hits
+
+        successes_long = env._successes.detach().long()
+        successes = successes_long.float()
+        if previous_successes is None:
+            previous_successes = successes_long.clone()
+            max_successes_seen = successes_long.clone()
+        else:
+            cumulative_goal_hits += int(torch.clamp(successes_long - previous_successes, min=0).sum().item())
+            previous_successes = successes_long.clone()
+            max_successes_seen = torch.maximum(max_successes_seen, successes_long)
+        lifted = env._lifted_object.detach().float()
+        keypoint = env._keypoints_max_dist.detach().float()
+        fingertip = env._curr_fingertip_distances.detach().float()
+        sample = {
+            "step": step_i,
+            "successes_mean": float(successes.mean().item()),
+            "successes_min": float(successes.min().item()),
+            "successes_max": float(successes.max().item()),
+            "lifted_frac": float(lifted.mean().item()),
+            "keypoint_max_dist_mean": float(keypoint.mean().item()),
+            "keypoint_max_dist_min": float(keypoint.min().item()),
+            "keypoint_max_dist_max": float(keypoint.max().item()),
+            "fingertip_dist_mean": float(fingertip.mean().item()),
+        }
+        metric_history.append(sample)
+
+        done_idx: list[int] = []
+        if dones is not None:
+            done_values = _tensor_to_list(dones)
+            done_idx = [idx for idx, value in enumerate(done_values) if value > 0.0]
+            completed_episode_count += len(done_idx)
+
+        if infos and isinstance(infos, dict) and done_idx:
+            episode_final = infos.get("episode_final") or {}
+            for key, value in episode_final.items():
+                values = _tensor_to_list(value)
+                if not values:
+                    continue
+                if len(values) == env.num_envs:
+                    selected = [values[idx] for idx in done_idx]
+                else:
+                    selected = values
+                episode_final_values.setdefault(key, []).extend(selected)
+                if key.startswith("done_"):
+                    done_reason_counts[key.removeprefix("done_")] = (
+                        done_reason_counts.get(key.removeprefix("done_"), 0)
+                        + int(round(sum(selected)))
+                    )
+
+        if my_args.metrics_interval > 0 and (
+            step_i == 0 or step_i == my_args.steps or step_i % my_args.metrics_interval == 0
+        ):
+            print(
+                "[metrics] "
+                f"step={step_i} "
+                f"successes_mean/max={sample['successes_mean']:.2f}/{sample['successes_max']:.0f} "
+                f"lifted={100.0 * sample['lifted_frac']:.1f}% "
+                f"kp_dist_mean/min={sample['keypoint_max_dist_mean']:.4f}/{sample['keypoint_max_dist_min']:.4f} "
+                f"completed_eps={completed_episode_count}",
+                flush=True,
+            )
+
+    def finalize_metrics() -> dict[str, Any]:
+        final = metric_history[-1] if metric_history else {}
+        return {
+            "completed_episode_count": completed_episode_count,
+            "done_reason_counts": done_reason_counts,
+            "episode_final": {
+                key: _summarize_metric_values(values)
+                for key, values in sorted(episode_final_values.items())
+            },
+            "final_step": final,
+            "cumulative_goal_hits": cumulative_goal_hits,
+            "per_env_final_successes": (
+                env._successes.detach().long().cpu().tolist()
+                if hasattr(env, "_successes")
+                else None
+            ),
+            "per_env_max_successes_seen": (
+                max_successes_seen.detach().long().cpu().tolist()
+                if max_successes_seen is not None
+                else None
+            ),
+            "history": metric_history,
+        }
 
     def capture(step_i: int, *, for_video: bool) -> None:
         capture_t0 = time.perf_counter()
@@ -525,10 +663,15 @@ def main() -> None:
         "[render_simtoolreal_pretrained] rolling out "
         f"{my_args.steps} policy steps on {my_args.num_envs} envs"
     )
+    # DirectRLEnv computes geometry caches during env.step(). For a zero-step
+    # smoke render, force one cache update so step-0 metrics are meaningful.
+    compute_intermediate_values(env)
+    record_metrics(0)
     capture(0, for_video=my_args.make_video)
     for step_i in range(1, my_args.steps + 1):
         action = player.get_action(obs, is_deterministic=my_args.deterministic)
         obs, rew, dones, infos = player.env_step(wrapped, action)
+        record_metrics(step_i, dones=dones, infos=infos)
         if step_i in capture_steps or (my_args.make_video and step_i % capture_every == 0):
             capture(step_i, for_video=my_args.make_video and step_i % capture_every == 0)
 
@@ -540,6 +683,7 @@ def main() -> None:
         manifest["outputs"]["video"] = str(video_path)
         print(f"[render_simtoolreal_pretrained] wrote {len(frames)} frames to {video_path}")
 
+    manifest["metrics"] = finalize_metrics()
     _save_manifest(out_dir, manifest)
 
     del app
