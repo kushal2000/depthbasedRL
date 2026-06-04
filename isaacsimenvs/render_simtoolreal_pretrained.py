@@ -184,7 +184,8 @@ def _set_record_camera(camera, eye, target) -> None:
     # camera motion can be extended later without changing capture semantics.
 
 
-def _camera_eye_for_step(
+def _camera_pose_for_step(
+    env,
     base_eye,
     target,
     *,
@@ -192,11 +193,57 @@ def _camera_eye_for_step(
     motion: str,
     orbit_deg: float,
     dolly_scale: float,
+    grid_cols: int | None,
+    env_spacing_xy: list[float] | tuple[float, float] | None,
+    sapg_ref_anchor_env: int,
+    sapg_ref_start_target: list[float] | tuple[float, float, float],
+    sapg_ref_start_eye_offset: list[float] | tuple[float, float, float],
+    sapg_ref_end_target_grid_scale: list[float] | tuple[float, float, float],
+    sapg_ref_end_eye_grid_scale: list[float] | tuple[float, float, float],
 ):
     if motion == "static":
-        return base_eye
+        return base_eye, target
 
     import torch
+
+    if motion == "sapg_ref_pan":
+        cols = int(grid_cols or math.ceil(math.sqrt(env.num_envs)))
+        rows = int(math.ceil(env.num_envs / cols))
+        if env_spacing_xy is None:
+            x_spacing = y_spacing = float(env.cfg.scene.env_spacing)
+        else:
+            x_spacing = float(env_spacing_xy[0])
+            y_spacing = float(env_spacing_xy[1])
+
+        anchor_env = env.num_envs + sapg_ref_anchor_env if sapg_ref_anchor_env < 0 else sapg_ref_anchor_env
+        if not 0 <= anchor_env < env.num_envs:
+            raise ValueError(f"sapg_ref_anchor_env={sapg_ref_anchor_env} resolves to invalid env {anchor_env}")
+
+        # Defaults match simtoolreal_private/origin/2026-02-18_video_2:
+        # viewer_camera_look_at(..., envs[num_envs - 1], local_pos, local_target).
+        anchor = env.scene.env_origins[anchor_env]
+        start_target = anchor + torch.tensor(sapg_ref_start_target, dtype=anchor.dtype, device=anchor.device)
+        start_eye = start_target + torch.tensor(sapg_ref_start_eye_offset, dtype=anchor.dtype, device=anchor.device)
+
+        grid_width = max(0.0, (cols - 1) * x_spacing)
+        grid_depth = max(0.0, (rows - 1) * y_spacing)
+        t = progress
+        t_smooth = t * t * t * (t * (6.0 * t - 15.0) + 10.0)
+
+        end_target_scale = torch.tensor(
+            sapg_ref_end_target_grid_scale,
+            dtype=anchor.dtype,
+            device=anchor.device,
+        )
+        end_eye_scale = torch.tensor(
+            sapg_ref_end_eye_grid_scale,
+            dtype=anchor.dtype,
+            device=anchor.device,
+        )
+        grid_delta = torch.tensor([grid_width, grid_depth, 1.0], dtype=anchor.dtype, device=anchor.device)
+        end_target = start_target + end_target_scale * grid_delta
+        end_eye = start_eye + end_eye_scale * grid_delta
+        return start_eye + t_smooth * (end_eye - start_eye), start_target + t_smooth * (end_target - start_target)
 
     rel = base_eye - target
     if motion in {"orbit", "orbit_dolly_out"}:
@@ -212,7 +259,7 @@ def _camera_eye_for_step(
     if motion in {"dolly_out", "orbit_dolly_out"}:
         scale = 1.0 + progress * (dolly_scale - 1.0)
         rel = rel * scale
-    return target + rel
+    return target + rel, target
 
 
 def _recolor_objects_by_env() -> dict[str, Any]:
@@ -411,11 +458,22 @@ def main() -> None:
     parser.add_argument("--camera_target", type=float, nargs=3, default=None)
     parser.add_argument(
         "--camera_motion",
-        choices=("static", "orbit", "dolly_out", "orbit_dolly_out"),
+        choices=("static", "orbit", "dolly_out", "orbit_dolly_out", "sapg_ref_pan"),
         default="static",
     )
     parser.add_argument("--camera_orbit_deg", type=float, default=10.0)
     parser.add_argument("--camera_dolly_scale", type=float, default=1.12)
+    parser.add_argument(
+        "--camera_render_warmup_frames",
+        type=int,
+        default=1,
+        help="Extra render calls after camera pose updates before RGB readback. Helps avoid stale/ghosted frames.",
+    )
+    parser.add_argument("--sapg_ref_anchor_env", type=int, default=-1)
+    parser.add_argument("--sapg_ref_start_target", type=float, nargs=3, default=(0.0, 0.0, 0.63))
+    parser.add_argument("--sapg_ref_start_eye_offset", type=float, nargs=3, default=(-0.25, -0.5, 0.35))
+    parser.add_argument("--sapg_ref_end_target_grid_scale", type=float, nargs=3, default=(-0.5, -0.5, 0.0))
+    parser.add_argument("--sapg_ref_end_eye_grid_scale", type=float, nargs=3, default=(-0.8, -1.2, 0.5))
     parser.add_argument("--no_recolor_objects", action="store_true")
     parser.add_argument("--no_style_goal_viz", action="store_true")
     parser.add_argument("--goal_color", type=float, nargs=3, default=(0.55, 1.0, 0.55))
@@ -646,6 +704,18 @@ def main() -> None:
         "camera_motion": my_args.camera_motion,
         "camera_orbit_deg": my_args.camera_orbit_deg,
         "camera_dolly_scale": my_args.camera_dolly_scale,
+        "camera_render_warmup_frames": my_args.camera_render_warmup_frames,
+        "sapg_ref_pan": {
+            "source_repo": "/home/tylerlum/github_repos/simtoolreal_private",
+            "source_branch": "origin/2026-02-18_video_2",
+            "source_commit": "495fdeeaa10af7aefed3edc58c7428179899fcb9",
+            "anchor_env": my_args.sapg_ref_anchor_env,
+            "local_start_target": list(my_args.sapg_ref_start_target),
+            "local_start_eye_offset": list(my_args.sapg_ref_start_eye_offset),
+            "end_target_grid_scale": list(my_args.sapg_ref_end_target_grid_scale),
+            "end_eye_grid_scale": list(my_args.sapg_ref_end_eye_grid_scale),
+            "easing": "quintic_smoothstep",
+        },
         "recolor_summary": recolor_summary,
         "goal_style_summary": goal_style_summary,
         "goal_color": list(my_args.goal_color),
@@ -757,15 +827,27 @@ def main() -> None:
     def capture(step_i: int, *, for_video: bool) -> None:
         capture_t0 = time.perf_counter()
         progress = 0.0 if my_args.steps <= 0 else min(1.0, max(0.0, step_i / my_args.steps))
-        capture_eye = _camera_eye_for_step(
+        capture_eye, capture_target = _camera_pose_for_step(
+            env,
             eye,
             target,
             progress=progress,
             motion=my_args.camera_motion,
             orbit_deg=my_args.camera_orbit_deg,
             dolly_scale=my_args.camera_dolly_scale,
+            grid_cols=my_args.grid_cols,
+            env_spacing_xy=my_args.env_spacing_xy,
+            sapg_ref_anchor_env=my_args.sapg_ref_anchor_env,
+            sapg_ref_start_target=my_args.sapg_ref_start_target,
+            sapg_ref_start_eye_offset=my_args.sapg_ref_start_eye_offset,
+            sapg_ref_end_target_grid_scale=my_args.sapg_ref_end_target_grid_scale,
+            sapg_ref_end_eye_grid_scale=my_args.sapg_ref_end_eye_grid_scale,
         )
-        _set_record_camera(camera, capture_eye, target)
+        _set_record_camera(camera, capture_eye, capture_target)
+        # Flush camera pose through Hydra before readback. Without this, the
+        # first frame after a camera move can use the previous camera pose.
+        for _ in range(max(1, my_args.camera_render_warmup_frames)):
+            env.sim.render()
         frame = _capture_rgb(camera, dt=policy_dt)
         render_ms = (time.perf_counter() - capture_t0) * 1000.0
         if frame is None:
