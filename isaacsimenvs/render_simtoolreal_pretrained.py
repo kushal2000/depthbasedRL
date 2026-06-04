@@ -30,9 +30,25 @@ from typing import Any
 
 
 VIDEO_DIR = Path(__file__).resolve().parent / "videos" / "simtoolreal_pretrained_review"
+REPO_ROOT = Path(__file__).resolve().parents[1]
 
 DEFAULT_PLAY2WIN_CHECKPOINT = "/juno/u/kedia/depthbasedRL/train_dir/TrainingObjective/Play2Win/model.pth"
 DEFAULT_PRETRAINED_POLICY_CHECKPOINT = "/juno/u/kedia/depthbasedRL/pretrained_policy/model.pth"
+DEFAULT_HDRI_STINSON_BEACH = (
+    "/home/tylerlum/github_repos/depthbasedRL/.venv-isaacsim-py311/lib/python3.11/site-packages/"
+    "isaacsim/extscache/omni.usd.libs-1.0.1+69cbf6ad.lx64.r.cp311/bin/usd/hdx/resources/textures/"
+    "StinsonBeach.hdr"
+)
+DEFAULT_HDRI_PHOTO_STUDIO = (
+    "/home/tylerlum/github_repos/depthbasedRL/.venv-isaacsim-py311/lib/python3.11/site-packages/"
+    "isaacsim/extscache/omni.kit.widget.material_preview-1.0.16/data/photo_studio_01_4k.hdr"
+)
+ROBOLAB_BACKGROUND_DIR = Path("/home/tylerlum/github_repos/RoboLab/assets/backgrounds")
+ISAAC_SAMPLE_MARBLE_TEXTURE = "Isaac/Samples/DR/Materials/Textures/marble_tile.png"
+DEFAULT_DYNAMIC_CLEAR_SKY = (
+    "http://omniverse-content-production.s3-us-west-2.amazonaws.com/Assets/Skies/Dynamic/ClearSky.usd"
+)
+DEFAULT_WHITE_STONE_TEXTURE = REPO_ROOT / "assets/textures/cinematic_white_stone_slab.png"
 
 QUALITY_PRESETS = {
     # Quality currently controls capture resolution.  Keep render settings
@@ -442,6 +458,191 @@ def _apply_marble_tile_floor(
     }
 
 
+def _resolve_hdri_path(preset: str, explicit_path: str | None) -> str | None:
+    """Resolve a local HDRI/EXR path for a visible dome light."""
+    if explicit_path:
+        return str(Path(explicit_path).expanduser())
+
+    candidates_by_preset = {
+        "stinson_beach": [DEFAULT_HDRI_STINSON_BEACH],
+        "photo_studio": [
+            DEFAULT_HDRI_PHOTO_STUDIO,
+            str(ROBOLAB_BACKGROUND_DIR / "indoors/photo_studio_01_2k.hdr"),
+            str(ROBOLAB_BACKGROUND_DIR / "default/brown_photostudio.hdr"),
+        ],
+        "cape_hill": [str(ROBOLAB_BACKGROUND_DIR / "indoors/cape_hill_2k.hdr")],
+        "old_outdoor_theater": [str(ROBOLAB_BACKGROUND_DIR / "indoors/old_outdoor_theater_2k.hdr")],
+        "cloudy_vondelpark": [
+            str(ROBOLAB_BACKGROUND_DIR / "outdoors/cloudy_vondelpark_2k.hdr"),
+            str(ROBOLAB_BACKGROUND_DIR / "outdoors/cloudy_vondelpark_2k.png"),
+        ],
+        "wasteland_clouds": [
+            str(ROBOLAB_BACKGROUND_DIR / "outdoors/wasteland_clouds_2k.hdr"),
+            str(ROBOLAB_BACKGROUND_DIR / "outdoors/wasteland_clouds_2k.png"),
+        ],
+        "winter_sky": [
+            str(ROBOLAB_BACKGROUND_DIR / "outdoors/winter_sky_2k.hdr"),
+            str(ROBOLAB_BACKGROUND_DIR / "outdoors/winter_sky_2k.png"),
+        ],
+        "kloofendal_partly_cloudy": [
+            str(ROBOLAB_BACKGROUND_DIR / "outdoors/kloofendal_48d_partly_cloudy_2k.hdr"),
+            str(ROBOLAB_BACKGROUND_DIR / "outdoors/kloofendal_48d_partly_cloudy_2k.png"),
+        ],
+        "sunset_fairway": [
+            str(ROBOLAB_BACKGROUND_DIR / "outdoors/sunset_fairway_2k.hdr"),
+            str(ROBOLAB_BACKGROUND_DIR / "outdoors/sunset_fairway_2k.png"),
+        ],
+    }
+    for candidate in candidates_by_preset.get(preset, []):
+        if Path(candidate).is_file():
+            return candidate
+    return None
+
+
+def _resolve_isaac_asset(asset_relpath: str) -> str | None:
+    """Resolve an Isaac sample asset under the configured Isaac asset root."""
+    import carb
+
+    settings = carb.settings.get_settings()
+    root = settings.get("/persistent/isaac/asset_root/default")
+    if not root:
+        return None
+    return f"{str(root).rstrip('/')}/{asset_relpath.lstrip('/')}"
+
+
+def _create_omnipbr_material(
+    *,
+    material_name: str,
+    diffuse_texture: str | None,
+    diffuse_color: tuple[float, float, float],
+    texture_scale: tuple[float, float] | None = None,
+    roughness: float = 0.38,
+) -> tuple[Any, dict[str, Any]]:
+    """Create an OmniPBR material and set a small set of robust shader inputs."""
+    from pxr import Gf, Sdf, UsdShade
+    from isaaclab.sim.utils import get_current_stage
+
+    stage = get_current_stage()
+    material_path = f"/World/Looks/{material_name}"
+    material = UsdShade.Material.Define(stage, material_path)
+    shader = UsdShade.Shader.Define(stage, f"{material_path}/Shader")
+    shader_prim = shader.GetPrim()
+    shader_prim.CreateAttribute("info:implementationSource", Sdf.ValueTypeNames.Token).Set("sourceAsset")
+    shader_prim.CreateAttribute("info:mdl:sourceAsset", Sdf.ValueTypeNames.Asset).Set("OmniPBR.mdl")
+    shader_prim.CreateAttribute("info:mdl:sourceAsset:subIdentifier", Sdf.ValueTypeNames.Token).Set("OmniPBR")
+    shader.CreateOutput("out", Sdf.ValueTypeNames.Token)
+    material.CreateSurfaceOutput("mdl").ConnectToSource(shader.ConnectableAPI(), "out")
+    material.CreateDisplacementOutput("mdl").ConnectToSource(shader.ConnectableAPI(), "out")
+    material.CreateVolumeOutput("mdl").ConnectToSource(shader.ConnectableAPI(), "out")
+
+    inputs = {
+        "diffuse_color_constant": list(diffuse_color),
+        "reflection_roughness_constant": float(roughness),
+        "metallic_constant": 0.0,
+    }
+    shader.CreateInput("diffuse_color_constant", Sdf.ValueTypeNames.Color3f).Set(Gf.Vec3f(*diffuse_color))
+    shader.CreateInput("reflection_roughness_constant", Sdf.ValueTypeNames.Float).Set(float(roughness))
+    shader.CreateInput("metallic_constant", Sdf.ValueTypeNames.Float).Set(0.0)
+    if diffuse_texture:
+        shader.CreateInput("diffuse_texture", Sdf.ValueTypeNames.Asset).Set(diffuse_texture)
+        inputs["diffuse_texture"] = diffuse_texture
+    if texture_scale is not None:
+        shader.CreateInput("project_uvw", Sdf.ValueTypeNames.Bool).Set(True)
+        shader.CreateInput("texture_scale", Sdf.ValueTypeNames.Float2).Set(
+            Gf.Vec2f(float(texture_scale[0]), float(texture_scale[1]))
+        )
+        inputs["project_uvw"] = True
+        inputs["texture_scale"] = [float(texture_scale[0]), float(texture_scale[1])]
+
+    return material.GetPrim(), {"path": material_path, "inputs": inputs}
+
+
+def _apply_pbr_tile_floor(
+    *,
+    base_color: tuple[float, float, float],
+    tile_count: int,
+    tile_size: float,
+    tile_gap: float,
+    texture_path: str | None,
+    texture_scale: float,
+    material_name: str = "CinematicPbrFloorMaterial",
+    style_name: str = "pbr_tiles",
+    tile_thickness: float = 0.006,
+) -> dict[str, Any]:
+    """Add a render-only tiled floor using a real OmniPBR material."""
+    import random
+
+    from pxr import Gf, UsdGeom, UsdShade
+    from isaaclab.sim.utils import get_current_stage
+
+    stage = get_current_stage()
+    root_path = "/World/CinematicPbrFloor"
+    UsdGeom.Xform.Define(stage, root_path)
+
+    material_prim, material_summary = _create_omnipbr_material(
+        material_name=material_name,
+        diffuse_texture=texture_path,
+        diffuse_color=base_color,
+        texture_scale=(float(texture_scale), float(texture_scale)),
+        roughness=0.42,
+    )
+    material = UsdShade.Material(material_prim)
+
+    rng = random.Random(19)
+    half = 0.5 * (tile_count - 1)
+    effective_size = max(0.01, float(tile_size) - float(tile_gap))
+    top_z = 0.0018
+    center_z = top_z - 0.5 * tile_thickness
+
+    sample_tiles = []
+    for row in range(tile_count):
+        for col in range(tile_count):
+            prim_path = f"{root_path}/Tile_{row:02d}_{col:02d}"
+            cube = UsdGeom.Cube.Define(stage, prim_path)
+            cube.CreateSizeAttr(1.0)
+            xform = UsdGeom.Xformable(cube.GetPrim())
+            xform.AddTranslateOp().Set(
+                (
+                    (col - half) * float(tile_size),
+                    (row - half) * float(tile_size),
+                    center_z,
+                )
+            )
+            xform.AddScaleOp().Set((effective_size, effective_size, tile_thickness))
+            # Preserve slight tile-level variation even with texture so large
+            # floor areas do not read as one repeated flat plane.
+            color_scale = rng.uniform(0.92, 1.04)
+            gprim = UsdGeom.Gprim(cube.GetPrim())
+            gprim.GetDisplayColorAttr().Set(
+                [
+                    Gf.Vec3f(
+                        min(1.0, base_color[0] * color_scale),
+                        min(1.0, base_color[1] * color_scale),
+                        min(1.0, base_color[2] * color_scale),
+                    )
+                ]
+            )
+            UsdShade.MaterialBindingAPI(cube.GetPrim()).Bind(
+                material,
+                UsdShade.Tokens.strongerThanDescendants,
+            )
+            if len(sample_tiles) < 16:
+                sample_tiles.append({"path": prim_path})
+
+    return {
+        "style": style_name,
+        "root_path": root_path,
+        "tile_count": int(tile_count),
+        "tile_size": float(tile_size),
+        "tile_gap": float(tile_gap),
+        "num_tiles": int(tile_count) * int(tile_count),
+        "texture_path": texture_path,
+        "texture_scale": float(texture_scale),
+        "material": material_summary,
+        "sample_tiles": sample_tiles,
+    }
+
+
 def _apply_beauty_render_settings(env_cfg, *, preset: str, samples_per_pixel: int) -> dict[str, Any]:
     """Apply render-only quality settings to the env config before construction."""
     if preset == "default":
@@ -471,6 +672,39 @@ def _apply_beauty_render_settings(env_cfg, *, preset: str, samples_per_pixel: in
     return {"preset": preset, "applied": True, "settings": applied}
 
 
+def _apply_runtime_render_settings(*, preset: str, render_mode: str, samples_per_pixel: int) -> dict[str, Any]:
+    """Apply RTX settings that live in carb settings rather than env_cfg.sim.render."""
+    import carb
+
+    settings = carb.settings.get_settings()
+    applied: dict[str, Any] = {"preset": preset, "requested_render_mode": render_mode}
+    effective_mode = render_mode
+    if effective_mode == "auto":
+        effective_mode = "pt" if preset == "beauty" else "default"
+
+    if effective_mode != "default":
+        settings.set("/rtx/rendermode", effective_mode)
+        applied["/rtx/rendermode"] = effective_mode
+
+    if preset == "beauty":
+        spp = int(samples_per_pixel)
+        for key, value in {
+            "/rtx/pathtracing/spp": spp,
+            "/rtx/pathtracing/totalSpp": spp,
+            "/rtx/pathtracing/maxBounces": 8,
+            "/rtx/pathtracing/maxSpecularAndTransmissionBounces": 4,
+            "/rtx/pathtracing/maxVolumeBounces": 2,
+            "/rtx/pathtracing/optixDenoiser/enabled": True,
+            "/rtx/pathtracing/clampSpp": 0,
+        }.items():
+            try:
+                settings.set(key, value)
+                applied[key] = value
+            except Exception as exc:
+                applied[key] = f"failed: {exc}"
+    return applied
+
+
 def _apply_beauty_lighting() -> dict[str, Any]:
     """Add soft global/key/fill lighting for presentation renders."""
     import isaaclab.sim as sim_utils
@@ -495,6 +729,8 @@ def _apply_sky_background(
     style: str,
     color: tuple[float, float, float],
     dome_intensity: float,
+    hdri_preset: str,
+    hdri_path: str | None,
 ) -> dict[str, Any]:
     """Set a presentation background without changing physics geometry."""
     if style == "default":
@@ -521,6 +757,60 @@ def _apply_sky_background(
             "applied": True,
             "color": list(rgb),
             "dome_light": {"path": "/World/BlueSkyDomeLight", "intensity": float(dome_intensity)},
+        }
+
+    if style == "hdri":
+        import isaaclab.sim as sim_utils
+
+        resolved = _resolve_hdri_path(hdri_preset, hdri_path)
+        if resolved is None:
+            return {
+                "style": style,
+                "applied": False,
+                "reason": f"could not resolve HDRI preset={hdri_preset!r} path={hdri_path!r}",
+            }
+        settings.set("/rtx/background/source/type", "domeLight")
+        dome = sim_utils.DomeLightCfg(
+            intensity=float(dome_intensity),
+            exposure=0.0,
+            texture_file=resolved,
+            texture_format="latlong",
+            visible_in_primary_ray=True,
+        )
+        dome.func("/World/HDRISkyDomeLight", dome)
+        try:
+            from pxr import Sdf
+            from isaaclab.sim.utils import get_current_stage
+
+            prim = get_current_stage().GetPrimAtPath("/World/HDRISkyDomeLight")
+            prim.CreateAttribute("visibleInPrimaryRay", Sdf.ValueTypeNames.Bool).Set(True)
+        except Exception:
+            pass
+        return {
+            "style": style,
+            "applied": True,
+            "hdri_preset": hdri_preset,
+            "hdri_path": resolved,
+            "dome_light": {"path": "/World/HDRISkyDomeLight", "intensity": float(dome_intensity)},
+        }
+
+    if style == "dynamic_clear_sky":
+        import omni.kit.app
+
+        ext_manager = omni.kit.app.get_app().get_extension_manager()
+        if not ext_manager.is_extension_enabled("omni.kit.environment.core"):
+            ext_manager.set_extension_enabled_immediate("omni.kit.environment.core", True)
+        from omni.kit.environment.core import EnvironmentSettings, SkyHelper, SkyType, import_environment
+
+        url = DEFAULT_DYNAMIC_CLEAR_SKY
+        settings.set(EnvironmentSettings.SHOW_LIGHT_WARNING, False)
+        sky_type = SkyHelper.get_env_file_type(url) or SkyType.DYNAMIC
+        import_environment(sky_type, url)
+        return {
+            "style": style,
+            "applied": True,
+            "sky_type": sky_type,
+            "sky_url": url,
         }
 
     raise ValueError(f"Unsupported sky background style: {style}")
@@ -754,6 +1044,12 @@ def main() -> None:
         help="Render settings preset. 'beauty' enables quality mode, DLAA, GI, shadows, AO, reflections, denoiser.",
     )
     parser.add_argument("--render_samples_per_pixel", type=int, default=64)
+    parser.add_argument(
+        "--render_mode",
+        choices=("auto", "default", "rt", "pt"),
+        default="auto",
+        help="Runtime RTX render mode. auto uses path tracing for --render_quality_preset=beauty.",
+    )
     parser.add_argument("--out_dir", type=Path, default=None)
     parser.add_argument(
         "--no_timestamp_out_dir",
@@ -802,7 +1098,7 @@ def main() -> None:
     parser.add_argument("--style_floor", action="store_true")
     parser.add_argument(
         "--floor_style",
-        choices=("display_color", "marble_tiles"),
+        choices=("display_color", "marble_tiles", "isaac_marble_pbr_tiles", "white_stone_slabs"),
         default="display_color",
         help="Floor visual style used when --style_floor is set.",
     )
@@ -815,13 +1111,42 @@ def main() -> None:
     parser.add_argument("--floor_tile_size", type=float, default=0.9)
     parser.add_argument("--floor_tile_gap", type=float, default=0.012)
     parser.add_argument(
+        "--floor_texture_path",
+        default=None,
+        help=(
+            "Optional texture for --floor_style=isaac_marble_pbr_tiles. "
+            "If omitted, resolves NVIDIA Isaac sample marble_tile.png from the Isaac asset root."
+        ),
+    )
+    parser.add_argument("--floor_texture_scale", type=float, default=4.0)
+    parser.add_argument(
         "--sky_style",
-        choices=("default", "blue_color", "blue_dome"),
+        choices=("default", "blue_color", "blue_dome", "hdri", "dynamic_clear_sky"),
         default="default",
         help="Presentation background style. Does not change physics ground.",
     )
     parser.add_argument("--sky_color", type=float, nargs=3, default=(0.58, 0.74, 0.98))
     parser.add_argument("--sky_dome_intensity", type=float, default=1200.0)
+    parser.add_argument(
+        "--sky_hdri_preset",
+        choices=(
+            "stinson_beach",
+            "photo_studio",
+            "cape_hill",
+            "old_outdoor_theater",
+            "cloudy_vondelpark",
+            "wasteland_clouds",
+            "winter_sky",
+            "kloofendal_partly_cloudy",
+            "sunset_fairway",
+        ),
+        default="stinson_beach",
+    )
+    parser.add_argument(
+        "--sky_hdri_path",
+        default=None,
+        help="Explicit local .hdr/.exr path for --sky_style=hdri. Overrides --sky_hdri_preset.",
+    )
     parser.add_argument(
         "--backdrop_style",
         choices=("none", "blue_wall", "blue_walls"),
@@ -912,6 +1237,11 @@ def main() -> None:
     launcher_args.headless = True
     launcher_args.enable_cameras = True
     app = AppLauncher(launcher_args).app
+    runtime_render_summary = _apply_runtime_render_settings(
+        preset=my_args.render_quality_preset,
+        render_mode=my_args.render_mode,
+        samples_per_pixel=my_args.render_samples_per_pixel,
+    )
 
     import gymnasium as gym
     import imageio
@@ -975,7 +1305,7 @@ def main() -> None:
         )
     floor_style_summary = None
     if my_args.style_floor:
-        if my_args.floor_style == "marble_tiles":
+        if my_args.floor_style in {"marble_tiles", "isaac_marble_pbr_tiles", "white_stone_slabs"}:
             # Keep the original physics ground, but make it a neutral base below
             # the render-only cinematic tile overlay.
             base_floor_summary = _style_prim_trees(
@@ -985,15 +1315,37 @@ def main() -> None:
                 visible=True,
                 label="floor_base",
             )
-            tile_floor_summary = _apply_marble_tile_floor(
-                base_color=tuple(float(v) for v in my_args.floor_color),
-                tile_count=int(my_args.floor_tile_count),
-                tile_size=float(my_args.floor_tile_size),
-                tile_gap=float(my_args.floor_tile_gap),
-            )
+            if my_args.floor_style in {"isaac_marble_pbr_tiles", "white_stone_slabs"}:
+                if my_args.floor_style == "white_stone_slabs":
+                    floor_texture_path = my_args.floor_texture_path or str(DEFAULT_WHITE_STONE_TEXTURE)
+                    material_name = "CinematicWhiteStone"
+                    style_name = "white_stone_slabs"
+                else:
+                    floor_texture_path = my_args.floor_texture_path or _resolve_isaac_asset(
+                        ISAAC_SAMPLE_MARBLE_TEXTURE
+                    )
+                    material_name = "CinematicIsaacMarble"
+                    style_name = "isaac_marble_pbr_tiles"
+                tile_floor_summary = _apply_pbr_tile_floor(
+                    base_color=tuple(float(v) for v in my_args.floor_color),
+                    tile_count=int(my_args.floor_tile_count),
+                    tile_size=float(my_args.floor_tile_size),
+                    tile_gap=float(my_args.floor_tile_gap),
+                    texture_path=floor_texture_path,
+                    texture_scale=float(my_args.floor_texture_scale),
+                    material_name=material_name,
+                    style_name=style_name,
+                )
+            else:
+                tile_floor_summary = _apply_marble_tile_floor(
+                    base_color=tuple(float(v) for v in my_args.floor_color),
+                    tile_count=int(my_args.floor_tile_count),
+                    tile_size=float(my_args.floor_tile_size),
+                    tile_gap=float(my_args.floor_tile_gap),
+                )
             floor_style_summary = {
                 "label": "floor",
-                "style": "marble_tiles",
+                "style": my_args.floor_style,
                 "base": base_floor_summary,
                 "tiles": tile_floor_summary,
             }
@@ -1013,6 +1365,8 @@ def main() -> None:
         style=my_args.sky_style,
         color=tuple(float(v) for v in my_args.sky_color),
         dome_intensity=float(my_args.sky_dome_intensity),
+        hdri_preset=my_args.sky_hdri_preset,
+        hdri_path=my_args.sky_hdri_path,
     )
     if sky_summary["applied"]:
         print(f"[render_simtoolreal_pretrained] applied sky background: {sky_summary}")
@@ -1070,8 +1424,11 @@ def main() -> None:
         print(f"[diag] env_spacing_xy = {my_args.env_spacing_xy}")
         print(f"[diag] grid_cols = {my_args.grid_cols}")
         print(f"[diag] scene env_spacing = {max(my_args.env_spacing_xy)}")
+    else:
+        print(f"[diag] scene env_spacing = {my_args.env_spacing}")
     print(f"[diag] quality = {my_args.quality}, width = {width}, height = {height}")
     print(f"[diag] render_quality = {render_quality_summary}")
+    print(f"[diag] runtime_render = {runtime_render_summary}")
     print(f"[diag] sky = {sky_summary}")
     print(f"[diag] backdrop = {backdrop_summary}")
     print(f"[diag] robot_urdf = {env_cfg.assets.robot_urdf}")
@@ -1088,7 +1445,6 @@ def main() -> None:
         f"yaw_deg={env_cfg.reset.reset_orientation_yaw_range_deg:g} "
         f"axis_angle_deg={env_cfg.reset.reset_orientation_axis_angle_range_deg:g}"
     )
-
     agent_cfg = load_cfg_from_registry(my_args.task, my_args.agent)
     clip_obs = float(agent_cfg["params"]["env"].get("clip_observations", math.inf))
     clip_actions = float(agent_cfg["params"]["env"].get("clip_actions", math.inf))
@@ -1151,7 +1507,9 @@ def main() -> None:
         "height": height,
         "render_quality_preset": my_args.render_quality_preset,
         "render_samples_per_pixel": my_args.render_samples_per_pixel,
+        "render_mode": my_args.render_mode,
         "render_quality_summary": render_quality_summary,
+        "runtime_render_summary": runtime_render_summary,
         "steps": my_args.steps,
         "video_fps": my_args.video_fps,
         "capture_every": capture_every,
@@ -1190,9 +1548,13 @@ def main() -> None:
         "floor_tile_count": int(my_args.floor_tile_count),
         "floor_tile_size": float(my_args.floor_tile_size),
         "floor_tile_gap": float(my_args.floor_tile_gap),
+        "floor_texture_path": my_args.floor_texture_path,
+        "floor_texture_scale": float(my_args.floor_texture_scale),
         "sky_style": my_args.sky_style,
         "sky_color": list(my_args.sky_color),
         "sky_dome_intensity": float(my_args.sky_dome_intensity),
+        "sky_hdri_preset": my_args.sky_hdri_preset,
+        "sky_hdri_path": my_args.sky_hdri_path,
         "backdrop_style": my_args.backdrop_style,
         "backdrop_color": list(my_args.backdrop_color),
         "backdrop_distance": float(my_args.backdrop_distance),
