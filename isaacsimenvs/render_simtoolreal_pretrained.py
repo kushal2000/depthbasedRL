@@ -490,6 +490,42 @@ def _apply_beauty_lighting() -> dict[str, Any]:
     return {"spawned": spawned}
 
 
+def _apply_sky_background(
+    *,
+    style: str,
+    color: tuple[float, float, float],
+    dome_intensity: float,
+) -> dict[str, Any]:
+    """Set a presentation background without changing physics geometry."""
+    if style == "default":
+        return {"style": style, "applied": False}
+
+    import carb
+
+    settings = carb.settings.get_settings()
+    rgb = tuple(float(v) for v in color)
+    if style == "blue_color":
+        settings.set("/rtx/background/source/type", "color")
+        settings.set("/rtx/background/source/color", rgb)
+        return {"style": style, "applied": True, "color": list(rgb)}
+
+    if style == "blue_dome":
+        import isaaclab.sim as sim_utils
+
+        settings.set("/rtx/background/source/type", "domeLight")
+        settings.set("/rtx/background/source/color", rgb)
+        dome = sim_utils.DomeLightCfg(intensity=float(dome_intensity), color=rgb, exposure=0.0)
+        dome.func("/World/BlueSkyDomeLight", dome)
+        return {
+            "style": style,
+            "applied": True,
+            "color": list(rgb),
+            "dome_light": {"path": "/World/BlueSkyDomeLight", "intensity": float(dome_intensity)},
+        }
+
+    raise ValueError(f"Unsupported sky background style: {style}")
+
+
 def _make_camera_cfg(width: int, height: int):
     import isaaclab.sim as sim_utils
     from isaaclab.sensors import CameraCfg
@@ -673,6 +709,14 @@ def main() -> None:
     parser.add_argument("--floor_tile_size", type=float, default=0.9)
     parser.add_argument("--floor_tile_gap", type=float, default=0.012)
     parser.add_argument(
+        "--sky_style",
+        choices=("default", "blue_color", "blue_dome"),
+        default="default",
+        help="Presentation background style. Does not change physics ground.",
+    )
+    parser.add_argument("--sky_color", type=float, nargs=3, default=(0.58, 0.74, 0.98))
+    parser.add_argument("--sky_dome_intensity", type=float, default=1200.0)
+    parser.add_argument(
         "--robot_urdf",
         type=Path,
         default=None,
@@ -849,6 +893,13 @@ def main() -> None:
             "[render_simtoolreal_pretrained] styled "
             f"floor using {my_args.floor_style}"
         )
+    sky_summary = _apply_sky_background(
+        style=my_args.sky_style,
+        color=tuple(float(v) for v in my_args.sky_color),
+        dome_intensity=float(my_args.sky_dome_intensity),
+    )
+    if sky_summary["applied"]:
+        print(f"[render_simtoolreal_pretrained] applied sky background: {sky_summary}")
     goal_style_summary = None
     if my_args.hide_goal_viz:
         goal_style_summary = _style_prim_trees(
@@ -895,6 +946,7 @@ def main() -> None:
         print(f"[diag] scene env_spacing = {max(my_args.env_spacing_xy)}")
     print(f"[diag] quality = {my_args.quality}, width = {width}, height = {height}")
     print(f"[diag] render_quality = {render_quality_summary}")
+    print(f"[diag] sky = {sky_summary}")
     print(f"[diag] robot_urdf = {env_cfg.assets.robot_urdf}")
     print(f"[diag] camera eye = {eye.detach().cpu().tolist()}")
     print(f"[diag] camera target = {target.detach().cpu().tolist()}")
@@ -998,6 +1050,7 @@ def main() -> None:
         "recolor_summary": recolor_summary,
         "table_style_summary": table_style_summary,
         "floor_style_summary": floor_style_summary,
+        "sky_summary": sky_summary,
         "goal_style_summary": goal_style_summary,
         "lighting_summary": lighting_summary,
         "hide_goal_viz": bool(my_args.hide_goal_viz),
@@ -1009,6 +1062,9 @@ def main() -> None:
         "floor_tile_count": int(my_args.floor_tile_count),
         "floor_tile_size": float(my_args.floor_tile_size),
         "floor_tile_gap": float(my_args.floor_tile_gap),
+        "sky_style": my_args.sky_style,
+        "sky_color": list(my_args.sky_color),
+        "sky_dome_intensity": float(my_args.sky_dome_intensity),
         "requested_out_dir": str(requested_out_dir) if requested_out_dir is not None else None,
         "effective_out_dir": str(out_dir),
         "outputs": {"pngs": [], "video": None},
