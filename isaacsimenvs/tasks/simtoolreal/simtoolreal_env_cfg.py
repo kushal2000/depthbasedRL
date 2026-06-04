@@ -70,6 +70,7 @@ class AssetsCfg:
     table_scale_num_variants: int = 1
 
     object_name: str = "handle_head_primitives"
+    object_distribution_mode: str = "training"  # "training" | "mixed_training_simple_25_25_50"
     handle_head_types: tuple[str, ...] = (
         "hammer",
         "screwdriver",

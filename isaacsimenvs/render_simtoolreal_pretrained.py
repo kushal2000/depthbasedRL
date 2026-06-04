@@ -110,10 +110,19 @@ def _auto_camera_pose(env, *, z_offset: float = 0.75):
     return eye, target
 
 
-def _rectangular_env_origins(num_envs: int, x_spacing: float, y_spacing: float, *, device):
+def _rectangular_env_origins(
+    num_envs: int,
+    x_spacing: float,
+    y_spacing: float,
+    *,
+    device,
+    grid_cols: int | None = None,
+):
     import torch
 
-    cols = int(math.ceil(math.sqrt(num_envs)))
+    cols = int(grid_cols or math.ceil(math.sqrt(num_envs)))
+    if cols <= 0:
+        raise ValueError(f"grid_cols must be positive, got {grid_cols}")
     rows = int(math.ceil(num_envs / cols))
     origins = torch.zeros((num_envs, 3), dtype=torch.float32, device=device)
     for env_id in range(num_envs):
@@ -124,12 +133,24 @@ def _rectangular_env_origins(num_envs: int, x_spacing: float, y_spacing: float, 
     return origins
 
 
-def _apply_rectangular_env_layout(env, x_spacing: float, y_spacing: float) -> dict[str, Any]:
+def _apply_rectangular_env_layout(
+    env,
+    x_spacing: float,
+    y_spacing: float,
+    *,
+    grid_cols: int | None,
+) -> dict[str, Any]:
     """Move env root prims to a rectangular grid and keep env_origins consistent."""
     from pxr import Gf, UsdGeom
     from isaaclab.sim.utils import get_current_stage
 
-    new_origins = _rectangular_env_origins(env.num_envs, x_spacing, y_spacing, device=env.device)
+    new_origins = _rectangular_env_origins(
+        env.num_envs,
+        x_spacing,
+        y_spacing,
+        device=env.device,
+        grid_cols=grid_cols,
+    )
     old_origins = env.scene.env_origins.clone()
     stage = get_current_stage()
     moved = 0
@@ -146,6 +167,9 @@ def _apply_rectangular_env_layout(env, x_spacing: float, y_spacing: float) -> di
     return {
         "requested_x_spacing": x_spacing,
         "requested_y_spacing": y_spacing,
+        "requested_grid_cols": grid_cols,
+        "actual_grid_cols": int(grid_cols or math.ceil(math.sqrt(env.num_envs))),
+        "actual_grid_rows": int(math.ceil(env.num_envs / int(grid_cols or math.ceil(math.sqrt(env.num_envs))))),
         "moved_env_roots": moved,
         "old_min": old_origins.min(dim=0).values.detach().cpu().tolist(),
         "old_max": old_origins.max(dim=0).values.detach().cpu().tolist(),
@@ -221,6 +245,37 @@ def _recolor_objects_by_env() -> dict[str, Any]:
     return {"num_colored": len(colored), "objects": colored[:32]}
 
 
+def _style_goal_viz(color: tuple[float, float, float], opacity: float) -> dict[str, Any]:
+    """Style GoalViz as a translucent target distinct from the live object."""
+    from pxr import Gf, Usd, UsdGeom, UsdShade
+    from isaaclab.sim.utils import find_matching_prim_paths, get_current_stage
+
+    stage = get_current_stage()
+    goal_paths = sorted(
+        find_matching_prim_paths("/World/envs/env_.*/GoalViz"),
+        key=lambda p: int(p.rsplit("/", 2)[-2].removeprefix("env_")),
+    )
+    color_vec = Gf.Vec3f(*color)
+    styled = []
+    for root_path in goal_paths:
+        root_prim = stage.GetPrimAtPath(root_path)
+        if not root_prim.IsValid():
+            continue
+        gprim_count = 0
+        for prim in Usd.PrimRange(root_prim):
+            try:
+                UsdShade.MaterialBindingAPI(prim).UnbindAllBindings()
+            except Exception:
+                pass
+            if prim.IsA(UsdGeom.Gprim):
+                gprim = UsdGeom.Gprim(prim)
+                gprim.GetDisplayColorAttr().Set([color_vec])
+                gprim.GetDisplayOpacityAttr().Set([float(opacity)])
+                gprim_count += 1
+        styled.append({"goal_path": root_path, "color": color, "opacity": opacity, "gprim_count": gprim_count})
+    return {"num_styled": len(styled), "goals": styled[:32]}
+
+
 def _make_camera_cfg(width: int, height: int):
     import isaaclab.sim as sim_utils
     from isaaclab.sensors import CameraCfg
@@ -268,6 +323,7 @@ def _apply_training_distribution(env_cfg, args) -> None:
         env_cfg.scene.env_spacing = args.env_spacing
     env_cfg.assets.num_assets_per_type = args.num_assets_per_type
     env_cfg.assets.handle_head_types = args.handle_head_types
+    env_cfg.assets.object_distribution_mode = args.object_distribution_mode
     if args.reset_position_noise_m is not None:
         x_noise, y_noise, z_noise = args.reset_position_noise_m
         env_cfg.reset.reset_position_noise_x = float(x_noise)
@@ -324,6 +380,7 @@ def main() -> None:
     parser.add_argument("--num_envs", type=int, default=16)
     parser.add_argument("--env_spacing", type=float, default=1.2)
     parser.add_argument("--env_spacing_xy", type=float, nargs=2, default=None)
+    parser.add_argument("--grid_cols", type=int, default=None)
     parser.add_argument("--steps", type=int, default=360)
     parser.add_argument("--video_fps", type=int, default=30)
     parser.add_argument("--quality", choices=sorted(QUALITY_PRESETS), default="low")
@@ -360,7 +417,15 @@ def main() -> None:
     parser.add_argument("--camera_orbit_deg", type=float, default=10.0)
     parser.add_argument("--camera_dolly_scale", type=float, default=1.12)
     parser.add_argument("--no_recolor_objects", action="store_true")
+    parser.add_argument("--no_style_goal_viz", action="store_true")
+    parser.add_argument("--goal_color", type=float, nargs=3, default=(0.55, 1.0, 0.55))
+    parser.add_argument("--goal_opacity", type=float, default=0.35)
     parser.add_argument("--num_assets_per_type", type=int, default=100)
+    parser.add_argument(
+        "--object_distribution_mode",
+        choices=("training", "mixed_training_simple_25_25_50"),
+        default="training",
+    )
     parser.add_argument(
         "--handle_head_types",
         type=_parse_handle_head_types,
@@ -455,6 +520,7 @@ def main() -> None:
             env,
             x_spacing=float(my_args.env_spacing_xy[0]),
             y_spacing=float(my_args.env_spacing_xy[1]),
+            grid_cols=my_args.grid_cols,
         )
         print(f"[diag] rectangular env layout = {rectangular_layout_summary}")
 
@@ -467,6 +533,13 @@ def main() -> None:
         print(
             "[render_simtoolreal_pretrained] recolored "
             f"{recolor_summary['num_colored']} object prims"
+        )
+    goal_style_summary = None
+    if not my_args.no_style_goal_viz:
+        goal_style_summary = _style_goal_viz(tuple(float(v) for v in my_args.goal_color), my_args.goal_opacity)
+        print(
+            "[render_simtoolreal_pretrained] styled "
+            f"{goal_style_summary['num_styled']} GoalViz prims"
         )
 
     if my_args.camera_eye is not None:
@@ -487,6 +560,7 @@ def main() -> None:
     print(f"[diag] num_envs = {my_args.num_envs}, env_spacing = {my_args.env_spacing}")
     if my_args.env_spacing_xy is not None:
         print(f"[diag] env_spacing_xy = {my_args.env_spacing_xy}")
+        print(f"[diag] grid_cols = {my_args.grid_cols}")
         print(f"[diag] scene env_spacing = {max(my_args.env_spacing_xy)}")
     print(f"[diag] quality = {my_args.quality}, width = {width}, height = {height}")
     print(f"[diag] camera eye = {eye.detach().cpu().tolist()}")
@@ -542,8 +616,10 @@ def main() -> None:
         "env_spacing": my_args.env_spacing,
         "scene_env_spacing": max(my_args.env_spacing_xy) if my_args.env_spacing_xy is not None else my_args.env_spacing,
         "env_spacing_xy": my_args.env_spacing_xy,
+        "grid_cols": my_args.grid_cols,
         "rectangular_layout_summary": rectangular_layout_summary,
         "num_assets_per_type": my_args.num_assets_per_type,
+        "object_distribution_mode": my_args.object_distribution_mode,
         "handle_head_types": list(my_args.handle_head_types),
         "reset": {
             "reset_position_noise_m": [
@@ -571,6 +647,9 @@ def main() -> None:
         "camera_orbit_deg": my_args.camera_orbit_deg,
         "camera_dolly_scale": my_args.camera_dolly_scale,
         "recolor_summary": recolor_summary,
+        "goal_style_summary": goal_style_summary,
+        "goal_color": list(my_args.goal_color),
+        "goal_opacity": float(my_args.goal_opacity),
         "requested_out_dir": str(requested_out_dir) if requested_out_dir is not None else None,
         "effective_out_dir": str(out_dir),
         "outputs": {"pngs": [], "video": None},

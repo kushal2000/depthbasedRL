@@ -21,7 +21,7 @@ from isaaclab.sim.spawners.from_files import GroundPlaneCfg, UsdFileCfg, spawn_g
 from isaaclab.sim.spawners.wrappers import MultiUsdFileCfg
 from isaaclab.sim.utils import find_matching_prim_paths, get_current_stage
 
-from .generate_objects import generate_handle_head_urdfs
+from .generate_objects import generate_handle_head_urdfs, generate_mixed_training_simple_urdfs
 
 
 # ----------------------------------------------------------------------------
@@ -1567,19 +1567,33 @@ def setup_scene(env) -> None:
 
     # 1. Generate procedural URDFs in a per-launch temp dir.
     env._tmp_asset_dir = tempfile.mkdtemp(prefix="simtoolreal_assets_")
-    urdf_paths, object_scales_normalized = generate_handle_head_urdfs(
-        handle_head_types=tuple(assets_cfg.handle_head_types),
-        num_per_type=assets_cfg.num_assets_per_type,
-        out_dir=env._tmp_asset_dir,
-        shuffle=assets_cfg.shuffle_assets,
-    )
+    object_distribution_mode = str(getattr(assets_cfg, "object_distribution_mode", "training"))
+    if object_distribution_mode == "training":
+        urdf_paths, object_scales_normalized = generate_handle_head_urdfs(
+            handle_head_types=tuple(assets_cfg.handle_head_types),
+            num_per_type=assets_cfg.num_assets_per_type,
+            out_dir=env._tmp_asset_dir,
+            shuffle=assets_cfg.shuffle_assets,
+        )
+    elif object_distribution_mode == "mixed_training_simple_25_25_50":
+        urdf_paths, object_scales_normalized = generate_mixed_training_simple_urdfs(
+            handle_head_types=tuple(assets_cfg.handle_head_types),
+            num_per_type=assets_cfg.num_assets_per_type,
+            out_dir=env._tmp_asset_dir,
+            shuffle=assets_cfg.shuffle_assets,
+        )
+    else:
+        raise ValueError(f"Unsupported object_distribution_mode={object_distribution_mode!r}")
     if not urdf_paths:
         raise ValueError(
             "No procedural object URDFs were generated. "
             "Check cfg.assets.handle_head_types and num_assets_per_type."
         )
     env._object_urdf_paths = [str(path) for path in urdf_paths]
-    _log_scene_step(setup_t0, f"generated {len(urdf_paths)} object URDFs")
+    _log_scene_step(
+        setup_t0,
+        f"generated {len(urdf_paths)} object URDFs mode={object_distribution_mode}",
+    )
 
     # 2. Convert URDFs -> raw USDs -> role-specific baked USDs.
     usd_work_dir = Path(env._tmp_asset_dir) / "usd"

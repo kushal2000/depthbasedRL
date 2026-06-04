@@ -30,6 +30,10 @@ _NUM_OBJECTS_PER_TYPE_DEFAULT = 100
 # Reward-space normalization constant (same value the env uses when rescaling).
 _OBJECT_BASE_SIZE = 0.04
 
+_FORCED_SIMPLE_CUBOID_MAX_CROSS_SECTION_M = 0.05
+_FORCED_SIMPLE_CUBOID_MIN_CROSS_SECTION_M = 0.012
+_FORCED_SIMPLE_CYLINDER_CROSS_SECTION_SCALE = 1.0 / 3.0
+
 
 # ----------------------------------------------------------------------------
 # Primitive URDF emitters
@@ -299,6 +303,78 @@ def _scale_to_3d(scale: np.ndarray) -> tuple[float, float, float]:
     raise ValueError(f"Invalid scale shape: {scale.shape}")
 
 
+def _shape_from_dims(dims: tuple[float, ...]) -> str:
+    if len(dims) == 3:
+        return "cuboid"
+    if len(dims) == 2:
+        return "cylinder"
+    raise ValueError(f"Unsupported object dims: {dims}")
+
+
+def _lerp_dims_band(
+    min_lengths: tuple[float, ...],
+    max_lengths: tuple[float, ...],
+    rng: np.random.Generator,
+    *,
+    low: float = 0.25,
+    high: float = 0.75,
+) -> tuple[float, ...]:
+    lo = np.asarray(min_lengths, dtype=float)
+    hi = np.asarray(max_lengths, dtype=float)
+    return tuple((lo + rng.uniform(low, high, size=lo.shape) * (hi - lo)).tolist())
+
+
+def _forced_simple_distributions(shape: str, matching) -> list:
+    out = []
+    for dist in matching:
+        if _shape_from_dims(tuple(dist.handle_min_lengths)) != shape:
+            continue
+        if shape == "cuboid":
+            max_lengths = np.asarray(dist.handle_max_lengths, dtype=float)
+            if np.max(max_lengths[1:]) > _FORCED_SIMPLE_CUBOID_MAX_CROSS_SECTION_M:
+                continue
+        out.append(dist)
+    if not out:
+        raise ValueError(f"No matching training distributions for forced simple shape {shape!r}.")
+    return out
+
+
+def _sample_forced_simple_scale(dist, rng: np.random.Generator, shape: str) -> tuple[float, ...]:
+    handle_dims = _lerp_dims_band(dist.handle_min_lengths, dist.handle_max_lengths, rng)
+    if shape == "cuboid":
+        if len(handle_dims) != 3:
+            raise ValueError("Forced simple cuboids must sample from cuboid-handle distributions.")
+        length, width, height = (float(v) for v in handle_dims)
+        width = max(width, _FORCED_SIMPLE_CUBOID_MIN_CROSS_SECTION_M)
+        height = max(height, _FORCED_SIMPLE_CUBOID_MIN_CROSS_SECTION_M)
+        return length, width, height
+    if shape == "cylinder":
+        if len(handle_dims) != 2:
+            raise ValueError("Forced simple cylinders must sample from cylinder-handle distributions.")
+        length, cross_section = (float(v) for v in handle_dims)
+        return length, cross_section * _FORCED_SIMPLE_CYLINDER_CROSS_SECTION_SCALE
+    raise ValueError(f"Unsupported simple shape: {shape}")
+
+
+def _sample_training_object(dist, rng: np.random.Generator):
+    handle_density = float(rng.uniform(dist.handle_min_density, dist.handle_max_density))
+    head_density = (
+        None
+        if dist.head_min_density is None or dist.head_max_density is None
+        else float(rng.uniform(dist.head_min_density, dist.head_max_density))
+    )
+    handle_min = np.asarray(dist.handle_min_lengths, dtype=float)
+    handle_max = np.asarray(dist.handle_max_lengths, dtype=float)
+    handle_scale = tuple((handle_min + rng.random(handle_min.shape) * (handle_max - handle_min)).tolist())
+    if dist.head_min_lengths is None or dist.head_max_lengths is None:
+        head_scale = None
+    else:
+        head_min = np.asarray(dist.head_min_lengths, dtype=float)
+        head_max = np.asarray(dist.head_max_lengths, dtype=float)
+        head_scale = tuple((head_min + rng.random(head_min.shape) * (head_max - head_min)).tolist())
+    return handle_scale, head_scale, handle_density, head_density
+
+
 def generate_handle_head_urdfs(
     handle_head_types: tuple[str, ...],
     num_per_type: int = _NUM_OBJECTS_PER_TYPE_DEFAULT,
@@ -399,8 +475,108 @@ def generate_handle_head_urdfs(
     return paths, scales_norm
 
 
+def generate_mixed_training_simple_urdfs(
+    handle_head_types: tuple[str, ...],
+    num_per_type: int = _NUM_OBJECTS_PER_TYPE_DEFAULT,
+    out_dir: Union[str, Path] = "/tmp/simtoolreal_assets",
+    object_base_size: float = _OBJECT_BASE_SIZE,
+    seed: int = _SEED,
+    shuffle: bool = True,
+) -> tuple[list[str], list[tuple[float, float, float]]]:
+    """Generate 50% training objects, 25% simple boxes, and 25% simple cylinders.
+
+    This mirrors the assembly-renderer "mixed_training_simple_25_25_50" figure
+    distribution while keeping outputs compatible with SimToolReal's URDF->USD
+    scene path. Forced simple shapes are sampled from the training handle
+    ranges rather than arbitrary dimensions.
+    """
+    out_dir = Path(out_dir)
+    if out_dir.exists():
+        for p in out_dir.iterdir():
+            if p.suffix == ".urdf":
+                p.unlink()
+    else:
+        os.makedirs(out_dir)
+
+    rng = np.random.default_rng(seed)
+
+    type_set = set(handle_head_types)
+    matching = [d for d in OBJECT_SIZE_DISTRIBUTIONS if d.type in type_set]
+    if not matching:
+        raise ValueError(
+            f"No matching ObjectSizeDistribution for handle_head_types={handle_head_types}. "
+            f"Valid types: {sorted({d.type for d in OBJECT_SIZE_DISTRIBUTIONS})}"
+        )
+    forced_cuboids = _forced_simple_distributions("cuboid", matching)
+    forced_cylinders = _forced_simple_distributions("cylinder", matching)
+
+    total_count = max(1, int(num_per_type) * len(matching))
+    paths: list[str] = []
+    scales_raw: list[tuple[float, ...]] = []
+    simple_box_idx = 0
+    simple_cylinder_idx = 0
+
+    for idx in range(total_count):
+        slot = idx % 4
+        if slot in {0, 2}:
+            dist = matching[idx % len(matching)]
+            h_scale, head, h_d, head_d = _sample_training_object(dist, rng)
+            fname = (
+                f"{idx:04d}_training_{dist.type}_handle_{h_scale}_head_{head}_d{h_d:.1f}_{head_d}"
+                .replace(".", "-")
+                + ".urdf"
+            )
+            urdf_path = out_dir / fname
+            generate_handle_head_urdf(
+                path=urdf_path,
+                handle_scale=h_scale,
+                head_scale=head,
+                handle_density=h_d,
+                head_density=head_d,
+            )
+            scales_raw.append(h_scale)
+        elif slot == 1:
+            dist = forced_cuboids[simple_box_idx % len(forced_cuboids)]
+            simple_box_idx += 1
+            h_scale = _sample_forced_simple_scale(dist, rng, "cuboid")
+            h_d = float(rng.uniform(dist.handle_min_density, dist.handle_max_density))
+            fname = f"{idx:04d}_simple_box_from_{dist.type}_handle_{h_scale}_d{h_d:.1f}".replace(".", "-") + ".urdf"
+            urdf_path = out_dir / fname
+            generate_handle_urdf(urdf_path, h_scale, h_d)
+            scales_raw.append(h_scale)
+        else:
+            dist = forced_cylinders[simple_cylinder_idx % len(forced_cylinders)]
+            simple_cylinder_idx += 1
+            h_scale = _sample_forced_simple_scale(dist, rng, "cylinder")
+            h_d = float(rng.uniform(dist.handle_min_density, dist.handle_max_density))
+            fname = (
+                f"{idx:04d}_simple_cylinder_from_{dist.type}_handle_{h_scale}_d{h_d:.1f}"
+                .replace(".", "-")
+                + ".urdf"
+            )
+            urdf_path = out_dir / fname
+            generate_handle_urdf(urdf_path, h_scale, h_d)
+            scales_raw.append(h_scale)
+        paths.append(str(urdf_path))
+
+    scales_3d = [_scale_to_3d(np.asarray(s)) for s in scales_raw]
+    scales_norm = [
+        (x / object_base_size, y / object_base_size, z / object_base_size)
+        for (x, y, z) in scales_3d
+    ]
+
+    if shuffle:
+        indices = np.arange(len(paths))
+        rng.shuffle(indices)
+        paths = [paths[i] for i in indices]
+        scales_norm = [scales_norm[i] for i in indices]
+
+    return paths, scales_norm
+
+
 __all__ = [
     "generate_handle_urdf",
     "generate_handle_head_urdf",
     "generate_handle_head_urdfs",
+    "generate_mixed_training_simple_urdfs",
 ]
