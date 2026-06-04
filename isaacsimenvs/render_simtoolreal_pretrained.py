@@ -268,6 +268,17 @@ def _apply_training_distribution(env_cfg, args) -> None:
         env_cfg.scene.env_spacing = args.env_spacing
     env_cfg.assets.num_assets_per_type = args.num_assets_per_type
     env_cfg.assets.handle_head_types = args.handle_head_types
+    if args.reset_position_noise_m is not None:
+        x_noise, y_noise, z_noise = args.reset_position_noise_m
+        env_cfg.reset.reset_position_noise_x = float(x_noise)
+        env_cfg.reset.reset_position_noise_y = float(y_noise)
+        env_cfg.reset.reset_position_noise_z = float(z_noise)
+    if args.reset_orientation_mode is not None:
+        env_cfg.reset.reset_orientation_mode = args.reset_orientation_mode
+    if args.reset_yaw_noise_deg is not None:
+        env_cfg.reset.reset_orientation_yaw_range_deg = float(args.reset_yaw_noise_deg)
+    if args.reset_axis_angle_noise_deg is not None:
+        env_cfg.reset.reset_orientation_axis_angle_range_deg = float(args.reset_axis_angle_noise_deg)
 
 
 def _tensor_to_list(value) -> list[float]:
@@ -354,6 +365,35 @@ def main() -> None:
         "--handle_head_types",
         type=_parse_handle_head_types,
         default=_parse_handle_head_types("hammer,screwdriver,marker,spatula,eraser,brush"),
+    )
+    parser.add_argument(
+        "--reset_position_noise_m",
+        type=float,
+        nargs=3,
+        default=None,
+        metavar=("X", "Y", "Z"),
+        help=(
+            "Override object reset position half-widths in meters. "
+            "Default env training distribution is 0.1 0.1 0.02."
+        ),
+    )
+    parser.add_argument(
+        "--reset_orientation_mode",
+        choices=("full", "identity", "yaw", "axis_angle"),
+        default=None,
+        help="Override object reset orientation distribution. Default env training distribution is full SO(3).",
+    )
+    parser.add_argument(
+        "--reset_yaw_noise_deg",
+        type=float,
+        default=None,
+        help="Yaw half-width for --reset_orientation_mode yaw.",
+    )
+    parser.add_argument(
+        "--reset_axis_angle_noise_deg",
+        type=float,
+        default=None,
+        help="Angle half-width for --reset_orientation_mode axis_angle.",
     )
     my_args = parser.parse_args()
 
@@ -453,6 +493,15 @@ def main() -> None:
     print(f"[diag] camera target = {target.detach().cpu().tolist()}")
     print(f"[diag] camera pos_w actual = {camera.data.pos_w[0].detach().cpu().tolist()}")
     print(f"[diag] camera quat_w actual = {camera.data.quat_w_world[0].detach().cpu().tolist()}")
+    print(
+        "[diag] object reset noise = "
+        f"xyz_m=({env_cfg.reset.reset_position_noise_x:g}, "
+        f"{env_cfg.reset.reset_position_noise_y:g}, "
+        f"{env_cfg.reset.reset_position_noise_z:g}) "
+        f"orientation_mode={env_cfg.reset.reset_orientation_mode} "
+        f"yaw_deg={env_cfg.reset.reset_orientation_yaw_range_deg:g} "
+        f"axis_angle_deg={env_cfg.reset.reset_orientation_axis_angle_range_deg:g}"
+    )
 
     agent_cfg = load_cfg_from_registry(my_args.task, my_args.agent)
     clip_obs = float(agent_cfg["params"]["env"].get("clip_observations", math.inf))
@@ -496,6 +545,18 @@ def main() -> None:
         "rectangular_layout_summary": rectangular_layout_summary,
         "num_assets_per_type": my_args.num_assets_per_type,
         "handle_head_types": list(my_args.handle_head_types),
+        "reset": {
+            "reset_position_noise_m": [
+                float(env_cfg.reset.reset_position_noise_x),
+                float(env_cfg.reset.reset_position_noise_y),
+                float(env_cfg.reset.reset_position_noise_z),
+            ],
+            "reset_orientation_mode": str(env_cfg.reset.reset_orientation_mode),
+            "reset_orientation_yaw_range_deg": float(env_cfg.reset.reset_orientation_yaw_range_deg),
+            "reset_orientation_axis_angle_range_deg": float(
+                env_cfg.reset.reset_orientation_axis_angle_range_deg
+            ),
+        },
         "quality": my_args.quality,
         "width": width,
         "height": height,

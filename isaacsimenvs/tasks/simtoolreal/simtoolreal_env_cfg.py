@@ -357,6 +357,12 @@ class ResetCfg:
     reset_position_noise_x: float = 0.1
     reset_position_noise_y: float = 0.1
     reset_position_noise_z: float = 0.02
+    # Object orientation reset distribution. "full" preserves the legacy
+    # random SO(3) reset used for training. Narrower modes are mainly useful
+    # for controlled debug/video rollouts.
+    reset_orientation_mode: str = "full"  # "full" | "identity" | "yaw" | "axis_angle"
+    reset_orientation_yaw_range_deg: float = 180.0
+    reset_orientation_axis_angle_range_deg: float = 20.0
     fixed_start_pose: tuple[float, float, float, float, float, float, float] | None = None
 
     # Joint state noise on reset

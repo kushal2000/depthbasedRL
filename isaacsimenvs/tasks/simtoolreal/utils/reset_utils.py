@@ -3,11 +3,12 @@
 from __future__ import annotations
 
 import json
+import math
 from pathlib import Path
 
 import torch
 
-from isaaclab.utils.math import random_orientation
+from isaaclab.utils.math import quat_from_angle_axis, random_orientation
 
 from .action_utils import sample_log_uniform
 from .goal_sampling import sample_absolute_goal_pose, sample_delta_goal_pose
@@ -290,7 +291,27 @@ def _reset_object_pose(env, env_ids: torch.Tensor) -> None:
             ),
             dim=-1,
         )
-        quat = random_orientation(n, device=env.device)
+        orientation_mode = str(getattr(cfg, "reset_orientation_mode", "full"))
+        if orientation_mode == "full":
+            quat = random_orientation(n, device=env.device)
+        elif orientation_mode == "identity":
+            quat = torch.tensor(
+                [1.0, 0.0, 0.0, 0.0], device=env.device, dtype=torch.float32
+            ).unsqueeze(0).expand(n, -1)
+        elif orientation_mode == "yaw":
+            yaw_range = math.radians(float(getattr(cfg, "reset_orientation_yaw_range_deg", 180.0)))
+            yaw = (torch.rand(n, device=env.device) * 2.0 - 1.0) * yaw_range
+            axis = torch.tensor([0.0, 0.0, 1.0], device=env.device, dtype=torch.float32).expand(n, -1)
+            quat = quat_from_angle_axis(yaw, axis)
+        elif orientation_mode == "axis_angle":
+            angle_range = math.radians(
+                float(getattr(cfg, "reset_orientation_axis_angle_range_deg", 20.0))
+            )
+            axis = torch.nn.functional.normalize(torch.randn(n, 3, device=env.device), dim=-1)
+            angle = (torch.rand(n, device=env.device) * 2.0 - 1.0) * angle_range
+            quat = quat_from_angle_axis(angle, axis)
+        else:
+            raise ValueError(f"Unsupported reset_orientation_mode={orientation_mode!r}")
 
     pose = torch.cat([pos_local + env_origins, quat], dim=-1)
     env.object.write_root_pose_to_sim(pose, env_ids=env_ids)
