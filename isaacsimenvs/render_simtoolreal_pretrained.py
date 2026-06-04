@@ -110,6 +110,50 @@ def _auto_camera_pose(env, *, z_offset: float = 0.75):
     return eye, target
 
 
+def _rectangular_env_origins(num_envs: int, x_spacing: float, y_spacing: float, *, device):
+    import torch
+
+    cols = int(math.ceil(math.sqrt(num_envs)))
+    rows = int(math.ceil(num_envs / cols))
+    origins = torch.zeros((num_envs, 3), dtype=torch.float32, device=device)
+    for env_id in range(num_envs):
+        row = env_id // cols
+        col = env_id % cols
+        origins[env_id, 0] = (col - 0.5 * (cols - 1)) * x_spacing
+        origins[env_id, 1] = (row - 0.5 * (rows - 1)) * y_spacing
+    return origins
+
+
+def _apply_rectangular_env_layout(env, x_spacing: float, y_spacing: float) -> dict[str, Any]:
+    """Move env root prims to a rectangular grid and keep env_origins consistent."""
+    from pxr import Gf, UsdGeom
+    from isaaclab.sim.utils import get_current_stage
+
+    new_origins = _rectangular_env_origins(env.num_envs, x_spacing, y_spacing, device=env.device)
+    old_origins = env.scene.env_origins.clone()
+    stage = get_current_stage()
+    moved = 0
+    for env_id, env_path in enumerate(env.scene.env_prim_paths):
+        prim = stage.GetPrimAtPath(env_path)
+        if not prim.IsValid():
+            continue
+        xformable = UsdGeom.Xformable(prim)
+        xformable.ClearXformOpOrder()
+        translate_op = xformable.AddTranslateOp()
+        translate_op.Set(Gf.Vec3d(*[float(v) for v in new_origins[env_id].detach().cpu().tolist()]))
+        moved += 1
+    env.scene.env_origins.copy_(new_origins)
+    return {
+        "requested_x_spacing": x_spacing,
+        "requested_y_spacing": y_spacing,
+        "moved_env_roots": moved,
+        "old_min": old_origins.min(dim=0).values.detach().cpu().tolist(),
+        "old_max": old_origins.max(dim=0).values.detach().cpu().tolist(),
+        "new_min": new_origins.min(dim=0).values.detach().cpu().tolist(),
+        "new_max": new_origins.max(dim=0).values.detach().cpu().tolist(),
+    }
+
+
 def _set_record_camera(camera, eye, target) -> None:
     camera.set_world_poses_from_view(eye.unsqueeze(0), target.unsqueeze(0))
     # The caller will step/update the sim after this.  Keep this helper small so
@@ -218,7 +262,10 @@ def _save_manifest(out_dir: Path, manifest: dict[str, Any]) -> None:
 
 def _apply_training_distribution(env_cfg, args) -> None:
     env_cfg.scene.num_envs = args.num_envs
-    env_cfg.scene.env_spacing = args.env_spacing
+    if args.env_spacing_xy is not None:
+        env_cfg.scene.env_spacing = max(args.env_spacing_xy)
+    else:
+        env_cfg.scene.env_spacing = args.env_spacing
     env_cfg.assets.num_assets_per_type = args.num_assets_per_type
     env_cfg.assets.handle_head_types = args.handle_head_types
 
@@ -230,12 +277,18 @@ def main() -> None:
     parser.add_argument("--agent", default="rl_games_sapg_cfg_entry_point")
     parser.add_argument("--num_envs", type=int, default=16)
     parser.add_argument("--env_spacing", type=float, default=1.0)
+    parser.add_argument("--env_spacing_xy", type=float, nargs=2, default=None)
     parser.add_argument("--steps", type=int, default=360)
     parser.add_argument("--video_fps", type=int, default=30)
     parser.add_argument("--quality", choices=sorted(QUALITY_PRESETS), default="low")
     parser.add_argument("--width", type=int, default=None)
     parser.add_argument("--height", type=int, default=None)
     parser.add_argument("--out_dir", type=Path, default=None)
+    parser.add_argument(
+        "--no_timestamp_out_dir",
+        action="store_true",
+        help="Write directly to --out_dir instead of creating a timestamped subdirectory.",
+    )
     parser.add_argument("--rl_device", default="cuda:0")
     parser.add_argument("--deterministic", action="store_true")
     parser.add_argument("--seed", type=int, default=42)
@@ -271,13 +324,17 @@ def main() -> None:
     width = my_args.width or int(quality["width"])
     height = my_args.height or int(quality["height"])
     timestamp = time.strftime("%Y-%m-%d_%H-%M-%S")
-    out_dir = my_args.out_dir
-    if out_dir is None:
+    requested_out_dir = my_args.out_dir
+    if requested_out_dir is None:
         out_dir = (
             VIDEO_DIR
             / f"{timestamp}_{_checkpoint_slug(my_args.checkpoint)}"
             / f"n{my_args.num_envs}_spacing{my_args.env_spacing:g}_{my_args.quality}"
         )
+    elif my_args.no_timestamp_out_dir:
+        out_dir = requested_out_dir
+    else:
+        out_dir = requested_out_dir / timestamp
     out_dir.mkdir(parents=True, exist_ok=True)
 
     from isaaclab.app import AppLauncher
@@ -310,6 +367,14 @@ def main() -> None:
     mod_name, cls_name = spec.entry_point.split(":")
     env_cls = getattr(importlib.import_module(mod_name), cls_name)
     env = env_cls(cfg=env_cfg)
+    rectangular_layout_summary = None
+    if my_args.env_spacing_xy is not None:
+        rectangular_layout_summary = _apply_rectangular_env_layout(
+            env,
+            x_spacing=float(my_args.env_spacing_xy[0]),
+            y_spacing=float(my_args.env_spacing_xy[1]),
+        )
+        print(f"[diag] rectangular env layout = {rectangular_layout_summary}")
 
     camera = Camera(cfg=_make_camera_cfg(width=width, height=height))
     env.sim.reset()
@@ -338,6 +403,9 @@ def main() -> None:
 
     print(f"[diag] checkpoint = {checkpoint}")
     print(f"[diag] num_envs = {my_args.num_envs}, env_spacing = {my_args.env_spacing}")
+    if my_args.env_spacing_xy is not None:
+        print(f"[diag] env_spacing_xy = {my_args.env_spacing_xy}")
+        print(f"[diag] scene env_spacing = {max(my_args.env_spacing_xy)}")
     print(f"[diag] quality = {my_args.quality}, width = {width}, height = {height}")
     print(f"[diag] camera eye = {eye.detach().cpu().tolist()}")
     print(f"[diag] camera target = {target.detach().cpu().tolist()}")
@@ -381,6 +449,9 @@ def main() -> None:
         "seed": my_args.seed,
         "num_envs": my_args.num_envs,
         "env_spacing": my_args.env_spacing,
+        "scene_env_spacing": max(my_args.env_spacing_xy) if my_args.env_spacing_xy is not None else my_args.env_spacing,
+        "env_spacing_xy": my_args.env_spacing_xy,
+        "rectangular_layout_summary": rectangular_layout_summary,
         "num_assets_per_type": my_args.num_assets_per_type,
         "handle_head_types": list(my_args.handle_head_types),
         "quality": my_args.quality,
@@ -397,12 +468,16 @@ def main() -> None:
         "camera_orbit_deg": my_args.camera_orbit_deg,
         "camera_dolly_scale": my_args.camera_dolly_scale,
         "recolor_summary": recolor_summary,
+        "requested_out_dir": str(requested_out_dir) if requested_out_dir is not None else None,
+        "effective_out_dir": str(out_dir),
         "outputs": {"pngs": [], "video": None},
+        "timings": {"captures": [], "video_write_ms": None},
     }
 
     frames = []
 
     def capture(step_i: int, *, for_video: bool) -> None:
+        capture_t0 = time.perf_counter()
         progress = 0.0 if my_args.steps <= 0 else min(1.0, max(0.0, step_i / my_args.steps))
         capture_eye = _camera_eye_for_step(
             eye,
@@ -414,16 +489,37 @@ def main() -> None:
         )
         _set_record_camera(camera, capture_eye, target)
         frame = _capture_rgb(camera, dt=policy_dt)
+        render_ms = (time.perf_counter() - capture_t0) * 1000.0
         if frame is None:
             print(f"[warning] no RGB frame at step {step_i}")
             return
+        write_png_ms = None
         if step_i in capture_steps:
             png_path = out_dir / f"step_{step_i:04d}.png"
+            write_t0 = time.perf_counter()
             imageio.imwrite(str(png_path), frame)
+            write_png_ms = (time.perf_counter() - write_t0) * 1000.0
             manifest["outputs"]["pngs"].append(str(png_path))
             print(f"[render_simtoolreal_pretrained] wrote {png_path}")
         if for_video:
             frames.append(frame)
+        manifest["timings"]["captures"].append(
+            {
+                "step": step_i,
+                "for_video": for_video,
+                "render_ms": render_ms,
+                "write_png_ms": write_png_ms,
+                "height": int(frame.shape[0]),
+                "width": int(frame.shape[1]),
+            }
+        )
+        timing_log_every = max(1, capture_every * my_args.video_fps)
+        if write_png_ms is not None or step_i % timing_log_every == 0:
+            print(
+                "[timing] capture "
+                f"step={step_i} render_ms={render_ms:.2f}"
+                + (f" write_png_ms={write_png_ms:.2f}" if write_png_ms is not None else "")
+            )
 
     print(
         "[render_simtoolreal_pretrained] rolling out "
@@ -438,7 +534,9 @@ def main() -> None:
 
     if my_args.make_video:
         video_path = out_dir / "rollout.mp4"
-        imageio.mimwrite(str(video_path), frames, fps=my_args.video_fps)
+        video_t0 = time.perf_counter()
+        imageio.mimwrite(str(video_path), frames, fps=my_args.video_fps, macro_block_size=1)
+        manifest["timings"]["video_write_ms"] = (time.perf_counter() - video_t0) * 1000.0
         manifest["outputs"]["video"] = str(video_path)
         print(f"[render_simtoolreal_pretrained] wrote {len(frames)} frames to {video_path}")
 
