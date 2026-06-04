@@ -323,6 +323,173 @@ def _style_goal_viz(color: tuple[float, float, float], opacity: float) -> dict[s
     return {"num_styled": len(styled), "goals": styled[:32]}
 
 
+def _style_prim_trees(
+    pattern: str,
+    *,
+    color: tuple[float, float, float],
+    opacity: float = 1.0,
+    visible: bool = True,
+    label: str,
+) -> dict[str, Any]:
+    """Set simple display styling on all Gprims under prims matching ``pattern``."""
+    from pxr import Gf, Usd, UsdGeom, UsdShade
+    from isaaclab.sim.utils import find_matching_prim_paths, get_current_stage
+
+    stage = get_current_stage()
+    paths = sorted(find_matching_prim_paths(pattern))
+    color_vec = Gf.Vec3f(*color)
+    styled = []
+    for root_path in paths:
+        root_prim = stage.GetPrimAtPath(root_path)
+        if not root_prim.IsValid():
+            continue
+        imageable = UsdGeom.Imageable(root_prim)
+        if visible:
+            imageable.MakeVisible()
+        else:
+            imageable.MakeInvisible()
+        gprim_count = 0
+        for prim in Usd.PrimRange(root_prim):
+            try:
+                UsdShade.MaterialBindingAPI(prim).UnbindAllBindings()
+            except Exception:
+                pass
+            if prim.IsA(UsdGeom.Gprim):
+                gprim = UsdGeom.Gprim(prim)
+                gprim.GetDisplayColorAttr().Set([color_vec])
+                gprim.GetDisplayOpacityAttr().Set([float(opacity)])
+                gprim_count += 1
+        styled.append(
+            {
+                "path": root_path,
+                "color": color,
+                "opacity": opacity,
+                "visible": visible,
+                "gprim_count": gprim_count,
+            }
+        )
+    return {"label": label, "pattern": pattern, "num_styled": len(styled), "items": styled[:32]}
+
+
+def _apply_marble_tile_floor(
+    *,
+    base_color: tuple[float, float, float],
+    tile_count: int,
+    tile_size: float,
+    tile_gap: float,
+    tile_thickness: float = 0.006,
+) -> dict[str, Any]:
+    """Add a render-only tiled stone/marble floor above the physics ground."""
+    import random
+
+    from pxr import Gf, UsdGeom, UsdShade
+    from isaaclab.sim.utils import get_current_stage
+
+    stage = get_current_stage()
+    root_path = "/World/CinematicFloor"
+    root = UsdGeom.Xform.Define(stage, root_path)
+
+    rng = random.Random(17)
+    half = 0.5 * (tile_count - 1)
+    effective_size = max(0.01, float(tile_size) - float(tile_gap))
+    top_z = 0.0015
+    center_z = top_z - 0.5 * tile_thickness
+
+    tiles = []
+    for row in range(tile_count):
+        for col in range(tile_count):
+            prim_path = f"{root_path}/Tile_{row:02d}_{col:02d}"
+            cube = UsdGeom.Cube.Define(stage, prim_path)
+            cube.CreateSizeAttr(1.0)
+            xform = UsdGeom.Xformable(cube.GetPrim())
+            xform.AddTranslateOp().Set(
+                (
+                    (col - half) * float(tile_size),
+                    (row - half) * float(tile_size),
+                    center_z,
+                )
+            )
+            # With Cube.size=1, xform scale is the full visual edge length.
+            # Keep gaps small so the floor reads as continuous stone, not patches.
+            xform.AddScaleOp().Set((effective_size, effective_size, tile_thickness))
+
+            # Slight per-tile variation is enough to read as stone at cinematic distance.
+            noise = rng.uniform(-0.045, 0.035)
+            warm = rng.uniform(-0.012, 0.018)
+            color = (
+                min(1.0, max(0.0, base_color[0] + noise + warm)),
+                min(1.0, max(0.0, base_color[1] + noise + warm)),
+                min(1.0, max(0.0, base_color[2] + noise)),
+            )
+            gprim = UsdGeom.Gprim(cube.GetPrim())
+            gprim.GetDisplayColorAttr().Set([Gf.Vec3f(*color)])
+            gprim.GetDisplayOpacityAttr().Set([1.0])
+            try:
+                UsdShade.MaterialBindingAPI(cube.GetPrim()).UnbindAllBindings()
+            except Exception:
+                pass
+            if len(tiles) < 16:
+                tiles.append({"path": prim_path, "color": color})
+
+    return {
+        "style": "marble_tiles",
+        "root_path": root_path,
+        "tile_count": tile_count,
+        "tile_size": tile_size,
+        "tile_gap": tile_gap,
+        "num_tiles": tile_count * tile_count,
+        "sample_tiles": tiles,
+    }
+
+
+def _apply_beauty_render_settings(env_cfg, *, preset: str, samples_per_pixel: int) -> dict[str, Any]:
+    """Apply render-only quality settings to the env config before construction."""
+    if preset == "default":
+        return {"preset": preset, "applied": False}
+
+    render_cfg = getattr(getattr(env_cfg, "sim", None), "render", None)
+    if render_cfg is None:
+        return {"preset": preset, "applied": False, "reason": "env_cfg.sim.render missing"}
+
+    settings = {
+        "rendering_mode": "quality",
+        "antialiasing_mode": "DLAA",
+        "enable_translucency": True,
+        "enable_reflections": True,
+        "enable_global_illumination": True,
+        "enable_direct_lighting": True,
+        "enable_shadows": True,
+        "enable_ambient_occlusion": True,
+        "enable_dl_denoiser": True,
+        "samples_per_pixel": int(samples_per_pixel),
+    }
+    applied = {}
+    for key, value in settings.items():
+        if hasattr(render_cfg, key):
+            setattr(render_cfg, key, value)
+            applied[key] = value
+    return {"preset": preset, "applied": True, "settings": applied}
+
+
+def _apply_beauty_lighting() -> dict[str, Any]:
+    """Add soft global/key/fill lighting for presentation renders."""
+    import isaaclab.sim as sim_utils
+
+    spawned = []
+    dome = sim_utils.DomeLightCfg(intensity=900.0, color=(0.95, 0.97, 1.0), exposure=0.0)
+    dome.func("/World/BeautyDomeLight", dome)
+    spawned.append({"path": "/World/BeautyDomeLight", "type": "DomeLight", "intensity": 900.0})
+
+    key = sim_utils.SphereLightCfg(radius=3.0, intensity=11000.0, color=(1.0, 0.86, 0.68), exposure=0.0)
+    key.func("/World/KeyLight", key, translation=(-3.0, -4.0, 6.0))
+    spawned.append({"path": "/World/KeyLight", "type": "SphereLight", "translation": [-3.0, -4.0, 6.0]})
+
+    fill = sim_utils.SphereLightCfg(radius=5.0, intensity=1800.0, color=(0.72, 0.82, 1.0), exposure=0.0)
+    fill.func("/World/FillLight", fill, translation=(4.0, 3.0, 4.0))
+    spawned.append({"path": "/World/FillLight", "type": "SphereLight", "translation": [4.0, 3.0, 4.0]})
+    return {"spawned": spawned}
+
+
 def _make_camera_cfg(width: int, height: int):
     import isaaclab.sim as sim_utils
     from isaaclab.sensors import CameraCfg
@@ -433,6 +600,13 @@ def main() -> None:
     parser.add_argument("--quality", choices=sorted(QUALITY_PRESETS), default="low")
     parser.add_argument("--width", type=int, default=None)
     parser.add_argument("--height", type=int, default=None)
+    parser.add_argument(
+        "--render_quality_preset",
+        choices=("default", "beauty"),
+        default="default",
+        help="Render settings preset. 'beauty' enables quality mode, DLAA, GI, shadows, AO, reflections, denoiser.",
+    )
+    parser.add_argument("--render_samples_per_pixel", type=int, default=64)
     parser.add_argument("--out_dir", type=Path, default=None)
     parser.add_argument(
         "--no_timestamp_out_dir",
@@ -476,8 +650,23 @@ def main() -> None:
     parser.add_argument("--sapg_ref_end_eye_grid_scale", type=float, nargs=3, default=(-0.8, -1.2, 0.5))
     parser.add_argument("--no_recolor_objects", action="store_true")
     parser.add_argument("--no_style_goal_viz", action="store_true")
+    parser.add_argument("--hide_goal_viz", action="store_true")
+    parser.add_argument("--style_table", action="store_true")
+    parser.add_argument("--style_floor", action="store_true")
+    parser.add_argument(
+        "--floor_style",
+        choices=("display_color", "marble_tiles"),
+        default="display_color",
+        help="Floor visual style used when --style_floor is set.",
+    )
+    parser.add_argument("--beauty_lighting", action="store_true")
     parser.add_argument("--goal_color", type=float, nargs=3, default=(0.55, 1.0, 0.55))
     parser.add_argument("--goal_opacity", type=float, default=0.35)
+    parser.add_argument("--table_color", type=float, nargs=3, default=(0.72, 0.50, 0.30))
+    parser.add_argument("--floor_color", type=float, nargs=3, default=(0.60, 0.60, 0.56))
+    parser.add_argument("--floor_tile_count", type=int, default=24)
+    parser.add_argument("--floor_tile_size", type=float, default=0.9)
+    parser.add_argument("--floor_tile_gap", type=float, default=0.012)
     parser.add_argument("--num_assets_per_type", type=int, default=100)
     parser.add_argument(
         "--object_distribution_mode",
@@ -538,7 +727,7 @@ def main() -> None:
     elif my_args.no_timestamp_out_dir:
         out_dir = requested_out_dir
     else:
-        out_dir = requested_out_dir / timestamp
+        out_dir = requested_out_dir.parent / f"{timestamp}_{requested_out_dir.name}"
     out_dir.mkdir(parents=True, exist_ok=True)
 
     from isaaclab.app import AppLauncher
@@ -565,6 +754,11 @@ def main() -> None:
 
     env_cfg = load_cfg_from_registry(my_args.task, "env_cfg_entry_point")
     _apply_training_distribution(env_cfg, my_args)
+    render_quality_summary = _apply_beauty_render_settings(
+        env_cfg,
+        preset=my_args.render_quality_preset,
+        samples_per_pixel=my_args.render_samples_per_pixel,
+    )
     if hasattr(env_cfg, "seed"):
         env_cfg.seed = my_args.seed
 
@@ -592,13 +786,78 @@ def main() -> None:
             "[render_simtoolreal_pretrained] recolored "
             f"{recolor_summary['num_colored']} object prims"
         )
+    table_style_summary = None
+    if my_args.style_table:
+        table_style_summary = _style_prim_trees(
+            "/World/envs/env_.*/Table",
+            color=tuple(float(v) for v in my_args.table_color),
+            opacity=1.0,
+            visible=True,
+            label="table",
+        )
+        print(
+            "[render_simtoolreal_pretrained] styled "
+            f"{table_style_summary['num_styled']} table prims"
+        )
+    floor_style_summary = None
+    if my_args.style_floor:
+        if my_args.floor_style == "marble_tiles":
+            # Keep the original physics ground, but make it a neutral base below
+            # the render-only cinematic tile overlay.
+            base_floor_summary = _style_prim_trees(
+                "/World/ground",
+                color=(0.55, 0.56, 0.54),
+                opacity=1.0,
+                visible=True,
+                label="floor_base",
+            )
+            tile_floor_summary = _apply_marble_tile_floor(
+                base_color=tuple(float(v) for v in my_args.floor_color),
+                tile_count=int(my_args.floor_tile_count),
+                tile_size=float(my_args.floor_tile_size),
+                tile_gap=float(my_args.floor_tile_gap),
+            )
+            floor_style_summary = {
+                "label": "floor",
+                "style": "marble_tiles",
+                "base": base_floor_summary,
+                "tiles": tile_floor_summary,
+            }
+        else:
+            floor_style_summary = _style_prim_trees(
+                "/World/ground",
+                color=tuple(float(v) for v in my_args.floor_color),
+                opacity=1.0,
+                visible=True,
+                label="floor",
+            )
+        print(
+            "[render_simtoolreal_pretrained] styled "
+            f"floor using {my_args.floor_style}"
+        )
     goal_style_summary = None
-    if not my_args.no_style_goal_viz:
+    if my_args.hide_goal_viz:
+        goal_style_summary = _style_prim_trees(
+            "/World/envs/env_.*/GoalViz",
+            color=tuple(float(v) for v in my_args.goal_color),
+            opacity=0.0,
+            visible=False,
+            label="goal_viz",
+        )
+        print(
+            "[render_simtoolreal_pretrained] hid "
+            f"{goal_style_summary['num_styled']} GoalViz prims"
+        )
+    elif not my_args.no_style_goal_viz:
         goal_style_summary = _style_goal_viz(tuple(float(v) for v in my_args.goal_color), my_args.goal_opacity)
         print(
             "[render_simtoolreal_pretrained] styled "
             f"{goal_style_summary['num_styled']} GoalViz prims"
         )
+    lighting_summary = None
+    if my_args.beauty_lighting:
+        lighting_summary = _apply_beauty_lighting()
+        print(f"[render_simtoolreal_pretrained] applied beauty lighting: {lighting_summary}")
 
     if my_args.camera_eye is not None:
         eye = torch.tensor(my_args.camera_eye, device=env.device)
@@ -621,6 +880,7 @@ def main() -> None:
         print(f"[diag] grid_cols = {my_args.grid_cols}")
         print(f"[diag] scene env_spacing = {max(my_args.env_spacing_xy)}")
     print(f"[diag] quality = {my_args.quality}, width = {width}, height = {height}")
+    print(f"[diag] render_quality = {render_quality_summary}")
     print(f"[diag] camera eye = {eye.detach().cpu().tolist()}")
     print(f"[diag] camera target = {target.detach().cpu().tolist()}")
     print(f"[diag] camera pos_w actual = {camera.data.pos_w[0].detach().cpu().tolist()}")
@@ -694,6 +954,9 @@ def main() -> None:
         "quality": my_args.quality,
         "width": width,
         "height": height,
+        "render_quality_preset": my_args.render_quality_preset,
+        "render_samples_per_pixel": my_args.render_samples_per_pixel,
+        "render_quality_summary": render_quality_summary,
         "steps": my_args.steps,
         "video_fps": my_args.video_fps,
         "capture_every": capture_every,
@@ -717,9 +980,19 @@ def main() -> None:
             "easing": "quintic_smoothstep",
         },
         "recolor_summary": recolor_summary,
+        "table_style_summary": table_style_summary,
+        "floor_style_summary": floor_style_summary,
         "goal_style_summary": goal_style_summary,
+        "lighting_summary": lighting_summary,
+        "hide_goal_viz": bool(my_args.hide_goal_viz),
         "goal_color": list(my_args.goal_color),
         "goal_opacity": float(my_args.goal_opacity),
+        "table_color": list(my_args.table_color),
+        "floor_style": my_args.floor_style,
+        "floor_color": list(my_args.floor_color),
+        "floor_tile_count": int(my_args.floor_tile_count),
+        "floor_tile_size": float(my_args.floor_tile_size),
+        "floor_tile_gap": float(my_args.floor_tile_gap),
         "requested_out_dir": str(requested_out_dir) if requested_out_dir is not None else None,
         "effective_out_dir": str(out_dir),
         "outputs": {"pngs": [], "video": None},
