@@ -70,15 +70,6 @@ def _parse_step_list(value: str) -> list[int]:
     return steps
 
 
-def _parse_vec3(value: str | None) -> tuple[float, float, float] | None:
-    if value is None:
-        return None
-    parts = [float(item) for item in value.replace(",", " ").split()]
-    if len(parts) != 3:
-        raise argparse.ArgumentTypeError(f"expected 3 floats, got {value!r}")
-    return (parts[0], parts[1], parts[2])
-
-
 def _parse_handle_head_types(value: str) -> tuple[str, ...]:
     out = tuple(item.strip() for item in value.split(",") if item.strip())
     if not out:
@@ -123,6 +114,37 @@ def _set_record_camera(camera, eye, target) -> None:
     camera.set_world_poses_from_view(eye.unsqueeze(0), target.unsqueeze(0))
     # The caller will step/update the sim after this.  Keep this helper small so
     # camera motion can be extended later without changing capture semantics.
+
+
+def _camera_eye_for_step(
+    base_eye,
+    target,
+    *,
+    progress: float,
+    motion: str,
+    orbit_deg: float,
+    dolly_scale: float,
+):
+    if motion == "static":
+        return base_eye
+
+    import torch
+
+    rel = base_eye - target
+    if motion in {"orbit", "orbit_dolly_out"}:
+        theta = math.radians(orbit_deg) * progress
+        c = math.cos(theta)
+        s = math.sin(theta)
+        rot = torch.tensor(
+            [[c, -s, 0.0], [s, c, 0.0], [0.0, 0.0, 1.0]],
+            dtype=rel.dtype,
+            device=rel.device,
+        )
+        rel = rot @ rel
+    if motion in {"dolly_out", "orbit_dolly_out"}:
+        scale = 1.0 + progress * (dolly_scale - 1.0)
+        rel = rel * scale
+    return target + rel
 
 
 def _recolor_objects_by_env() -> dict[str, Any]:
@@ -223,8 +245,15 @@ def main() -> None:
         default=_parse_step_list("0,60,180,360"),
     )
     parser.add_argument("--make_video", action="store_true")
-    parser.add_argument("--camera_eye", type=_parse_vec3, default=None)
-    parser.add_argument("--camera_target", type=_parse_vec3, default=None)
+    parser.add_argument("--camera_eye", type=float, nargs=3, default=None)
+    parser.add_argument("--camera_target", type=float, nargs=3, default=None)
+    parser.add_argument(
+        "--camera_motion",
+        choices=("static", "orbit", "dolly_out", "orbit_dolly_out"),
+        default="static",
+    )
+    parser.add_argument("--camera_orbit_deg", type=float, default=10.0)
+    parser.add_argument("--camera_dolly_scale", type=float, default=1.12)
     parser.add_argument("--no_recolor_objects", action="store_true")
     parser.add_argument("--num_assets_per_type", type=int, default=100)
     parser.add_argument(
@@ -364,6 +393,9 @@ def main() -> None:
         "make_video": my_args.make_video,
         "camera_eye": eye.detach().cpu().tolist(),
         "camera_target": target.detach().cpu().tolist(),
+        "camera_motion": my_args.camera_motion,
+        "camera_orbit_deg": my_args.camera_orbit_deg,
+        "camera_dolly_scale": my_args.camera_dolly_scale,
         "recolor_summary": recolor_summary,
         "outputs": {"pngs": [], "video": None},
     }
@@ -371,6 +403,16 @@ def main() -> None:
     frames = []
 
     def capture(step_i: int, *, for_video: bool) -> None:
+        progress = 0.0 if my_args.steps <= 0 else min(1.0, max(0.0, step_i / my_args.steps))
+        capture_eye = _camera_eye_for_step(
+            eye,
+            target,
+            progress=progress,
+            motion=my_args.camera_motion,
+            orbit_deg=my_args.camera_orbit_deg,
+            dolly_scale=my_args.camera_dolly_scale,
+        )
+        _set_record_camera(camera, capture_eye, target)
         frame = _capture_rgb(camera, dt=policy_dt)
         if frame is None:
             print(f"[warning] no RGB frame at step {step_i}")
