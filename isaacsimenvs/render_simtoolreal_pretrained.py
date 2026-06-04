@@ -535,6 +535,11 @@ def _apply_training_distribution(env_cfg, args) -> None:
         env_cfg.scene.env_spacing = max(args.env_spacing_xy)
     else:
         env_cfg.scene.env_spacing = args.env_spacing
+    if args.robot_urdf is not None:
+        robot_urdf = Path(args.robot_urdf).expanduser()
+        if not robot_urdf.exists():
+            raise FileNotFoundError(f"Robot URDF override does not exist: {robot_urdf}")
+        env_cfg.assets.robot_urdf = str(robot_urdf.resolve())
     env_cfg.assets.num_assets_per_type = args.num_assets_per_type
     env_cfg.assets.handle_head_types = args.handle_head_types
     env_cfg.assets.object_distribution_mode = args.object_distribution_mode
@@ -667,6 +672,15 @@ def main() -> None:
     parser.add_argument("--floor_tile_count", type=int, default=24)
     parser.add_argument("--floor_tile_size", type=float, default=0.9)
     parser.add_argument("--floor_tile_gap", type=float, default=0.012)
+    parser.add_argument(
+        "--robot_urdf",
+        type=Path,
+        default=None,
+        help=(
+            "Optional robot URDF override. Useful for cinematic visual-only URDFs "
+            "that preserve the same kinematics/collisions."
+        ),
+    )
     parser.add_argument("--num_assets_per_type", type=int, default=100)
     parser.add_argument(
         "--object_distribution_mode",
@@ -881,6 +895,7 @@ def main() -> None:
         print(f"[diag] scene env_spacing = {max(my_args.env_spacing_xy)}")
     print(f"[diag] quality = {my_args.quality}, width = {width}, height = {height}")
     print(f"[diag] render_quality = {render_quality_summary}")
+    print(f"[diag] robot_urdf = {env_cfg.assets.robot_urdf}")
     print(f"[diag] camera eye = {eye.detach().cpu().tolist()}")
     print(f"[diag] camera target = {target.detach().cpu().tolist()}")
     print(f"[diag] camera pos_w actual = {camera.data.pos_w[0].detach().cpu().tolist()}")
@@ -936,6 +951,7 @@ def main() -> None:
         "env_spacing_xy": my_args.env_spacing_xy,
         "grid_cols": my_args.grid_cols,
         "rectangular_layout_summary": rectangular_layout_summary,
+        "robot_urdf": str(env_cfg.assets.robot_urdf),
         "num_assets_per_type": my_args.num_assets_per_type,
         "object_distribution_mode": my_args.object_distribution_mode,
         "handle_head_types": list(my_args.handle_head_types),
