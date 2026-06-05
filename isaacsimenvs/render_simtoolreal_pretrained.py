@@ -1024,6 +1024,7 @@ def _apply_single_sun_lighting(
     angle: float = 1.2,
     color_temperature: float = 5200.0,
     yaw_offset_deg: float = 0.0,
+    color: tuple[float, float, float] = (1.0, 0.97, 0.90),
 ) -> dict[str, Any]:
     """Add one directional sun light without the overexposing key/fill stack."""
     import isaaclab.sim as sim_utils
@@ -1044,7 +1045,7 @@ def _apply_single_sun_lighting(
         angle=float(angle),
         # Keep the key light warm enough to read as sunlight, but avoid the
         # orange/pink cast that made the white robot and object colors look flat.
-        color=(1.0, 0.97, 0.90),
+        color=tuple(float(v) for v in color),
         enable_color_temperature=True,
         color_temperature=float(color_temperature),
     )
@@ -1062,6 +1063,7 @@ def _apply_single_sun_lighting(
                 "exposure": float(exposure),
                 "angle": float(angle),
                 "color_temperature": float(color_temperature),
+                "color": [float(v) for v in color],
                 "yaw_offset_deg": float(yaw_offset_deg),
                 "orientation_wxyz": list(orientation),
             }
@@ -1744,6 +1746,7 @@ def main() -> None:
     parser.add_argument("--single_sun_exposure", type=float, default=5.5)
     parser.add_argument("--single_sun_angle", type=float, default=1.2)
     parser.add_argument("--single_sun_color_temperature", type=float, default=5200.0)
+    parser.add_argument("--single_sun_color", type=float, nargs=3, default=(1.0, 0.97, 0.90))
     parser.add_argument(
         "--single_sun_yaw_offset_deg",
         type=float,
@@ -2315,6 +2318,7 @@ def main() -> None:
             angle=float(my_args.single_sun_angle),
             color_temperature=float(my_args.single_sun_color_temperature),
             yaw_offset_deg=float(my_args.single_sun_yaw_offset_deg),
+            color=tuple(float(v) for v in my_args.single_sun_color),
         )
         print(f"[render_simtoolreal_pretrained] applied single-sun lighting: {lighting_summary}")
 
@@ -2492,6 +2496,7 @@ def main() -> None:
         "single_sun_exposure": float(my_args.single_sun_exposure),
         "single_sun_angle": float(my_args.single_sun_angle),
         "single_sun_color_temperature": float(my_args.single_sun_color_temperature),
+        "single_sun_color": list(my_args.single_sun_color),
         "single_sun_yaw_offset_deg": float(my_args.single_sun_yaw_offset_deg),
         "hide_goal_viz": bool(my_args.hide_goal_viz),
         "goal_color": list(my_args.goal_color),

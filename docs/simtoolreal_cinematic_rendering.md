@@ -238,3 +238,117 @@ or explicitly:
 FLOOR_STYLE=nvidia_precast_concrete_dark_gray \
   bash_scripts/95_render_simtoolreal_ref_pan_cinematic.sh
 ```
+
+## 2026-06-05 Daylight / Golden Sun Probe Update
+
+Branch: `2026-06-05_Tyler_SimVideos_LightingAdjust`
+
+Reference target:
+
+`beautiful_rendering_lighting_white_terrain.png`
+
+Interpretation of the reference lighting:
+
+- Primary light source: one low, warm directional "sun" from camera side/front-side, high enough to light the robots but low enough to cast long shadows.
+- Secondary light source: broad cool sky/ambient fill. This prevents robot backs and undersides from going black.
+- Exposure: controlled below clipping. The reference is bright, but the floor and robots keep visible gradients rather than becoming flat white.
+- Shadow style: visible, directional, moderately soft. Shadows add depth but do not obscure the object colors.
+
+New controls added:
+
+- `--single_sun_color R G B`
+- Bash pass-through: `SINGLE_SUN_COLOR_R/G/B`
+- Bash pass-through: `IMAGE_EXPOSURE`
+
+Broad lighting probe:
+
+```bash
+STEPS=300 CAPTURE_PNG_STEPS=0,150,300 \
+  bash_scripts/99_probe_simtoolreal_daylight_lighting.sh
+```
+
+Output:
+
+`local_logs/2026-06-05_02-54-12_simtoolreal_daylight_lighting_probe/`
+
+Review sheets:
+
+- `contact_sheet_step_0000.png`
+- `contact_sheet_step_0150.png`
+- `contact_sheet_step_0300.png`
+
+Broad probe findings:
+
+- `04_side_sun_less_front_shadow` was closest to the reference in visible sun/shadow direction, but its shadows were too graphic for the final dense-grid video.
+- `01_golden_key_cool_fill` and `07_cooler_clear_daylight` were safe/readable but only modestly different from the current accepted lighting.
+- `06_beauty_stack_control` remained too studio-like and flat relative to the reference.
+
+Focused lighting probe:
+
+```bash
+STEPS=300 CAPTURE_PNG_STEPS=0,150,300 \
+  bash_scripts/100_probe_simtoolreal_daylight_lighting_focused.sh
+```
+
+Output:
+
+`local_logs/2026-06-05_03-00-53_simtoolreal_daylight_lighting_focused_probe/`
+
+Review sheets:
+
+- `contact_sheet_step_0000.png`
+- `contact_sheet_step_0150.png`
+- `contact_sheet_step_0300.png`
+
+Focused probe findings:
+
+- `02_golden_contrast_balanced` is the most reference-like candidate: stronger daylight contrast, visible side shadows, and clear sun direction.
+- `01_side_sun_softened` is the better conservative default: similar sunlight direction, but less tan/gold color cast and less aggressive shadows.
+- `05_crisp_sun_controlled_fill` has the strongest shadow definition among the focused variants, but is likely too harsh for the dense 100-env final.
+
+Current recommended daylight candidate:
+
+```bash
+OUT_DIR=local_logs/$(date +%F_%H-%M-%S)_simtoolreal_ref_pan_side_sun_softened_20s \
+  MAKE_VIDEO=1 STEPS=1200 CAPTURE_PNG_STEPS=0,600,1200 \
+  SINGLE_SUN_EXPOSURE=9.65 \
+  SINGLE_SUN_ANGLE=0.28 \
+  SINGLE_SUN_COLOR_TEMPERATURE=5050 \
+  SINGLE_SUN_COLOR_R=1.00 SINGLE_SUN_COLOR_G=0.96 SINGLE_SUN_COLOR_B=0.84 \
+  SINGLE_SUN_YAW_OFFSET_DEG=110 \
+  DEFAULT_LIGHT_INTENSITY=520 \
+  SKY_DOME_INTENSITY=1700 \
+  IMAGE_EXPOSURE=-0.10 \
+  bash_scripts/98_render_simtoolreal_ref_pan_cinematic_greige_floor.sh
+```
+
+Short 100-env test output:
+
+`local_logs/2026-06-05_03-06-53_simtoolreal_ref_pan_side_sun_softened_5s/rollout.mp4`
+
+More dramatic/reference-like alternative:
+
+```bash
+OUT_DIR=local_logs/$(date +%F_%H-%M-%S)_simtoolreal_ref_pan_golden_contrast_balanced_20s \
+  MAKE_VIDEO=1 STEPS=1200 CAPTURE_PNG_STEPS=0,600,1200 \
+  SINGLE_SUN_EXPOSURE=9.90 \
+  SINGLE_SUN_ANGLE=0.22 \
+  SINGLE_SUN_COLOR_TEMPERATURE=5000 \
+  SINGLE_SUN_COLOR_R=1.00 SINGLE_SUN_COLOR_G=0.95 SINGLE_SUN_COLOR_B=0.82 \
+  SINGLE_SUN_YAW_OFFSET_DEG=105 \
+  DEFAULT_LIGHT_INTENSITY=470 \
+  SKY_DOME_INTENSITY=1600 \
+  IMAGE_EXPOSURE=-0.16 \
+  bash_scripts/98_render_simtoolreal_ref_pan_cinematic_greige_floor.sh
+```
+
+Short 100-env test output:
+
+`local_logs/2026-06-05_03-05-19_simtoolreal_ref_pan_golden_contrast_balanced_5s/rollout.mp4`
+
+Current lighting takeaway:
+
+- Keep the greige continuous floor and synthetic gradient sky; those are still the reliable base.
+- Use a side-biased low sun to create the reference-like daylight/shadow cue.
+- Do not drive sun exposure alone; pair stronger sun with more sky/default fill and a small negative output exposure, otherwise the table/floor overexposes and the robot colors flatten.
+- For final videos, prefer `01_side_sun_softened` unless the video needs a more dramatic hero-shot feel, in which case use `02_golden_contrast_balanced`.

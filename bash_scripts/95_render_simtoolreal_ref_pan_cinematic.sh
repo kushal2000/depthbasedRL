@@ -83,6 +83,7 @@ if [[ "${LIGHTING_STYLE}" == "single_sun" ]]; then
     --single_sun_exposure "${SINGLE_SUN_EXPOSURE:-9.35}"
     --single_sun_angle "${SINGLE_SUN_ANGLE:-0.12}"
     --single_sun_color_temperature "${SINGLE_SUN_COLOR_TEMPERATURE:-5250}"
+    --single_sun_color "${SINGLE_SUN_COLOR_R:-1.0}" "${SINGLE_SUN_COLOR_G:-0.97}" "${SINGLE_SUN_COLOR_B:-0.90}"
     --single_sun_yaw_offset_deg "${SINGLE_SUN_YAW_OFFSET_DEG:-70}"
   )
 fi
@@ -184,6 +185,7 @@ fi
   --sapg_ref_end_target_grid_scale -0.5 -0.5 0.0 \
   --sapg_ref_end_eye_grid_scale -0.8 -1.2 0.5 \
   --camera_render_warmup_frames "${CAMERA_RENDER_WARMUP_FRAMES:-1}" \
+  --image_exposure "${IMAGE_EXPOSURE:-0.0}" \
   --object_color_saturation "${OBJECT_COLOR_SATURATION:-1.6}" \
   --object_color_value_scale "${OBJECT_COLOR_VALUE_SCALE:-0.82}" \
   --no_timestamp_out_dir \
