@@ -49,6 +49,12 @@ DEFAULT_DYNAMIC_CLEAR_SKY = (
     "http://omniverse-content-production.s3-us-west-2.amazonaws.com/Assets/Skies/Dynamic/ClearSky.usd"
 )
 DEFAULT_WHITE_STONE_TEXTURE = REPO_ROOT / "assets/textures/cinematic_white_stone_slab.png"
+DEFAULT_NVIDIA_PRECAST_CONCRETE_MDL = (
+    REPO_ROOT
+    / ".venv-isaacsim-py311/lib/python3.11/site-packages/isaacsim/extscache/"
+    / "omni.kit.tool.collect-2.2.18+69cbf6ad/data/test_stages/OM_55150/1/Materials/"
+    / "vMaterials_2/Concrete/Concrete_Precast.mdl"
+)
 
 QUALITY_PRESETS = {
     # Quality currently controls capture resolution.  Keep render settings
@@ -557,6 +563,52 @@ def _create_omnipbr_material(
     return material.GetPrim(), {"path": material_path, "inputs": inputs}
 
 
+def _create_mdl_file_material(
+    *,
+    material_name: str,
+    mdl_path: str,
+    mdl_material_name: str,
+    project_uvw: bool | None = True,
+    texture_scale: tuple[float, float] | None = None,
+    albedo_brightness: float | None = None,
+) -> tuple[Any, dict[str, Any]]:
+    """Create an MDL file material, allowing explicit exported material selection."""
+    from omni.usd.commands import CreateMdlMaterialPrimCommand
+    from isaaclab.sim.utils import get_current_stage
+
+    stage = get_current_stage()
+    material_path = f"/World/Looks/{material_name}"
+    CreateMdlMaterialPrimCommand(
+        mtl_url=str(mdl_path),
+        mtl_name=mdl_material_name,
+        mtl_path=material_path,
+        stage=stage,
+        select_new_prim=False,
+    ).do()
+    shader_prim = stage.GetPrimAtPath(f"{material_path}/Shader")
+    inputs: dict[str, Any] = {"mdl_path": str(mdl_path), "mdl_material_name": mdl_material_name}
+    if project_uvw is not None:
+        from pxr import Sdf
+
+        shader_prim.CreateAttribute("inputs:project_uvw", Sdf.ValueTypeNames.Bool).Set(bool(project_uvw))
+        inputs["project_uvw"] = bool(project_uvw)
+    if texture_scale is not None:
+        from pxr import Gf, Sdf
+
+        shader_prim.CreateAttribute("inputs:texture_scale", Sdf.ValueTypeNames.Float2).Set(
+            Gf.Vec2f(float(texture_scale[0]), float(texture_scale[1]))
+        )
+        inputs["texture_scale"] = [float(texture_scale[0]), float(texture_scale[1])]
+    if albedo_brightness is not None:
+        from pxr import Sdf
+
+        shader_prim.CreateAttribute("inputs:albedo_brightness", Sdf.ValueTypeNames.Float).Set(
+            float(albedo_brightness)
+        )
+        inputs["albedo_brightness"] = float(albedo_brightness)
+    return stage.GetPrimAtPath(material_path), {"path": material_path, "inputs": inputs}
+
+
 def _apply_pbr_tile_floor(
     *,
     base_color: tuple[float, float, float],
@@ -568,6 +620,7 @@ def _apply_pbr_tile_floor(
     material_name: str = "CinematicPbrFloorMaterial",
     style_name: str = "pbr_tiles",
     tile_thickness: float = 0.006,
+    mdl_material_name: str | None = None,
 ) -> dict[str, Any]:
     """Add a render-only tiled floor using a real OmniPBR material."""
     import random
@@ -579,13 +632,22 @@ def _apply_pbr_tile_floor(
     root_path = "/World/CinematicPbrFloor"
     UsdGeom.Xform.Define(stage, root_path)
 
-    material_prim, material_summary = _create_omnipbr_material(
-        material_name=material_name,
-        diffuse_texture=texture_path,
-        diffuse_color=base_color,
-        texture_scale=(float(texture_scale), float(texture_scale)),
-        roughness=0.42,
-    )
+    if mdl_material_name is not None:
+        material_prim, material_summary = _create_mdl_file_material(
+            material_name=material_name,
+            mdl_path=str(texture_path),
+            mdl_material_name=mdl_material_name,
+            project_uvw=None,
+            texture_scale=(float(texture_scale), float(texture_scale)),
+        )
+    else:
+        material_prim, material_summary = _create_omnipbr_material(
+            material_name=material_name,
+            diffuse_texture=texture_path,
+            diffuse_color=base_color,
+            texture_scale=(float(texture_scale), float(texture_scale)),
+            roughness=0.42,
+        )
     material = UsdShade.Material(material_prim)
 
     rng = random.Random(19)
@@ -706,21 +768,46 @@ def _apply_runtime_render_settings(*, preset: str, render_mode: str, samples_per
 
 
 def _apply_beauty_lighting() -> dict[str, Any]:
-    """Add soft global/key/fill lighting for presentation renders."""
+    """Add soft outdoor/studio lighting for presentation renders."""
     import isaaclab.sim as sim_utils
 
     spawned = []
-    dome = sim_utils.DomeLightCfg(intensity=900.0, color=(0.95, 0.97, 1.0), exposure=0.0)
+    dome = sim_utils.DomeLightCfg(intensity=450.0, color=(0.92, 0.96, 1.0), exposure=0.0)
     dome.func("/World/BeautyDomeLight", dome)
-    spawned.append({"path": "/World/BeautyDomeLight", "type": "DomeLight", "intensity": 900.0})
+    spawned.append({"path": "/World/BeautyDomeLight", "type": "DomeLight", "intensity": 450.0})
 
-    key = sim_utils.SphereLightCfg(radius=3.0, intensity=11000.0, color=(1.0, 0.86, 0.68), exposure=0.0)
-    key.func("/World/KeyLight", key, translation=(-3.0, -4.0, 6.0))
-    spawned.append({"path": "/World/KeyLight", "type": "SphereLight", "translation": [-3.0, -4.0, 6.0]})
+    # Sun-like key light: the reference IsaacLab/Newton render has directional
+    # outdoor lighting, not just a local studio sphere light.
+    sun = sim_utils.DistantLightCfg(
+        intensity=1.0,
+        exposure=9.0,
+        angle=1.6,
+        color=(1.0, 0.94, 0.84),
+        enable_color_temperature=True,
+        color_temperature=5600.0,
+    )
+    sun.func(
+        "/World/BeautySunLight",
+        sun,
+        orientation=(0.70034, -0.27732, 0.62398, 0.20799),
+    )
+    spawned.append(
+        {
+            "path": "/World/BeautySunLight",
+            "type": "DistantLight",
+            "exposure": 9.0,
+            "angle": 1.6,
+            "orientation_wxyz": [0.70034, -0.27732, 0.62398, 0.20799],
+        }
+    )
 
-    fill = sim_utils.SphereLightCfg(radius=5.0, intensity=1800.0, color=(0.72, 0.82, 1.0), exposure=0.0)
-    fill.func("/World/FillLight", fill, translation=(4.0, 3.0, 4.0))
-    spawned.append({"path": "/World/FillLight", "type": "SphereLight", "translation": [4.0, 3.0, 4.0]})
+    key = sim_utils.SphereLightCfg(radius=4.0, intensity=3200.0, color=(1.0, 0.90, 0.78), exposure=0.0)
+    key.func("/World/KeyBounceLight", key, translation=(-2.4, -3.2, 4.0))
+    spawned.append({"path": "/World/KeyBounceLight", "type": "SphereLight", "translation": [-2.4, -3.2, 4.0]})
+
+    fill = sim_utils.SphereLightCfg(radius=6.0, intensity=1100.0, color=(0.70, 0.82, 1.0), exposure=0.0)
+    fill.func("/World/FillLight", fill, translation=(4.0, 3.0, 3.5))
+    spawned.append({"path": "/World/FillLight", "type": "SphereLight", "translation": [4.0, 3.0, 3.5]})
     return {"spawned": spawned}
 
 
@@ -1098,7 +1185,16 @@ def main() -> None:
     parser.add_argument("--style_floor", action="store_true")
     parser.add_argument(
         "--floor_style",
-        choices=("display_color", "marble_tiles", "isaac_marble_pbr_tiles", "white_stone_slabs"),
+        choices=(
+            "display_color",
+            "marble_tiles",
+            "isaac_marble_pbr_tiles",
+            "white_stone_slabs",
+            "nvidia_precast_concrete_white",
+            "nvidia_precast_concrete_ivory",
+            "nvidia_precast_concrete_light_gray",
+            "nvidia_precast_concrete_warm_gray",
+        ),
         default="display_color",
         help="Floor visual style used when --style_floor is set.",
     )
@@ -1305,7 +1401,15 @@ def main() -> None:
         )
     floor_style_summary = None
     if my_args.style_floor:
-        if my_args.floor_style in {"marble_tiles", "isaac_marble_pbr_tiles", "white_stone_slabs"}:
+        if my_args.floor_style in {
+            "marble_tiles",
+            "isaac_marble_pbr_tiles",
+            "white_stone_slabs",
+            "nvidia_precast_concrete_white",
+            "nvidia_precast_concrete_ivory",
+            "nvidia_precast_concrete_light_gray",
+            "nvidia_precast_concrete_warm_gray",
+        }:
             # Keep the original physics ground, but make it a neutral base below
             # the render-only cinematic tile overlay.
             base_floor_summary = _style_prim_trees(
@@ -1315,17 +1419,44 @@ def main() -> None:
                 visible=True,
                 label="floor_base",
             )
-            if my_args.floor_style in {"isaac_marble_pbr_tiles", "white_stone_slabs"}:
+            if my_args.floor_style in {
+                "isaac_marble_pbr_tiles",
+                "white_stone_slabs",
+                "nvidia_precast_concrete_white",
+                "nvidia_precast_concrete_ivory",
+                "nvidia_precast_concrete_light_gray",
+                "nvidia_precast_concrete_warm_gray",
+            }:
+                mdl_material_name = None
                 if my_args.floor_style == "white_stone_slabs":
                     floor_texture_path = my_args.floor_texture_path or str(DEFAULT_WHITE_STONE_TEXTURE)
                     material_name = "CinematicWhiteStone"
                     style_name = "white_stone_slabs"
-                else:
+                elif my_args.floor_style == "isaac_marble_pbr_tiles":
                     floor_texture_path = my_args.floor_texture_path or _resolve_isaac_asset(
                         ISAAC_SAMPLE_MARBLE_TEXTURE
                     )
                     material_name = "CinematicIsaacMarble"
                     style_name = "isaac_marble_pbr_tiles"
+                else:
+                    floor_texture_path = my_args.floor_texture_path or str(DEFAULT_NVIDIA_PRECAST_CONCRETE_MDL)
+                    precast_styles = {
+                        "nvidia_precast_concrete_white": ("Concrete_Precast", "CinematicPrecastConcreteWhite"),
+                        "nvidia_precast_concrete_ivory": (
+                            "concrete_precast_ivory",
+                            "CinematicPrecastConcreteIvory",
+                        ),
+                        "nvidia_precast_concrete_light_gray": (
+                            "concrete_precast_light_gray",
+                            "CinematicPrecastConcreteLightGray",
+                        ),
+                        "nvidia_precast_concrete_warm_gray": (
+                            "concrete_precast_light_warm_gray",
+                            "CinematicPrecastConcreteWarmGray",
+                        ),
+                    }
+                    mdl_material_name, material_name = precast_styles[my_args.floor_style]
+                    style_name = my_args.floor_style
                 tile_floor_summary = _apply_pbr_tile_floor(
                     base_color=tuple(float(v) for v in my_args.floor_color),
                     tile_count=int(my_args.floor_tile_count),
@@ -1335,6 +1466,7 @@ def main() -> None:
                     texture_scale=float(my_args.floor_texture_scale),
                     material_name=material_name,
                     style_name=style_name,
+                    mdl_material_name=mdl_material_name,
                 )
             else:
                 tile_floor_summary = _apply_marble_tile_floor(
