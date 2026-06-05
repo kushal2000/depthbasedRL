@@ -21,7 +21,11 @@ from isaaclab.sim.spawners.from_files import GroundPlaneCfg, UsdFileCfg, spawn_g
 from isaaclab.sim.spawners.wrappers import MultiUsdFileCfg
 from isaaclab.sim.utils import find_matching_prim_paths, get_current_stage
 
-from .generate_objects import generate_handle_head_urdfs, generate_mixed_training_simple_urdfs
+from .generate_objects import (
+    generate_handle_head_urdfs,
+    generate_mixed_training_easy_video_urdfs,
+    generate_mixed_training_simple_urdfs,
+)
 
 
 # ----------------------------------------------------------------------------
@@ -1577,6 +1581,13 @@ def setup_scene(env) -> None:
         )
     elif object_distribution_mode == "mixed_training_simple_25_25_50":
         urdf_paths, object_scales_normalized = generate_mixed_training_simple_urdfs(
+            handle_head_types=tuple(assets_cfg.handle_head_types),
+            num_per_type=assets_cfg.num_assets_per_type,
+            out_dir=env._tmp_asset_dir,
+            shuffle=assets_cfg.shuffle_assets,
+        )
+    elif object_distribution_mode == "mixed_training_easy_video_25_25_50":
+        urdf_paths, object_scales_normalized = generate_mixed_training_easy_video_urdfs(
             handle_head_types=tuple(assets_cfg.handle_head_types),
             num_per_type=assets_cfg.num_assets_per_type,
             out_dir=env._tmp_asset_dir,

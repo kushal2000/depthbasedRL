@@ -30,7 +30,18 @@ HOLD_OPEN_S="${HOLD_OPEN_S:-0}"
 
 MAKE_VIDEO="${MAKE_VIDEO:-0}"
 CAPTURE_PNG_STEPS="${CAPTURE_PNG_STEPS:-0,60,180,360,600,900,1200}"
-OUT_DIR="${OUT_DIR:-local_logs/simtoolreal_ref_pan_cinematic_visual_probe}"
+RUN_TIMESTAMP="$(date +%F_%H-%M-%S)"
+OUT_DIR="${OUT_DIR:-local_logs/${RUN_TIMESTAMP}_simtoolreal_ref_pan_easy_fixed_init_visual_probe}"
+
+OBJECT_DISTRIBUTION_MODE="${OBJECT_DISTRIBUTION_MODE:-mixed_training_easy_video_25_25_50}"
+RESET_POSITION_NOISE_M="${RESET_POSITION_NOISE_M:-0 0 0}"
+RESET_ORIENTATION_MODE="${RESET_ORIENTATION_MODE:-identity}"
+TABLE_RESET_Z_RANGE_M="${TABLE_RESET_Z_RANGE_M:-0}"
+RESET_DOF_POS_NOISE_ARM="${RESET_DOF_POS_NOISE_ARM:-0}"
+RESET_DOF_POS_NOISE_FINGERS="${RESET_DOF_POS_NOISE_FINGERS:-0}"
+RESET_DOF_VEL_NOISE="${RESET_DOF_VEL_NOISE:-0}"
+FORCE_SCALE="${FORCE_SCALE:-0}"
+TORQUE_SCALE="${TORQUE_SCALE:-0}"
 
 FLOOR_STYLE="${FLOOR_STYLE:-nvidia_precast_concrete_dark_gray}"
 TABLE_COLOR_R="${TABLE_COLOR_R:-0.50}"
@@ -111,8 +122,16 @@ fi
   --deterministic \
   --checkpoint "${CHECKPOINT}" \
   --robot_urdf "${ROBOT_URDF}" \
-  --object_distribution_mode mixed_training_simple_25_25_50 \
+  --object_distribution_mode "${OBJECT_DISTRIBUTION_MODE}" \
   --num_assets_per_type "${NUM_ASSETS_PER_TYPE:-8}" \
+  --reset_position_noise_m ${RESET_POSITION_NOISE_M} \
+  --reset_orientation_mode "${RESET_ORIENTATION_MODE}" \
+  --table_reset_z_range_m "${TABLE_RESET_Z_RANGE_M}" \
+  --reset_dof_pos_noise_arm "${RESET_DOF_POS_NOISE_ARM}" \
+  --reset_dof_pos_noise_fingers "${RESET_DOF_POS_NOISE_FINGERS}" \
+  --reset_dof_vel_noise "${RESET_DOF_VEL_NOISE}" \
+  --force_scale "${FORCE_SCALE}" \
+  --torque_scale "${TORQUE_SCALE}" \
   --hide_goal_viz \
   --style_table \
   --table_style display_color \
@@ -142,4 +161,5 @@ fi
   --camera_render_warmup_frames "${CAMERA_RENDER_WARMUP_FRAMES:-1}" \
   --object_color_saturation "${OBJECT_COLOR_SATURATION:-1.6}" \
   --object_color_value_scale "${OBJECT_COLOR_VALUE_SCALE:-0.82}" \
+  --no_timestamp_out_dir \
   --out_dir "${OUT_DIR}"

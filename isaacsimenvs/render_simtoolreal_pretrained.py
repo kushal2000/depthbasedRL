@@ -1422,6 +1422,18 @@ def _apply_training_distribution(env_cfg, args) -> None:
         env_cfg.reset.reset_orientation_yaw_range_deg = float(args.reset_yaw_noise_deg)
     if args.reset_axis_angle_noise_deg is not None:
         env_cfg.reset.reset_orientation_axis_angle_range_deg = float(args.reset_axis_angle_noise_deg)
+    if args.table_reset_z_range_m is not None:
+        env_cfg.reset.table_reset_z_range = float(args.table_reset_z_range_m)
+    if args.reset_dof_pos_noise_arm is not None:
+        env_cfg.reset.reset_dof_pos_random_interval_arm = float(args.reset_dof_pos_noise_arm)
+    if args.reset_dof_pos_noise_fingers is not None:
+        env_cfg.reset.reset_dof_pos_random_interval_fingers = float(args.reset_dof_pos_noise_fingers)
+    if args.reset_dof_vel_noise is not None:
+        env_cfg.reset.reset_dof_vel_random_interval = float(args.reset_dof_vel_noise)
+    if args.force_scale is not None:
+        env_cfg.domain_randomization.force_scale = float(args.force_scale)
+    if args.torque_scale is not None:
+        env_cfg.domain_randomization.torque_scale = float(args.torque_scale)
 
 
 def _tensor_to_list(value) -> list[float]:
@@ -1769,7 +1781,11 @@ def main() -> None:
     )
     parser.add_argument(
         "--object_distribution_mode",
-        choices=("training", "mixed_training_simple_25_25_50"),
+        choices=(
+            "training",
+            "mixed_training_simple_25_25_50",
+            "mixed_training_easy_video_25_25_50",
+        ),
         default="training",
     )
     parser.add_argument(
@@ -1805,6 +1821,42 @@ def main() -> None:
         type=float,
         default=None,
         help="Angle half-width for --reset_orientation_mode axis_angle.",
+    )
+    parser.add_argument(
+        "--table_reset_z_range_m",
+        type=float,
+        default=None,
+        help="Override table z reset half-width in meters. Use 0 for the default table height.",
+    )
+    parser.add_argument(
+        "--reset_dof_pos_noise_arm",
+        type=float,
+        default=None,
+        help="Override arm joint reset interpolation interval. Use 0 for default joint pose.",
+    )
+    parser.add_argument(
+        "--reset_dof_pos_noise_fingers",
+        type=float,
+        default=None,
+        help="Override hand joint reset interpolation interval. Use 0 for default joint pose.",
+    )
+    parser.add_argument(
+        "--reset_dof_vel_noise",
+        type=float,
+        default=None,
+        help="Override joint velocity reset half-width. Use 0 for zero reset velocities.",
+    )
+    parser.add_argument(
+        "--force_scale",
+        type=float,
+        default=None,
+        help="Override random object force scale. Use 0 to disable force perturbations.",
+    )
+    parser.add_argument(
+        "--torque_scale",
+        type=float,
+        default=None,
+        help="Override random object torque scale. Use 0 to disable torque perturbations.",
     )
     my_args = parser.parse_args()
 
@@ -2134,6 +2186,18 @@ def main() -> None:
         f"yaw_deg={env_cfg.reset.reset_orientation_yaw_range_deg:g} "
         f"axis_angle_deg={env_cfg.reset.reset_orientation_axis_angle_range_deg:g}"
     )
+    print(f"[diag] table reset z range = {env_cfg.reset.table_reset_z_range:g} m")
+    print(
+        "[diag] robot reset noise = "
+        f"arm={env_cfg.reset.reset_dof_pos_random_interval_arm:g} "
+        f"fingers={env_cfg.reset.reset_dof_pos_random_interval_fingers:g} "
+        f"vel={env_cfg.reset.reset_dof_vel_random_interval:g}"
+    )
+    print(
+        "[diag] wrench randomization = "
+        f"force_scale={env_cfg.domain_randomization.force_scale:g} "
+        f"torque_scale={env_cfg.domain_randomization.torque_scale:g}"
+    )
     agent_cfg = load_cfg_from_registry(my_args.task, my_args.agent)
     clip_obs = float(agent_cfg["params"]["env"].get("clip_observations", math.inf))
     clip_actions = float(agent_cfg["params"]["env"].get("clip_actions", math.inf))
@@ -2190,6 +2254,18 @@ def main() -> None:
             "reset_orientation_axis_angle_range_deg": float(
                 env_cfg.reset.reset_orientation_axis_angle_range_deg
             ),
+            "table_reset_z_range_m": float(env_cfg.reset.table_reset_z_range),
+            "reset_dof_pos_random_interval_arm": float(
+                env_cfg.reset.reset_dof_pos_random_interval_arm
+            ),
+            "reset_dof_pos_random_interval_fingers": float(
+                env_cfg.reset.reset_dof_pos_random_interval_fingers
+            ),
+            "reset_dof_vel_random_interval": float(env_cfg.reset.reset_dof_vel_random_interval),
+        },
+        "domain_randomization": {
+            "force_scale": float(env_cfg.domain_randomization.force_scale),
+            "torque_scale": float(env_cfg.domain_randomization.torque_scale),
         },
         "quality": my_args.quality,
         "width": width,

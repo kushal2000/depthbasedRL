@@ -37,6 +37,9 @@ _FORCED_SIMPLE_CUBOID_MIN_CROSS_SECTION_M = 0.012
 # for an illustrative graphic, but for Isaac Sim videos we keep the sampled
 # training handle cross-section directly.
 _FORCED_SIMPLE_CYLINDER_CROSS_SECTION_SCALE = 1.0
+_EASY_VIDEO_EXCLUDED_TYPES = {"screwdriver", "spatula"}
+_EASY_VIDEO_HEAD_DENSITY_MIN = 250.0
+_EASY_VIDEO_HEAD_DENSITY_MAX = 400.0
 
 
 # ----------------------------------------------------------------------------
@@ -379,6 +382,23 @@ def _sample_training_object(dist, rng: np.random.Generator):
     return handle_scale, head_scale, handle_density, head_density
 
 
+def _sample_easy_video_training_object(dist, rng: np.random.Generator):
+    """Sample a training-distribution object with head mass reduced for videos.
+
+    The visual geometry remains from the training distribution, but heavy heads
+    are clamped to handle-like density so demo rollouts do not fail mainly from
+    eccentric mass/inertia artifacts. This is intentionally only used by the
+    cinematic video distribution below, not by training.
+    """
+    handle_scale, head_scale, handle_density, head_density = _sample_training_object(dist, rng)
+    if head_scale is not None and head_density is not None:
+        low_head_density = float(
+            rng.uniform(_EASY_VIDEO_HEAD_DENSITY_MIN, _EASY_VIDEO_HEAD_DENSITY_MAX)
+        )
+        head_density = min(float(handle_density), low_head_density)
+    return handle_scale, head_scale, handle_density, head_density
+
+
 def generate_handle_head_urdfs(
     handle_head_types: tuple[str, ...],
     num_per_type: int = _NUM_OBJECTS_PER_TYPE_DEFAULT,
@@ -479,6 +499,27 @@ def generate_handle_head_urdfs(
     return paths, scales_norm
 
 
+def _matching_distributions(
+    handle_head_types: tuple[str, ...],
+    *,
+    exclude_types: set[str] | None = None,
+) -> list:
+    type_set = set(handle_head_types)
+    exclude_types = exclude_types or set()
+    matching = [
+        d
+        for d in OBJECT_SIZE_DISTRIBUTIONS
+        if d.type in type_set and d.type not in exclude_types
+    ]
+    if not matching:
+        valid = sorted({d.type for d in OBJECT_SIZE_DISTRIBUTIONS})
+        raise ValueError(
+            f"No matching ObjectSizeDistribution for handle_head_types={handle_head_types} "
+            f"after exclude_types={sorted(exclude_types)}. Valid types: {valid}"
+        )
+    return matching
+
+
 def generate_mixed_training_simple_urdfs(
     handle_head_types: tuple[str, ...],
     num_per_type: int = _NUM_OBJECTS_PER_TYPE_DEFAULT,
@@ -504,13 +545,7 @@ def generate_mixed_training_simple_urdfs(
 
     rng = np.random.default_rng(seed)
 
-    type_set = set(handle_head_types)
-    matching = [d for d in OBJECT_SIZE_DISTRIBUTIONS if d.type in type_set]
-    if not matching:
-        raise ValueError(
-            f"No matching ObjectSizeDistribution for handle_head_types={handle_head_types}. "
-            f"Valid types: {sorted({d.type for d in OBJECT_SIZE_DISTRIBUTIONS})}"
-        )
+    matching = _matching_distributions(handle_head_types)
     forced_cuboids = _forced_simple_distributions("cuboid", matching)
     forced_cylinders = _forced_simple_distributions("cylinder", matching)
 
@@ -578,9 +613,110 @@ def generate_mixed_training_simple_urdfs(
     return paths, scales_norm
 
 
+def generate_mixed_training_easy_video_urdfs(
+    handle_head_types: tuple[str, ...],
+    num_per_type: int = _NUM_OBJECTS_PER_TYPE_DEFAULT,
+    out_dir: Union[str, Path] = "/tmp/simtoolreal_assets",
+    object_base_size: float = _OBJECT_BASE_SIZE,
+    seed: int = _SEED,
+    shuffle: bool = True,
+) -> tuple[list[str], list[tuple[float, float, float]]]:
+    """Generate an easier 50/25/25 object pool for cinematic policy videos.
+
+    This keeps the qualitative object diversity of the training-distribution
+    video: 50% handle-head objects, 25% handle-only boxes, 25% handle-only
+    cylinders. It deliberately removes the thinnest original categories
+    (screwdriver/spatula) and lowers head densities so rollouts emphasize
+    pretrained policy behavior rather than avoidable hard outliers.
+    """
+    out_dir = Path(out_dir)
+    if out_dir.exists():
+        for p in out_dir.iterdir():
+            if p.suffix == ".urdf":
+                p.unlink()
+    else:
+        os.makedirs(out_dir)
+
+    rng = np.random.default_rng(seed)
+    matching = _matching_distributions(
+        handle_head_types,
+        exclude_types=_EASY_VIDEO_EXCLUDED_TYPES,
+    )
+    forced_cuboids = _forced_simple_distributions("cuboid", matching)
+    forced_cylinders = _forced_simple_distributions("cylinder", matching)
+
+    total_count = max(1, int(num_per_type) * len(matching))
+    paths: list[str] = []
+    scales_raw: list[tuple[float, ...]] = []
+    simple_box_idx = 0
+    simple_cylinder_idx = 0
+
+    for idx in range(total_count):
+        slot = idx % 4
+        if slot in {0, 2}:
+            dist = matching[idx % len(matching)]
+            h_scale, head, h_d, head_d = _sample_easy_video_training_object(dist, rng)
+            fname = (
+                f"{idx:04d}_easy_training_{dist.type}_handle_{h_scale}_head_{head}_d{h_d:.1f}_{head_d}"
+                .replace(".", "-")
+                + ".urdf"
+            )
+            urdf_path = out_dir / fname
+            generate_handle_head_urdf(
+                path=urdf_path,
+                handle_scale=h_scale,
+                head_scale=head,
+                handle_density=h_d,
+                head_density=head_d,
+            )
+            scales_raw.append(h_scale)
+        elif slot == 1:
+            dist = forced_cuboids[simple_box_idx % len(forced_cuboids)]
+            simple_box_idx += 1
+            h_scale = _sample_forced_simple_scale(dist, rng, "cuboid")
+            h_d = float(rng.uniform(dist.handle_min_density, dist.handle_max_density))
+            fname = (
+                f"{idx:04d}_easy_simple_box_from_{dist.type}_handle_{h_scale}_d{h_d:.1f}"
+                .replace(".", "-")
+                + ".urdf"
+            )
+            urdf_path = out_dir / fname
+            generate_handle_urdf(urdf_path, h_scale, h_d)
+            scales_raw.append(h_scale)
+        else:
+            dist = forced_cylinders[simple_cylinder_idx % len(forced_cylinders)]
+            simple_cylinder_idx += 1
+            h_scale = _sample_forced_simple_scale(dist, rng, "cylinder")
+            h_d = float(rng.uniform(dist.handle_min_density, dist.handle_max_density))
+            fname = (
+                f"{idx:04d}_easy_simple_cylinder_from_{dist.type}_handle_{h_scale}_d{h_d:.1f}"
+                .replace(".", "-")
+                + ".urdf"
+            )
+            urdf_path = out_dir / fname
+            generate_handle_urdf(urdf_path, h_scale, h_d)
+            scales_raw.append(h_scale)
+        paths.append(str(urdf_path))
+
+    scales_3d = [_scale_to_3d(np.asarray(s)) for s in scales_raw]
+    scales_norm = [
+        (x / object_base_size, y / object_base_size, z / object_base_size)
+        for (x, y, z) in scales_3d
+    ]
+
+    if shuffle:
+        indices = np.arange(len(paths))
+        rng.shuffle(indices)
+        paths = [paths[i] for i in indices]
+        scales_norm = [scales_norm[i] for i in indices]
+
+    return paths, scales_norm
+
+
 __all__ = [
     "generate_handle_urdf",
     "generate_handle_head_urdf",
     "generate_handle_head_urdfs",
     "generate_mixed_training_simple_urdfs",
+    "generate_mixed_training_easy_video_urdfs",
 ]
