@@ -160,3 +160,81 @@ OUT_DIR=local_logs/$(date +%F_%H-%M-%S)_simtoolreal_ref_pan_smooth_gradient_conc
 Output:
 
 `local_logs/2026-06-05_01-44-51_simtoolreal_ref_pan_smooth_gradient_concrete_candidate_20s/rollout.mp4`
+
+## 2026-06-05 Floor Material Probe Update
+
+Branch: `2026-06-05_Tyler_SimVideos_LightingAdjust`
+
+Goal: improve the floor while keeping the accepted SAPG reference camera path, pretty URDF, gradient-sky backdrop, and single-sun lighting. The old/default floor path remains available through `bash_scripts/95_render_simtoolreal_ref_pan_cinematic.sh`; the new candidate has its own wrapper.
+
+What was added:
+
+- Procedural floor texture assets in `assets/textures/`.
+- New floor styles in `isaacsimenvs/render_simtoolreal_pretrained.py`:
+  `soft_concrete_pbr_tiles`, `matte_warm_gray_pbr_tiles`, `matte_slate_pbr_tiles`, and `matte_greige_pbr_tiles`.
+- New floor controls exposed through script `95`:
+  `FLOOR_NORMAL_PATH`, `FLOOR_ROUGHNESS`, `FLOOR_NORMAL_STRENGTH`, and `FLOOR_SPECULAR_LEVEL`.
+- The PBR tile underlay now uses `FLOOR_COLOR_R/G/B` instead of hardcoded light gray, so dark/matte floors do not get bright white seams.
+- New wrapper:
+  `bash_scripts/98_render_simtoolreal_ref_pan_cinematic_greige_floor.sh`
+
+Floor probe command:
+
+```bash
+STEPS=300 CAPTURE_PNG_STEPS=0,300 \
+  bash_scripts/97_probe_simtoolreal_floor_materials.sh
+```
+
+Probe output:
+
+`local_logs/2026-06-05_02-27-13_simtoolreal_floor_material_probe/contact_sheet_step_0300.png`
+
+Findings:
+
+- White/soft concrete PBR floors look clean in small probes but wash out in the full 100-env shot.
+- Dark slate and cool concrete give contrast but read too artificial/debug-like.
+- Warm limestone/fieldstone are too patterned or too brown for the dense robot-grid composition.
+- Small PBR tiles are distracting because visible seams compete with the robots and object colors.
+- The best direction is a continuous, matte, mid-tone greige concrete surface: enough contrast against the gray/white robot, no black debug-floor feeling, no visible tile grid.
+
+Current best floor candidate:
+
+```bash
+MAKE_VIDEO=1 STEPS=300 CAPTURE_PNG_STEPS=0,150,300 \
+  BACKDROP_GRADIENT_BANDS=16 \
+  bash_scripts/98_render_simtoolreal_ref_pan_cinematic_greige_floor.sh
+```
+
+Equivalent explicit settings:
+
+```bash
+FLOOR_STYLE=matte_greige_pbr_tiles \
+FLOOR_COLOR_R=0.50 FLOOR_COLOR_G=0.48 FLOOR_COLOR_B=0.43 \
+FLOOR_TILE_COUNT=1 FLOOR_TILE_SIZE=120 FLOOR_TILE_GAP=0 \
+FLOOR_TEXTURE_SCALE=12.0 \
+FLOOR_ROUGHNESS=0.92 \
+FLOOR_NORMAL_STRENGTH=0.05 \
+FLOOR_SPECULAR_LEVEL=0.06
+```
+
+Candidate output:
+
+`local_logs/2026-06-05_02-44-32_simtoolreal_ref_pan_matte_greige_continuous_floor_candidate_5s/rollout.mp4`
+
+Representative stills:
+
+- `local_logs/2026-06-05_02-42-48_simtoolreal_ref_pan_matte_greige_continuous_floor_candidate_stills/step_0150.png`
+- `local_logs/2026-06-05_02-42-48_simtoolreal_ref_pan_matte_greige_continuous_floor_candidate_stills/step_0300.png`
+
+Old floor fallback:
+
+```bash
+bash_scripts/95_render_simtoolreal_ref_pan_cinematic.sh
+```
+
+or explicitly:
+
+```bash
+FLOOR_STYLE=nvidia_precast_concrete_dark_gray \
+  bash_scripts/95_render_simtoolreal_ref_pan_cinematic.sh
+```

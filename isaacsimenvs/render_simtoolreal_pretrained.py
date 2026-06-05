@@ -60,11 +60,47 @@ DEFAULT_LOCAL_DYNAMIC_SUNSTUDY_SKY = (
     / "omni.kit.environment.core-1.3.24/data/tests/Skies/Dynamic/sunstudy.usd"
 )
 DEFAULT_WHITE_STONE_TEXTURE = REPO_ROOT / "assets/textures/cinematic_white_stone_slab.png"
+DEFAULT_WARM_LIMESTONE_TEXTURE = REPO_ROOT / "assets/textures/cinematic_warm_limestone_slab.png"
+DEFAULT_WARM_LIMESTONE_NORMAL = REPO_ROOT / "assets/textures/cinematic_warm_limestone_slab_normal.png"
+DEFAULT_COOL_CONCRETE_TEXTURE = REPO_ROOT / "assets/textures/cinematic_cool_concrete_slab.png"
+DEFAULT_COOL_CONCRETE_NORMAL = REPO_ROOT / "assets/textures/cinematic_cool_concrete_slab_normal.png"
+DEFAULT_SOFT_CONCRETE_TEXTURE = REPO_ROOT / "assets/textures/cinematic_soft_concrete_slab.png"
+DEFAULT_SOFT_CONCRETE_NORMAL = REPO_ROOT / "assets/textures/cinematic_soft_concrete_slab_normal.png"
+DEFAULT_MATTE_WARM_GRAY_TEXTURE = REPO_ROOT / "assets/textures/cinematic_matte_warm_gray_slab.png"
+DEFAULT_MATTE_WARM_GRAY_NORMAL = REPO_ROOT / "assets/textures/cinematic_matte_warm_gray_slab_normal.png"
+DEFAULT_MATTE_SLATE_TEXTURE = REPO_ROOT / "assets/textures/cinematic_matte_slate_slab.png"
+DEFAULT_MATTE_SLATE_NORMAL = REPO_ROOT / "assets/textures/cinematic_matte_slate_slab_normal.png"
+DEFAULT_MATTE_GREIGE_TEXTURE = REPO_ROOT / "assets/textures/cinematic_matte_greige_slab.png"
+DEFAULT_MATTE_GREIGE_NORMAL = REPO_ROOT / "assets/textures/cinematic_matte_greige_slab_normal.png"
 DEFAULT_NVIDIA_PRECAST_CONCRETE_MDL = (
     REPO_ROOT
     / ".venv-isaacsim-py311/lib/python3.11/site-packages/isaacsim/extscache/"
     / "omni.kit.tool.collect-2.2.18+69cbf6ad/data/test_stages/OM_55150/1/Materials/"
     / "vMaterials_2/Concrete/Concrete_Precast.mdl"
+)
+DEFAULT_NVIDIA_PRECAST_CONCRETE_TEXTURE = (
+    REPO_ROOT
+    / ".venv-isaacsim-py311/lib/python3.11/site-packages/isaacsim/extscache/"
+    / "omni.kit.tool.collect-2.2.18+69cbf6ad/data/test_stages/OM_55150/1/Materials/"
+    / "vMaterials_2/Concrete/textures/precastconcrete_diff.png"
+)
+DEFAULT_NVIDIA_PRECAST_CONCRETE_NORMAL = (
+    REPO_ROOT
+    / ".venv-isaacsim-py311/lib/python3.11/site-packages/isaacsim/extscache/"
+    / "omni.kit.tool.collect-2.2.18+69cbf6ad/data/test_stages/OM_55150/1/Materials/"
+    / "vMaterials_2/Concrete/textures/precastconcrete_norm.jpg"
+)
+DEFAULT_FIELDSTONE_TEXTURE = (
+    REPO_ROOT
+    / ".venv-isaacsim-py311/lib/python3.11/site-packages/isaacsim/extscache/"
+    / "omni.asset_validator.core-1.1.6/omni/asset_validator/core/tests/data/Materials/"
+    / "Fieldstone/Fieldstone_BaseColor.png"
+)
+DEFAULT_FIELDSTONE_NORMAL = (
+    REPO_ROOT
+    / ".venv-isaacsim-py311/lib/python3.11/site-packages/isaacsim/extscache/"
+    / "omni.asset_validator.core-1.1.6/omni/asset_validator/core/tests/data/Materials/"
+    / "Fieldstone/Fieldstone_N.png"
 )
 ROBOLAB_OAK_DIR = Path("/home/tylerlum/github_repos/RoboLab/assets/materials/Base/Wood/Oak")
 DEFAULT_OAK_BASE_COLOR = ROBOLAB_OAK_DIR / "Oak_BaseColor.png"
@@ -624,8 +660,10 @@ def _create_omnipbr_material(
     diffuse_texture: str | None,
     diffuse_color: tuple[float, float, float],
     normal_texture: str | None = None,
+    normal_texture_influence: float = 0.35,
     texture_scale: tuple[float, float] | None = None,
     roughness: float = 0.38,
+    specular_level: float = 0.5,
 ) -> tuple[Any, dict[str, Any]]:
     """Create an OmniPBR material and set a small set of robust shader inputs."""
     from pxr import Gf, Sdf, UsdShade
@@ -648,18 +686,19 @@ def _create_omnipbr_material(
         "diffuse_color_constant": list(diffuse_color),
         "reflection_roughness_constant": float(roughness),
         "metallic_constant": 0.0,
+        "specular_level": float(specular_level),
     }
     shader.CreateInput("diffuse_color_constant", Sdf.ValueTypeNames.Color3f).Set(Gf.Vec3f(*diffuse_color))
     shader.CreateInput("reflection_roughness_constant", Sdf.ValueTypeNames.Float).Set(float(roughness))
     shader.CreateInput("metallic_constant", Sdf.ValueTypeNames.Float).Set(0.0)
+    shader.CreateInput("specular_level", Sdf.ValueTypeNames.Float).Set(float(specular_level))
     if diffuse_texture:
         shader.CreateInput("diffuse_texture", Sdf.ValueTypeNames.Asset).Set(diffuse_texture)
         inputs["diffuse_texture"] = diffuse_texture
     if normal_texture:
         shader.CreateInput("normalmap_texture", Sdf.ValueTypeNames.Asset).Set(normal_texture)
-        shader.CreateInput("normalmap_texture_influence", Sdf.ValueTypeNames.Float).Set(0.35)
         inputs["normalmap_texture"] = normal_texture
-        inputs["normalmap_texture_influence"] = 0.35
+        inputs["normalmap_texture_influence"] = float(normal_texture_influence)
     if texture_scale is not None:
         shader.CreateInput("project_uvw", Sdf.ValueTypeNames.Bool).Set(True)
         shader.CreateInput("texture_scale", Sdf.ValueTypeNames.Float2).Set(
@@ -751,7 +790,11 @@ def _apply_pbr_tile_floor(
     tile_size: float,
     tile_gap: float,
     texture_path: str | None,
+    normal_texture_path: str | None,
     texture_scale: float,
+    roughness: float,
+    normal_texture_influence: float,
+    specular_level: float,
     material_name: str = "CinematicPbrFloorMaterial",
     style_name: str = "pbr_tiles",
     tile_thickness: float = 0.006,
@@ -779,9 +822,12 @@ def _apply_pbr_tile_floor(
         material_prim, material_summary = _create_omnipbr_material(
             material_name=material_name,
             diffuse_texture=texture_path,
+            normal_texture=normal_texture_path,
+            normal_texture_influence=float(normal_texture_influence),
             diffuse_color=base_color,
             texture_scale=(float(texture_scale), float(texture_scale)),
-            roughness=0.42,
+            roughness=float(roughness),
+            specular_level=float(specular_level),
         )
     material = UsdShade.Material(material_prim)
 
@@ -834,7 +880,11 @@ def _apply_pbr_tile_floor(
         "tile_gap": float(tile_gap),
         "num_tiles": int(tile_count) * int(tile_count),
         "texture_path": texture_path,
+        "normal_texture_path": normal_texture_path,
         "texture_scale": float(texture_scale),
+        "roughness": float(roughness),
+        "normal_texture_influence": float(normal_texture_influence),
+        "specular_level": float(specular_level),
         "material": material_summary,
         "sample_tiles": sample_tiles,
     }
@@ -1666,6 +1716,14 @@ def main() -> None:
             "marble_tiles",
             "isaac_marble_pbr_tiles",
             "white_stone_slabs",
+            "warm_limestone_pbr_tiles",
+            "cool_concrete_pbr_tiles",
+            "soft_concrete_pbr_tiles",
+            "matte_warm_gray_pbr_tiles",
+            "matte_slate_pbr_tiles",
+            "matte_greige_pbr_tiles",
+            "nvidia_precast_concrete_pbr_tiles",
+            "fieldstone_pbr_tiles",
             "nvidia_precast_concrete_white",
             "nvidia_precast_concrete_ivory",
             "nvidia_precast_concrete_light_gray",
@@ -1724,6 +1782,14 @@ def main() -> None:
         ),
     )
     parser.add_argument("--floor_texture_scale", type=float, default=4.0)
+    parser.add_argument(
+        "--floor_normal_path",
+        default=None,
+        help="Optional normal map for PBR tile floor styles.",
+    )
+    parser.add_argument("--floor_roughness", type=float, default=0.42)
+    parser.add_argument("--floor_normal_strength", type=float, default=0.35)
+    parser.add_argument("--floor_specular_level", type=float, default=0.5)
     parser.add_argument(
         "--sky_style",
         choices=("default", "blue_color", "blue_dome", "hdri", "dynamic_clear_sky"),
@@ -2030,6 +2096,14 @@ def main() -> None:
             "marble_tiles",
             "isaac_marble_pbr_tiles",
             "white_stone_slabs",
+            "warm_limestone_pbr_tiles",
+            "cool_concrete_pbr_tiles",
+            "soft_concrete_pbr_tiles",
+            "matte_warm_gray_pbr_tiles",
+            "matte_slate_pbr_tiles",
+            "matte_greige_pbr_tiles",
+            "nvidia_precast_concrete_pbr_tiles",
+            "fieldstone_pbr_tiles",
             "nvidia_precast_concrete_white",
             "nvidia_precast_concrete_ivory",
             "nvidia_precast_concrete_light_gray",
@@ -2041,7 +2115,7 @@ def main() -> None:
             # the render-only cinematic tile overlay.
             base_floor_summary = _style_prim_trees(
                 "/World/ground",
-                color=(0.55, 0.56, 0.54),
+                color=tuple(float(v) for v in my_args.floor_color),
                 opacity=1.0,
                 visible=True,
                 label="floor_base",
@@ -2049,6 +2123,13 @@ def main() -> None:
             if my_args.floor_style in {
                 "isaac_marble_pbr_tiles",
                 "white_stone_slabs",
+                "warm_limestone_pbr_tiles",
+                "cool_concrete_pbr_tiles",
+                "nvidia_precast_concrete_pbr_tiles",
+                "fieldstone_pbr_tiles",
+                "matte_warm_gray_pbr_tiles",
+                "matte_slate_pbr_tiles",
+                "matte_greige_pbr_tiles",
                 "nvidia_precast_concrete_white",
                 "nvidia_precast_concrete_ivory",
                 "nvidia_precast_concrete_light_gray",
@@ -2059,16 +2140,59 @@ def main() -> None:
                 mdl_material_name = None
                 if my_args.floor_style == "white_stone_slabs":
                     floor_texture_path = my_args.floor_texture_path or str(DEFAULT_WHITE_STONE_TEXTURE)
+                    floor_normal_path = my_args.floor_normal_path
                     material_name = "CinematicWhiteStone"
                     style_name = "white_stone_slabs"
+                elif my_args.floor_style == "warm_limestone_pbr_tiles":
+                    floor_texture_path = my_args.floor_texture_path or str(DEFAULT_WARM_LIMESTONE_TEXTURE)
+                    floor_normal_path = my_args.floor_normal_path or str(DEFAULT_WARM_LIMESTONE_NORMAL)
+                    material_name = "CinematicWarmLimestone"
+                    style_name = "warm_limestone_pbr_tiles"
+                elif my_args.floor_style == "cool_concrete_pbr_tiles":
+                    floor_texture_path = my_args.floor_texture_path or str(DEFAULT_COOL_CONCRETE_TEXTURE)
+                    floor_normal_path = my_args.floor_normal_path or str(DEFAULT_COOL_CONCRETE_NORMAL)
+                    material_name = "CinematicCoolConcrete"
+                    style_name = "cool_concrete_pbr_tiles"
+                elif my_args.floor_style == "soft_concrete_pbr_tiles":
+                    floor_texture_path = my_args.floor_texture_path or str(DEFAULT_SOFT_CONCRETE_TEXTURE)
+                    floor_normal_path = my_args.floor_normal_path or str(DEFAULT_SOFT_CONCRETE_NORMAL)
+                    material_name = "CinematicSoftConcrete"
+                    style_name = "soft_concrete_pbr_tiles"
+                elif my_args.floor_style == "matte_warm_gray_pbr_tiles":
+                    floor_texture_path = my_args.floor_texture_path or str(DEFAULT_MATTE_WARM_GRAY_TEXTURE)
+                    floor_normal_path = my_args.floor_normal_path or str(DEFAULT_MATTE_WARM_GRAY_NORMAL)
+                    material_name = "CinematicMatteWarmGray"
+                    style_name = "matte_warm_gray_pbr_tiles"
+                elif my_args.floor_style == "matte_slate_pbr_tiles":
+                    floor_texture_path = my_args.floor_texture_path or str(DEFAULT_MATTE_SLATE_TEXTURE)
+                    floor_normal_path = my_args.floor_normal_path or str(DEFAULT_MATTE_SLATE_NORMAL)
+                    material_name = "CinematicMatteSlate"
+                    style_name = "matte_slate_pbr_tiles"
+                elif my_args.floor_style == "matte_greige_pbr_tiles":
+                    floor_texture_path = my_args.floor_texture_path or str(DEFAULT_MATTE_GREIGE_TEXTURE)
+                    floor_normal_path = my_args.floor_normal_path or str(DEFAULT_MATTE_GREIGE_NORMAL)
+                    material_name = "CinematicMatteGreige"
+                    style_name = "matte_greige_pbr_tiles"
+                elif my_args.floor_style == "nvidia_precast_concrete_pbr_tiles":
+                    floor_texture_path = my_args.floor_texture_path or str(DEFAULT_NVIDIA_PRECAST_CONCRETE_TEXTURE)
+                    floor_normal_path = my_args.floor_normal_path or str(DEFAULT_NVIDIA_PRECAST_CONCRETE_NORMAL)
+                    material_name = "CinematicPrecastConcretePbr"
+                    style_name = "nvidia_precast_concrete_pbr_tiles"
+                elif my_args.floor_style == "fieldstone_pbr_tiles":
+                    floor_texture_path = my_args.floor_texture_path or str(DEFAULT_FIELDSTONE_TEXTURE)
+                    floor_normal_path = my_args.floor_normal_path or str(DEFAULT_FIELDSTONE_NORMAL)
+                    material_name = "CinematicFieldstone"
+                    style_name = "fieldstone_pbr_tiles"
                 elif my_args.floor_style == "isaac_marble_pbr_tiles":
                     floor_texture_path = my_args.floor_texture_path or _resolve_isaac_asset(
                         ISAAC_SAMPLE_MARBLE_TEXTURE
                     )
+                    floor_normal_path = my_args.floor_normal_path
                     material_name = "CinematicIsaacMarble"
                     style_name = "isaac_marble_pbr_tiles"
                 else:
                     floor_texture_path = my_args.floor_texture_path or str(DEFAULT_NVIDIA_PRECAST_CONCRETE_MDL)
+                    floor_normal_path = my_args.floor_normal_path
                     precast_styles = {
                         "nvidia_precast_concrete_white": ("Concrete_Precast", "CinematicPrecastConcreteWhite"),
                         "nvidia_precast_concrete_ivory": (
@@ -2100,7 +2224,11 @@ def main() -> None:
                     tile_size=float(my_args.floor_tile_size),
                     tile_gap=float(my_args.floor_tile_gap),
                     texture_path=floor_texture_path,
+                    normal_texture_path=floor_normal_path,
                     texture_scale=float(my_args.floor_texture_scale),
+                    roughness=float(my_args.floor_roughness),
+                    normal_texture_influence=float(my_args.floor_normal_strength),
+                    specular_level=float(my_args.floor_specular_level),
                     material_name=material_name,
                     style_name=style_name,
                     mdl_material_name=mdl_material_name,
@@ -2380,7 +2508,11 @@ def main() -> None:
         "floor_tile_size": float(my_args.floor_tile_size),
         "floor_tile_gap": float(my_args.floor_tile_gap),
         "floor_texture_path": my_args.floor_texture_path,
+        "floor_normal_path": my_args.floor_normal_path,
         "floor_texture_scale": float(my_args.floor_texture_scale),
+        "floor_roughness": float(my_args.floor_roughness),
+        "floor_normal_strength": float(my_args.floor_normal_strength),
+        "floor_specular_level": float(my_args.floor_specular_level),
         "sky_style": my_args.sky_style,
         "sky_color": list(my_args.sky_color),
         "sky_dome_intensity": float(my_args.sky_dome_intensity),

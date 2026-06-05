@@ -99,6 +99,24 @@ if [[ -n "${DYNAMIC_SKY_PATH}" ]]; then
   SKY_ARGS+=(--dynamic_sky_path "${DYNAMIC_SKY_PATH}")
 fi
 
+FLOOR_ARGS=(
+  --floor_style "${FLOOR_STYLE}"
+  --floor_color "${FLOOR_COLOR_R:-0.60}" "${FLOOR_COLOR_G:-0.60}" "${FLOOR_COLOR_B:-0.56}"
+  --floor_tile_count "${FLOOR_TILE_COUNT:-96}"
+  --floor_tile_size "${FLOOR_TILE_SIZE:-0.9}"
+  --floor_tile_gap "${FLOOR_TILE_GAP:-0.006}"
+  --floor_texture_scale "${FLOOR_TEXTURE_SCALE:-4.0}"
+  --floor_roughness "${FLOOR_ROUGHNESS:-0.42}"
+  --floor_normal_strength "${FLOOR_NORMAL_STRENGTH:-0.35}"
+  --floor_specular_level "${FLOOR_SPECULAR_LEVEL:-0.5}"
+)
+if [[ -n "${FLOOR_TEXTURE_PATH:-}" ]]; then
+  FLOOR_ARGS+=(--floor_texture_path "${FLOOR_TEXTURE_PATH}")
+fi
+if [[ -n "${FLOOR_NORMAL_PATH:-}" ]]; then
+  FLOOR_ARGS+=(--floor_normal_path "${FLOOR_NORMAL_PATH}")
+fi
+
 RENDER_ARGS=(
   --render_quality_preset "${RENDER_QUALITY_PRESET}"
   --render_mode "${RENDER_MODE}"
@@ -146,12 +164,7 @@ fi
   --table_style display_color \
   --table_color "${TABLE_COLOR_R}" "${TABLE_COLOR_G}" "${TABLE_COLOR_B}" \
   --style_floor \
-  --floor_style "${FLOOR_STYLE}" \
-  --floor_color "${FLOOR_COLOR_R:-0.60}" "${FLOOR_COLOR_G:-0.60}" "${FLOOR_COLOR_B:-0.56}" \
-  --floor_tile_count "${FLOOR_TILE_COUNT:-96}" \
-  --floor_tile_size "${FLOOR_TILE_SIZE:-0.9}" \
-  --floor_tile_gap "${FLOOR_TILE_GAP:-0.006}" \
-  --floor_texture_scale "${FLOOR_TEXTURE_SCALE:-4.0}" \
+  "${FLOOR_ARGS[@]}" \
   --sky_style "${SKY_STYLE}" \
   --sky_color "${SKY_COLOR_R}" "${SKY_COLOR_G}" "${SKY_COLOR_B}" \
   --sky_dome_intensity "${SKY_DOME_INTENSITY}" \
