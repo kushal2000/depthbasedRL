@@ -211,6 +211,20 @@ def _set_record_camera(camera, eye, target) -> None:
     # camera motion can be extended later without changing capture semantics.
 
 
+def _set_active_viewport_camera(camera_path: str) -> bool:
+    try:
+        from omni.kit.viewport.utility import get_active_viewport
+        from pxr import Sdf
+
+        viewport = get_active_viewport()
+        if viewport is None:
+            return False
+        viewport.camera_path = Sdf.Path(camera_path)
+        return True
+    except Exception:
+        return False
+
+
 def _camera_pose_for_step(
     env,
     base_eye,
@@ -1494,6 +1508,18 @@ def main() -> None:
     parser.add_argument("--width", type=int, default=None)
     parser.add_argument("--height", type=int, default=None)
     parser.add_argument(
+        "--headless",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Run Isaac Sim headless. Use --no-headless to open the Kit window for visual debugging.",
+    )
+    parser.add_argument(
+        "--hold_open_s",
+        type=float,
+        default=0.0,
+        help="Keep the Isaac window alive after capture. Use a negative value to hold until Ctrl-C.",
+    )
+    parser.add_argument(
         "--render_quality_preset",
         choices=("default", "beauty"),
         default="default",
@@ -1808,7 +1834,7 @@ def main() -> None:
     launcher_parser = argparse.ArgumentParser()
     AppLauncher.add_app_launcher_args(launcher_parser)
     launcher_args, _ = launcher_parser.parse_known_args([])
-    launcher_args.headless = True
+    launcher_args.headless = bool(my_args.headless)
     launcher_args.enable_cameras = True
     app = AppLauncher(launcher_args).app
     runtime_render_summary = _apply_runtime_render_settings(
@@ -2381,6 +2407,8 @@ def main() -> None:
             sapg_ref_end_eye_grid_scale=my_args.sapg_ref_end_eye_grid_scale,
         )
         _set_record_camera(camera, capture_eye, capture_target)
+        if not my_args.headless:
+            _set_active_viewport_camera("/World/RecordCamera")
         # Flush camera pose through Hydra before readback. Without this, the
         # first frame after a camera move can use the previous camera pose.
         for _ in range(max(1, my_args.camera_render_warmup_frames)):
@@ -2461,6 +2489,25 @@ def main() -> None:
 
     manifest["metrics"] = finalize_metrics()
     _save_manifest(out_dir, manifest)
+
+    if float(my_args.hold_open_s) != 0.0:
+        if my_args.headless:
+            print("[render_simtoolreal_pretrained] --hold_open_s ignored in headless mode")
+        else:
+            if float(my_args.hold_open_s) < 0.0:
+                print("[render_simtoolreal_pretrained] holding non-headless window open until Ctrl-C")
+                while True:
+                    app.update()
+                    time.sleep(0.02)
+            else:
+                print(
+                    "[render_simtoolreal_pretrained] holding non-headless window open for "
+                    f"{float(my_args.hold_open_s):.1f}s"
+                )
+                deadline = time.time() + float(my_args.hold_open_s)
+                while time.time() < deadline:
+                    app.update()
+                    time.sleep(0.02)
 
     del app
     sys.stdout.flush()

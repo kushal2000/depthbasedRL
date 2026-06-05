@@ -25,6 +25,8 @@ RENDER_MODE="${RENDER_MODE:-rt}"
 RENDER_SPP="${RENDER_SPP:-64}"
 CAPTURE_SOURCE="${CAPTURE_SOURCE:-camera_sensor}"
 DOME_LIGHT_UPPER_LOWER_STRATEGY="${DOME_LIGHT_UPPER_LOWER_STRATEGY:-}"
+HEADLESS="${HEADLESS:-1}"
+HOLD_OPEN_S="${HOLD_OPEN_S:-0}"
 
 MAKE_VIDEO="${MAKE_VIDEO:-0}"
 CAPTURE_PNG_STEPS="${CAPTURE_PNG_STEPS:-0,60,180,360,600,900,1200}"
@@ -83,9 +85,15 @@ RENDER_ARGS=(
   --render_mode "${RENDER_MODE}"
   --render_samples_per_pixel "${RENDER_SPP}"
   --capture_source "${CAPTURE_SOURCE}"
+  --hold_open_s "${HOLD_OPEN_S}"
 )
 if [[ -n "${DOME_LIGHT_UPPER_LOWER_STRATEGY}" ]]; then
   RENDER_ARGS+=(--dome_light_upper_lower_strategy "${DOME_LIGHT_UPPER_LOWER_STRATEGY}")
+fi
+if [[ "${HEADLESS}" == "0" || "${HEADLESS}" == "false" || "${HEADLESS}" == "False" ]]; then
+  RENDER_ARGS+=(--no-headless)
+else
+  RENDER_ARGS+=(--headless)
 fi
 
 "${PYTHON_BIN}" isaacsimenvs/render_simtoolreal_pretrained.py \
