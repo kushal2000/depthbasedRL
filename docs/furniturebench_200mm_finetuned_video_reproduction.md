@@ -78,33 +78,53 @@ Manifest summary:
 - Ended before reset.
 - `current_successes=10/10`.
 
-## Visual Defaults
+## Current Visual Defaults
 
-The close-up view uses darker defaults than the wide SimToolReal diversity video
-because the original beauty lighting overexposed the single-table scene.
+The current wrapper defaults intentionally match the SimToolReal Play pretraining
+render settings where possible, while using a fixed close camera for the
+FurnitureBench task.
 
-- Camera eye:
-  `(0.12, -1.55, 0.98)`
-- Camera target:
-  `(0.02, 0.02, 0.58)`
+- Camera xyz:
+  `(0.0, -0.4115866854641337, 0.7392877590177354)`
+- Camera forward world:
+  `(0.0, 0.9644869986422913, -0.26413032663816677)`
+- Camera target distance:
+  `1.4 m`
+- Camera focal length:
+  `10 cm`
+- Robot URDF:
+  `/home/tylerlum/github_repos/sapg/assets/urdf/kuka_allegro_description/iiwa14_left_sharpa_adjusted_restricted_pretty.urdf`
 - Default light intensity:
-  `120`
+  `360`
 - Sky dome intensity:
-  `650`
+  `1200`
 - Sun exposure:
-  `6.8`
+  `9.35`
 - Sun angle:
-  `0.45`
+  `0.12`
 - Image exposure:
-  `0.72`
+  `0.0`
 - Image contrast:
-  `1.08`
+  `1.0`
 - Image saturation:
-  `1.03`
+  `1.0`
+- Backdrop style:
+  `gradient_sky`
+- Backdrop color:
+  `(0.25, 0.48, 0.76)`
+- Backdrop horizon color:
+  `(0.68, 0.78, 0.88)`
 - Table color:
   `(0.42, 0.27, 0.15)`
 - Floor color:
   `(0.44, 0.45, 0.43)`
+
+The earlier close-up version used `BACKDROP_STYLE=blue_walls`, which looked
+flatter and more blue than the Play pretraining video. The current default uses
+the same gradient-sky colors as the Play pretraining script. Because the
+FurnitureBench camera is much closer and lower, it can still expose the
+backdrop wall geometry at the left edge; use `BACKDROP_STYLE=blue_walls` only if
+the clean flat background is preferred over matching the Play sky palette.
 
 ## Notes For Generating Variants
 
@@ -126,7 +146,7 @@ TRAIN_DR=1 \
 bash_scripts/96_render_furniturebench_200mm_finetuned.sh
 ```
 
-Wrapper defaults for this command:
+Historical wrapper defaults for this command:
 
 - `STEPS=1200`, which is 20 seconds at the 60 Hz policy/env step.
 - `MAKE_VIDEO=1`
@@ -161,3 +181,42 @@ Observed result:
 
 For polished success-only clips, prefer either the 430-step command above or
 run a seed sweep and select a 20-second rollout with cleaner later episodes.
+
+## 20 Second Axis-Aligned Fixed-Fixture Clip
+
+This is the current preferred FurnitureBench fixed-camera clip. The camera is
+centered at `x=0`, looks straight along world `+Y`, keeps the same downward pitch
+as the Viser pose, fixes the fixture pose, and uses only tiny object position
+noise. This avoids the visually bad initial object/fixture collisions while
+keeping the task recognizable.
+
+```bash
+OUT_DIR=local_logs/furniturebench_200mm_axis_camera_fixed_reset_play_sky_20s_seed0 \
+STEPS=1200 \
+CAPTURE_PNG_STEPS=0,300,600,900,1200 \
+MAKE_VIDEO=1 \
+SEED=0 \
+RANDOM_GOAL_FRACTION=0.0 \
+TRAIN_DR=1 \
+bash_scripts/96_render_furniturebench_200mm_finetuned.sh
+```
+
+Output:
+
+`local_logs/2026-06-04_23-29-59_furniturebench_200mm_axis_camera_fixed_reset_play_sky_20s_seed0/rollout.mp4`
+
+Observed result:
+
+- Episode 1 completed all `10/10` goals at step `608`.
+- Episode 2 reached `5/10` by step `1200`.
+
+Key reset overrides:
+
+- Hole/fixture pose:
+  `x=0`, `y=-0.08`, yaw `0 deg`
+- Object reset center:
+  `(x=0, y=0.07)`
+- Object reset position noise:
+  `(0.015, 0.015, 0.005) m`
+- Object reset orientation:
+  `identity`

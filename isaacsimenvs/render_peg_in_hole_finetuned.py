@@ -48,12 +48,14 @@ def _apply_200mm_furniturebench_overrides(env_cfg, args) -> None:
 
     # Goal/tolerance knobs from plot_figures/fig4/experiments/
     # furniture_bench_leg4_200mm_finetune_rgf10_dr.sub.
-    env_cfg.peg_in_hole.goal_xy_obs_noise = 0.002
-    env_cfg.peg_in_hole.goal_yaw_obs_noise_deg = 1.0
+    env_cfg.peg_in_hole.goal_xy_obs_noise = float(args.goal_xy_obs_noise)
+    env_cfg.peg_in_hole.goal_yaw_obs_noise_deg = float(args.goal_yaw_obs_noise_deg)
     env_cfg.peg_in_hole.random_goal_fraction = float(args.random_goal_fraction)
     env_cfg.peg_in_hole.random_goal_max_successes = 5
     env_cfg.peg_in_hole.insertion_success_tolerance = 0.005
-    env_cfg.peg_in_hole.hole_yaw_range_deg = 10.0
+    env_cfg.peg_in_hole.hole_x_range = tuple(float(v) for v in args.hole_x_range)
+    env_cfg.peg_in_hole.hole_y_range = tuple(float(v) for v in args.hole_y_range)
+    env_cfg.peg_in_hole.hole_yaw_range_deg = float(args.hole_yaw_range_deg)
     env_cfg.termination.success_tolerance = 0.01
     env_cfg.termination.target_success_tolerance = 0.002
     env_cfg.termination.success_steps = 1
@@ -64,12 +66,19 @@ def _apply_200mm_furniturebench_overrides(env_cfg, args) -> None:
     env_cfg.termination.force_consecutive_near_goal_steps = True
 
     # Reset/reward knobs.
+    env_cfg.reset.reset_position_center_x = float(args.reset_position_center_x)
+    env_cfg.reset.reset_position_center_y = float(args.reset_position_center_y)
     env_cfg.reset.reset_position_noise_x = float(args.reset_position_noise_x)
     env_cfg.reset.reset_position_noise_y = float(args.reset_position_noise_y)
     env_cfg.reset.reset_position_noise_z = float(args.reset_position_noise_z)
     env_cfg.reset.reset_dof_pos_random_interval_arm = float(args.reset_dof_pos_noise_arm)
     env_cfg.reset.reset_dof_pos_random_interval_fingers = float(args.reset_dof_pos_noise_fingers)
     env_cfg.reset.reset_dof_vel_random_interval = float(args.reset_dof_vel_noise)
+    env_cfg.reset.reset_orientation_mode = str(args.reset_orientation_mode)
+    env_cfg.reset.reset_orientation_yaw_range_deg = float(args.reset_orientation_yaw_range_deg)
+    env_cfg.reset.reset_orientation_axis_angle_range_deg = float(
+        args.reset_orientation_axis_angle_range_deg
+    )
     env_cfg.reset.table_reset_z_range = float(args.table_reset_z_range)
     env_cfg.reward.lifting_rew_scale = 20.0
     env_cfg.reward.lifting_bonus = 300.0
@@ -131,7 +140,14 @@ def _camera_eye_target(env, args):
     import torch
 
     env_origin = env.scene.env_origins[0]
-    if args.camera_xyz is not None and args.camera_wxyz is not None:
+    if args.camera_xyz is not None and args.camera_forward_world is not None:
+        eye_local = torch.tensor(args.camera_xyz, device=env.device, dtype=torch.float32)
+        forward_local = torch.tensor(
+            args.camera_forward_world, device=env.device, dtype=torch.float32
+        )
+        forward_local = forward_local / torch.linalg.norm(forward_local)
+        target_local = eye_local + float(args.camera_target_distance_m) * forward_local
+    elif args.camera_xyz is not None and args.camera_wxyz is not None:
         eye_local = torch.tensor(args.camera_xyz, device=env.device, dtype=torch.float32)
         forward_local = _rotate_by_wxyz(
             tuple(float(v) for v in args.camera_wxyz),
@@ -239,15 +255,25 @@ def main() -> None:
     # The finetune run used rgf=0.1. For videos, default to screwing episodes
     # only so a single-env rollout does not randomly become a free-space goal.
     parser.add_argument("--random_goal_fraction", type=float, default=0.0)
+    parser.add_argument("--goal_xy_obs_noise", type=float, default=0.002)
+    parser.add_argument("--goal_yaw_obs_noise_deg", type=float, default=1.0)
+    parser.add_argument("--hole_x_range", type=float, nargs=2, default=(0.0, 0.0))
+    parser.add_argument("--hole_y_range", type=float, nargs=2, default=(-0.08, -0.08))
+    parser.add_argument("--hole_yaw_range_deg", type=float, default=0.0)
     parser.add_argument("--train_dr", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--force_scale", type=float, default=0.0)
     parser.add_argument("--torque_scale", type=float, default=0.0)
     parser.add_argument("--force_only_when_lifted", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--torque_only_when_lifted", action=argparse.BooleanOptionalAction, default=True)
 
-    parser.add_argument("--reset_position_noise_x", type=float, default=0.1)
-    parser.add_argument("--reset_position_noise_y", type=float, default=0.1)
-    parser.add_argument("--reset_position_noise_z", type=float, default=0.02)
+    parser.add_argument("--reset_position_center_x", type=float, default=0.0)
+    parser.add_argument("--reset_position_center_y", type=float, default=0.07)
+    parser.add_argument("--reset_position_noise_x", type=float, default=0.015)
+    parser.add_argument("--reset_position_noise_y", type=float, default=0.015)
+    parser.add_argument("--reset_position_noise_z", type=float, default=0.005)
+    parser.add_argument("--reset_orientation_mode", default="identity")
+    parser.add_argument("--reset_orientation_yaw_range_deg", type=float, default=0.0)
+    parser.add_argument("--reset_orientation_axis_angle_range_deg", type=float, default=0.0)
     parser.add_argument("--reset_dof_pos_noise_arm", type=float, default=0.1)
     parser.add_argument("--reset_dof_pos_noise_fingers", type=float, default=0.1)
     parser.add_argument("--reset_dof_vel_noise", type=float, default=0.5)
@@ -266,6 +292,7 @@ def main() -> None:
     parser.add_argument("--camera_target", type=float, nargs=3, default=(0.02, 0.02, 0.58))
     parser.add_argument("--camera_xyz", type=float, nargs=3, default=None)
     parser.add_argument("--camera_wxyz", type=float, nargs=4, default=None)
+    parser.add_argument("--camera_forward_world", type=float, nargs=3, default=None)
     parser.add_argument("--camera_forward_axis", type=float, nargs=3, default=(0.0, 0.0, 1.0))
     parser.add_argument("--camera_target_distance_m", type=float, default=1.4)
     parser.add_argument("--camera_focal_length_cm", type=float, default=10.0)
@@ -284,20 +311,20 @@ def main() -> None:
     parser.add_argument("--sky_style", choices=("default", "blue_color", "blue_dome", "hdri", "dynamic_clear_sky"), default="blue_dome")
     parser.add_argument("--sky_color", type=float, nargs=3, default=(0.50, 0.66, 0.86))
     parser.add_argument("--sky_dome_intensity", type=float, default=650.0)
-    parser.add_argument("--backdrop_style", choices=("none", "blue_wall", "blue_walls", "gradient_sky"), default="blue_walls")
+    parser.add_argument("--backdrop_style", choices=("none", "blue_wall", "blue_walls", "gradient_sky"), default="gradient_sky")
     parser.add_argument("--backdrop_color", type=float, nargs=3, default=(0.25, 0.48, 0.76))
     parser.add_argument("--backdrop_horizon_color", type=float, nargs=3, default=(0.68, 0.78, 0.88))
-    parser.add_argument("--backdrop_distance", type=float, default=8.0)
+    parser.add_argument("--backdrop_distance", type=float, default=5.0)
     parser.add_argument("--backdrop_height", type=float, default=18.0)
-    parser.add_argument("--backdrop_extent_margin", type=float, default=30.0)
-    parser.add_argument("--default_light_intensity", type=float, default=120.0)
-    parser.add_argument("--single_sun_exposure", type=float, default=6.8)
-    parser.add_argument("--single_sun_angle", type=float, default=0.45)
+    parser.add_argument("--backdrop_extent_margin", type=float, default=80.0)
+    parser.add_argument("--default_light_intensity", type=float, default=360.0)
+    parser.add_argument("--single_sun_exposure", type=float, default=9.35)
+    parser.add_argument("--single_sun_angle", type=float, default=0.12)
     parser.add_argument("--single_sun_color_temperature", type=float, default=5250.0)
     parser.add_argument("--single_sun_yaw_offset_deg", type=float, default=70.0)
-    parser.add_argument("--image_exposure", type=float, default=0.72)
-    parser.add_argument("--image_contrast", type=float, default=1.08)
-    parser.add_argument("--image_saturation", type=float, default=1.03)
+    parser.add_argument("--image_exposure", type=float, default=0.0)
+    parser.add_argument("--image_contrast", type=float, default=1.0)
+    parser.add_argument("--image_saturation", type=float, default=1.0)
     parser.add_argument("--image_gamma", type=float, default=1.0)
     args = parser.parse_args()
 
@@ -426,10 +453,28 @@ def main() -> None:
         "steps": int(args.steps),
         "train_dr": bool(args.train_dr),
         "random_goal_fraction": float(args.random_goal_fraction),
+        "goal_xy_obs_noise": float(args.goal_xy_obs_noise),
+        "goal_yaw_obs_noise_deg": float(args.goal_yaw_obs_noise_deg),
+        "hole_x_range": list(args.hole_x_range),
+        "hole_y_range": list(args.hole_y_range),
+        "hole_yaw_range_deg": float(args.hole_yaw_range_deg),
+        "reset_position_center_xy": [
+            float(args.reset_position_center_x),
+            float(args.reset_position_center_y),
+        ],
+        "reset_position_noise_xyz": [
+            float(args.reset_position_noise_x),
+            float(args.reset_position_noise_y),
+            float(args.reset_position_noise_z),
+        ],
+        "reset_orientation_mode": str(args.reset_orientation_mode),
         "camera_eye": list(args.camera_eye),
         "camera_target": list(args.camera_target),
         "camera_xyz": None if args.camera_xyz is None else list(args.camera_xyz),
         "camera_wxyz": None if args.camera_wxyz is None else list(args.camera_wxyz),
+        "camera_forward_world": (
+            None if args.camera_forward_world is None else list(args.camera_forward_world)
+        ),
         "camera_forward_axis": list(args.camera_forward_axis),
         "camera_target_distance_m": float(args.camera_target_distance_m),
         "render_quality_summary": render_quality_summary,
