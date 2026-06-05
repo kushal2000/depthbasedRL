@@ -18,6 +18,7 @@ Examples:
 from __future__ import annotations
 
 import argparse
+import colorsys
 import importlib
 import json
 import math
@@ -55,6 +56,10 @@ DEFAULT_NVIDIA_PRECAST_CONCRETE_MDL = (
     / "omni.kit.tool.collect-2.2.18+69cbf6ad/data/test_stages/OM_55150/1/Materials/"
     / "vMaterials_2/Concrete/Concrete_Precast.mdl"
 )
+ROBOLAB_OAK_DIR = Path("/home/tylerlum/github_repos/RoboLab/assets/materials/Base/Wood/Oak")
+DEFAULT_OAK_BASE_COLOR = ROBOLAB_OAK_DIR / "Oak_BaseColor.png"
+DEFAULT_OAK_NORMAL = ROBOLAB_OAK_DIR / "Oak_N.png"
+DEFAULT_OAK_ORM = ROBOLAB_OAK_DIR / "Oak_ORM.png"
 
 QUALITY_PRESETS = {
     # Quality currently controls capture resolution.  Keep render settings
@@ -284,7 +289,19 @@ def _camera_pose_for_step(
     return target + rel, target
 
 
-def _recolor_objects_by_env() -> dict[str, Any]:
+def _adjust_rgb_saturation_value(
+    color: tuple[float, float, float],
+    *,
+    saturation: float,
+    value_scale: float,
+) -> tuple[float, float, float]:
+    h, s, v = colorsys.rgb_to_hsv(*[max(0.0, min(1.0, float(c))) for c in color])
+    s = max(0.0, min(1.0, s * float(saturation)))
+    v = max(0.0, min(1.0, v * float(value_scale)))
+    return tuple(float(c) for c in colorsys.hsv_to_rgb(h, s, v))
+
+
+def _recolor_objects_by_env(*, saturation: float = 1.0, value_scale: float = 1.0) -> dict[str, Any]:
     """Apply display colors to each env's Object prim and return a summary."""
     from pxr import Gf, Usd, UsdGeom, UsdShade
     from isaaclab.sim.utils import find_matching_prim_paths, get_current_stage
@@ -296,7 +313,12 @@ def _recolor_objects_by_env() -> dict[str, Any]:
     )
     colored = []
     for idx, root_path in enumerate(object_paths):
-        color = DIVERSE_PALETTE[idx % len(DIVERSE_PALETTE)]
+        raw_color = DIVERSE_PALETTE[idx % len(DIVERSE_PALETTE)]
+        color = _adjust_rgb_saturation_value(
+            raw_color,
+            saturation=float(saturation),
+            value_scale=float(value_scale),
+        )
         color_vec = Gf.Vec3f(*color)
         root_prim = stage.GetPrimAtPath(root_path)
         if not root_prim.IsValid():
@@ -310,8 +332,20 @@ def _recolor_objects_by_env() -> dict[str, Any]:
             if prim.IsA(UsdGeom.Gprim):
                 UsdGeom.Gprim(prim).GetDisplayColorAttr().Set([color_vec])
                 gprim_count += 1
-        colored.append({"object_path": root_path, "color": color, "gprim_count": gprim_count})
-    return {"num_colored": len(colored), "objects": colored[:32]}
+        colored.append(
+            {
+                "object_path": root_path,
+                "raw_color": raw_color,
+                "color": color,
+                "gprim_count": gprim_count,
+            }
+        )
+    return {
+        "num_colored": len(colored),
+        "saturation": float(saturation),
+        "value_scale": float(value_scale),
+        "objects": colored[:32],
+    }
 
 
 def _style_goal_viz(color: tuple[float, float, float], opacity: float) -> dict[str, Any]:
@@ -391,6 +425,37 @@ def _style_prim_trees(
             }
         )
     return {"label": label, "pattern": pattern, "num_styled": len(styled), "items": styled[:32]}
+
+
+def _bind_material_to_prim_trees(pattern: str, material_prim, *, label: str) -> dict[str, Any]:
+    """Bind a material to every Gprim under prims matching ``pattern``."""
+    from pxr import Usd, UsdGeom, UsdShade
+    from isaaclab.sim.utils import find_matching_prim_paths, get_current_stage
+
+    stage = get_current_stage()
+    material = UsdShade.Material(material_prim)
+    paths = sorted(find_matching_prim_paths(pattern))
+    styled = []
+    for root_path in paths:
+        root_prim = stage.GetPrimAtPath(root_path)
+        if not root_prim.IsValid():
+            continue
+        gprim_count = 0
+        for prim in Usd.PrimRange(root_prim):
+            if prim.IsA(UsdGeom.Gprim):
+                UsdShade.MaterialBindingAPI(prim).Bind(
+                    material,
+                    UsdShade.Tokens.strongerThanDescendants,
+                )
+                gprim_count += 1
+        styled.append({"path": root_path, "gprim_count": gprim_count})
+    return {
+        "label": label,
+        "pattern": pattern,
+        "num_styled": len(styled),
+        "material_path": str(material_prim.GetPath()),
+        "items": styled[:32],
+    }
 
 
 def _apply_marble_tile_floor(
@@ -521,6 +586,7 @@ def _create_omnipbr_material(
     material_name: str,
     diffuse_texture: str | None,
     diffuse_color: tuple[float, float, float],
+    normal_texture: str | None = None,
     texture_scale: tuple[float, float] | None = None,
     roughness: float = 0.38,
 ) -> tuple[Any, dict[str, Any]]:
@@ -552,6 +618,11 @@ def _create_omnipbr_material(
     if diffuse_texture:
         shader.CreateInput("diffuse_texture", Sdf.ValueTypeNames.Asset).Set(diffuse_texture)
         inputs["diffuse_texture"] = diffuse_texture
+    if normal_texture:
+        shader.CreateInput("normalmap_texture", Sdf.ValueTypeNames.Asset).Set(normal_texture)
+        shader.CreateInput("normalmap_texture_influence", Sdf.ValueTypeNames.Float).Set(0.35)
+        inputs["normalmap_texture"] = normal_texture
+        inputs["normalmap_texture_influence"] = 0.35
     if texture_scale is not None:
         shader.CreateInput("project_uvw", Sdf.ValueTypeNames.Bool).Set(True)
         shader.CreateInput("texture_scale", Sdf.ValueTypeNames.Float2).Set(
@@ -561,6 +632,33 @@ def _create_omnipbr_material(
         inputs["texture_scale"] = [float(texture_scale[0]), float(texture_scale[1])]
 
     return material.GetPrim(), {"path": material_path, "inputs": inputs}
+
+
+def _apply_pbr_table_material(
+    *,
+    base_color_texture: str,
+    normal_texture: str | None,
+    orm_texture: str | None,
+    texture_scale: float,
+) -> dict[str, Any]:
+    """Bind a real wood PBR material to all table prims."""
+    material_prim, material_summary = _create_omnipbr_material(
+        material_name="CinematicOakTable",
+        diffuse_texture=base_color_texture,
+        normal_texture=normal_texture,
+        diffuse_color=(0.76, 0.52, 0.32),
+        texture_scale=(float(texture_scale), float(texture_scale)),
+        roughness=0.72,
+    )
+    bind_summary = _bind_material_to_prim_trees(
+        "/World/envs/env_.*/Table",
+        material_prim,
+        label="table",
+    )
+    bind_summary["style"] = "oak_pbr"
+    bind_summary["material"] = material_summary
+    bind_summary["orm_texture"] = orm_texture
+    return bind_summary
 
 
 def _create_mdl_file_material(
@@ -811,6 +909,61 @@ def _apply_beauty_lighting() -> dict[str, Any]:
     return {"spawned": spawned}
 
 
+def _apply_single_sun_lighting(
+    *,
+    exposure: float = 5.5,
+    angle: float = 1.2,
+    color_temperature: float = 5200.0,
+) -> dict[str, Any]:
+    """Add one directional sun light without the overexposing key/fill stack."""
+    import isaaclab.sim as sim_utils
+
+    sun = sim_utils.DistantLightCfg(
+        intensity=1.0,
+        exposure=float(exposure),
+        angle=float(angle),
+        color=(1.0, 0.92, 0.78),
+        enable_color_temperature=True,
+        color_temperature=float(color_temperature),
+    )
+    orientation = (0.76041, -0.20648, 0.59052, 0.17299)
+    sun.func("/World/CinematicSingleSun", sun, orientation=orientation)
+    return {
+        "style": "single_sun",
+        "spawned": [
+            {
+                "path": "/World/CinematicSingleSun",
+                "type": "DistantLight",
+                "exposure": float(exposure),
+                "angle": float(angle),
+                "color_temperature": float(color_temperature),
+                "orientation_wxyz": list(orientation),
+            }
+        ],
+    }
+
+
+def _set_default_world_light_intensity(intensity: float) -> dict[str, Any]:
+    """Dim the env-created default dome light so sun/shadows can read."""
+    from pxr import Sdf
+    from isaaclab.sim.utils import get_current_stage
+
+    stage = get_current_stage()
+    paths = ["/World/Light", "/World/light"]
+    updated = []
+    for path in paths:
+        prim = stage.GetPrimAtPath(path)
+        if not prim.IsValid():
+            continue
+        attr = prim.GetAttribute("inputs:intensity")
+        if not attr.IsValid():
+            attr = prim.CreateAttribute("inputs:intensity", Sdf.ValueTypeNames.Float)
+        old_value = attr.Get()
+        attr.Set(float(intensity))
+        updated.append({"path": path, "old_intensity": old_value, "new_intensity": float(intensity)})
+    return {"requested_intensity": float(intensity), "updated": updated}
+
+
 def _apply_sky_background(
     *,
     style: str,
@@ -915,7 +1068,7 @@ def _apply_backdrop_walls(
     """Add visual-only blue walls behind the grid to read like a clean sky backdrop."""
     if style == "none":
         return {"style": style, "applied": False}
-    if style not in {"blue_wall", "blue_walls"}:
+    if style not in {"blue_wall", "blue_walls", "gradient_sky"}:
         raise ValueError(f"Unsupported backdrop style: {style}")
 
     from pxr import Gf, UsdGeom
@@ -930,13 +1083,65 @@ def _apply_backdrop_walls(
     z_center = 0.5 * float(height)
     thickness = 0.04
     rgb = Gf.Vec3f(*[float(v) for v in color])
-
-    # The SAPG reference pan looks mostly from -x/-y toward +x/+y.
-    # A single diagonal wall avoids the obvious corner seam of two axis-aligned walls.
     center_x = 0.5 * (min_x + max_x)
     center_y = 0.5 * (min_y + max_y)
     span_x = max_x - min_x
     span_y = max_y - min_y
+
+    if style == "gradient_sky":
+        root_path = "/World/GradientSkyBackdrop"
+        root = UsdGeom.Xform.Define(stage, root_path)
+        normal = 2.0 ** -0.5
+        max_projection = 0.5 * (span_x + span_y) * normal
+        wall_center = (
+            center_x + normal * (max_projection + float(distance)),
+            center_y + normal * (max_projection + float(distance)),
+            z_center,
+        )
+        width = (span_x**2 + span_y**2) ** 0.5 + 2.0 * float(extent_margin)
+        # Subtle synthetic sky for camera sensors that do not show the DomeLight
+        # texture reliably.  Keep the horizon pale and make the upper band bluer;
+        # this reads less like a flat blue wall after video color grading.
+        bands = [
+            (0, (0.84, 0.86, 0.86)),
+            (1, (0.72, 0.80, 0.88)),
+            (2, (0.58, 0.72, 0.88)),
+            (3, (0.42, 0.62, 0.86)),
+        ]
+        walls = []
+        for band_idx, band_color in bands:
+            band_height = float(height) / len(bands)
+            band_center_z = band_height * (band_idx + 0.5)
+            prim_path = f"{root_path}/Band_{band_idx:02d}"
+            prim = stage.DefinePrim(prim_path, "Cube")
+            cube = UsdGeom.Cube(prim)
+            cube.CreateSizeAttr(1.0)
+            xform = UsdGeom.Xformable(prim)
+            xform.ClearXformOpOrder()
+            xform.AddTranslateOp().Set(Gf.Vec3d(wall_center[0], wall_center[1], band_center_z))
+            xform.AddRotateZOp().Set(-45.0)
+            xform.AddScaleOp().Set(Gf.Vec3d(width, thickness, band_height + 0.02))
+            UsdGeom.Gprim(prim).GetDisplayColorAttr().Set([Gf.Vec3f(*band_color)])
+            walls.append(
+                {
+                    "path": prim_path,
+                    "translate": [wall_center[0], wall_center[1], band_center_z],
+                    "rotate_z_deg": -45.0,
+                    "scale": [width, thickness, band_height + 0.02],
+                    "color": list(band_color),
+                }
+            )
+        return {
+            "style": style,
+            "applied": True,
+            "distance": float(distance),
+            "height": float(height),
+            "extent_margin": float(extent_margin),
+            "walls": walls,
+        }
+
+    # The SAPG reference pan looks mostly from -x/-y toward +x/+y.
+    # A single diagonal wall avoids the obvious corner seam of two axis-aligned walls.
     if style == "blue_wall":
         normal = 2.0 ** -0.5
         max_projection = 0.5 * (span_x + span_y) * normal
@@ -1110,6 +1315,40 @@ def _summarize_metric_values(values: list[float]) -> dict[str, float | int | Non
     }
 
 
+def _postprocess_rgb_frame(
+    frame,
+    *,
+    exposure: float,
+    contrast: float,
+    saturation: float,
+    gamma: float,
+):
+    """Apply simple RGB-only output grading after sensor readback."""
+    import numpy as np
+
+    if (
+        abs(float(exposure)) < 1e-6
+        and abs(float(contrast) - 1.0) < 1e-6
+        and abs(float(saturation) - 1.0) < 1e-6
+        and abs(float(gamma) - 1.0) < 1e-6
+    ):
+        return frame
+
+    x = frame.astype(np.float32) / 255.0
+    x = x * (2.0 ** float(exposure))
+    x = (x - 0.5) * float(contrast) + 0.5
+    if abs(float(saturation) - 1.0) > 1e-6:
+        gray = (
+            0.2126 * x[..., 0:1]
+            + 0.7152 * x[..., 1:2]
+            + 0.0722 * x[..., 2:3]
+        )
+        x = gray + float(saturation) * (x - gray)
+    if abs(float(gamma) - 1.0) > 1e-6:
+        x = np.clip(x, 0.0, 1.0) ** (1.0 / max(1e-6, float(gamma)))
+    return (np.clip(x, 0.0, 1.0) * 255.0 + 0.5).astype(np.uint8)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--checkpoint", default=DEFAULT_PLAY2WIN_CHECKPOINT)
@@ -1194,14 +1433,41 @@ def main() -> None:
             "nvidia_precast_concrete_ivory",
             "nvidia_precast_concrete_light_gray",
             "nvidia_precast_concrete_warm_gray",
+            "nvidia_precast_concrete_gray",
+            "nvidia_precast_concrete_dark_gray",
         ),
         default="display_color",
         help="Floor visual style used when --style_floor is set.",
     )
     parser.add_argument("--beauty_lighting", action="store_true")
+    parser.add_argument(
+        "--lighting_style",
+        choices=("none", "beauty", "single_sun"),
+        default="none",
+        help="Optional extra lighting stack. 'beauty' is brighter studio fill; 'single_sun' keeps contrast/shadows.",
+    )
+    parser.add_argument("--single_sun_exposure", type=float, default=5.5)
+    parser.add_argument("--single_sun_angle", type=float, default=1.2)
+    parser.add_argument("--single_sun_color_temperature", type=float, default=5200.0)
+    parser.add_argument(
+        "--default_light_intensity",
+        type=float,
+        default=None,
+        help="If set, override the env-created /World/Light intensity before adding cinematic lights.",
+    )
     parser.add_argument("--goal_color", type=float, nargs=3, default=(0.55, 1.0, 0.55))
     parser.add_argument("--goal_opacity", type=float, default=0.35)
+    parser.add_argument(
+        "--table_style",
+        choices=("display_color", "oak_pbr"),
+        default="display_color",
+        help="Table visual style used when --style_table is set.",
+    )
     parser.add_argument("--table_color", type=float, nargs=3, default=(0.72, 0.50, 0.30))
+    parser.add_argument("--table_texture_scale", type=float, default=1.0)
+    parser.add_argument("--table_texture_path", default=str(DEFAULT_OAK_BASE_COLOR))
+    parser.add_argument("--table_normal_path", default=str(DEFAULT_OAK_NORMAL))
+    parser.add_argument("--table_orm_path", default=str(DEFAULT_OAK_ORM))
     parser.add_argument("--floor_color", type=float, nargs=3, default=(0.60, 0.60, 0.56))
     parser.add_argument("--floor_tile_count", type=int, default=24)
     parser.add_argument("--floor_tile_size", type=float, default=0.9)
@@ -1245,7 +1511,7 @@ def main() -> None:
     )
     parser.add_argument(
         "--backdrop_style",
-        choices=("none", "blue_wall", "blue_walls"),
+        choices=("none", "blue_wall", "blue_walls", "gradient_sky"),
         default="none",
         help="Render-only background geometry for stronger sky contrast.",
     )
@@ -1263,6 +1529,42 @@ def main() -> None:
         ),
     )
     parser.add_argument("--num_assets_per_type", type=int, default=100)
+    parser.add_argument(
+        "--object_color_saturation",
+        type=float,
+        default=1.0,
+        help="HSV saturation multiplier for recolored objects. Values >1 make object colors pop more.",
+    )
+    parser.add_argument(
+        "--object_color_value_scale",
+        type=float,
+        default=1.0,
+        help="HSV value multiplier for recolored objects. Values <1 reduce pastel overexposure.",
+    )
+    parser.add_argument(
+        "--image_exposure",
+        type=float,
+        default=0.0,
+        help="Output-only exposure adjustment in stops applied to saved PNG/video frames.",
+    )
+    parser.add_argument(
+        "--image_contrast",
+        type=float,
+        default=1.0,
+        help="Output-only contrast multiplier applied to saved PNG/video frames.",
+    )
+    parser.add_argument(
+        "--image_saturation",
+        type=float,
+        default=1.0,
+        help="Output-only saturation multiplier applied to saved PNG/video frames.",
+    )
+    parser.add_argument(
+        "--image_gamma",
+        type=float,
+        default=1.0,
+        help="Output-only gamma adjustment applied to saved PNG/video frames.",
+    )
     parser.add_argument(
         "--object_distribution_mode",
         choices=("training", "mixed_training_simple_25_25_50"),
@@ -1381,20 +1683,36 @@ def main() -> None:
 
     recolor_summary = None
     if not my_args.no_recolor_objects:
-        recolor_summary = _recolor_objects_by_env()
+        recolor_summary = _recolor_objects_by_env(
+            saturation=float(my_args.object_color_saturation),
+            value_scale=float(my_args.object_color_value_scale),
+        )
         print(
             "[render_simtoolreal_pretrained] recolored "
             f"{recolor_summary['num_colored']} object prims"
         )
     table_style_summary = None
     if my_args.style_table:
-        table_style_summary = _style_prim_trees(
-            "/World/envs/env_.*/Table",
-            color=tuple(float(v) for v in my_args.table_color),
-            opacity=1.0,
-            visible=True,
-            label="table",
-        )
+        if my_args.table_style == "oak_pbr":
+            table_texture_path = Path(my_args.table_texture_path).expanduser()
+            table_normal_path = Path(my_args.table_normal_path).expanduser()
+            table_orm_path = Path(my_args.table_orm_path).expanduser()
+            if not table_texture_path.is_file():
+                raise FileNotFoundError(f"Oak table base color texture does not exist: {table_texture_path}")
+            table_style_summary = _apply_pbr_table_material(
+                base_color_texture=str(table_texture_path),
+                normal_texture=str(table_normal_path) if table_normal_path.is_file() else None,
+                orm_texture=str(table_orm_path) if table_orm_path.is_file() else None,
+                texture_scale=float(my_args.table_texture_scale),
+            )
+        else:
+            table_style_summary = _style_prim_trees(
+                "/World/envs/env_.*/Table",
+                color=tuple(float(v) for v in my_args.table_color),
+                opacity=1.0,
+                visible=True,
+                label="table",
+            )
         print(
             "[render_simtoolreal_pretrained] styled "
             f"{table_style_summary['num_styled']} table prims"
@@ -1409,6 +1727,8 @@ def main() -> None:
             "nvidia_precast_concrete_ivory",
             "nvidia_precast_concrete_light_gray",
             "nvidia_precast_concrete_warm_gray",
+            "nvidia_precast_concrete_gray",
+            "nvidia_precast_concrete_dark_gray",
         }:
             # Keep the original physics ground, but make it a neutral base below
             # the render-only cinematic tile overlay.
@@ -1426,6 +1746,8 @@ def main() -> None:
                 "nvidia_precast_concrete_ivory",
                 "nvidia_precast_concrete_light_gray",
                 "nvidia_precast_concrete_warm_gray",
+                "nvidia_precast_concrete_gray",
+                "nvidia_precast_concrete_dark_gray",
             }:
                 mdl_material_name = None
                 if my_args.floor_style == "white_stone_slabs":
@@ -1453,6 +1775,14 @@ def main() -> None:
                         "nvidia_precast_concrete_warm_gray": (
                             "concrete_precast_light_warm_gray",
                             "CinematicPrecastConcreteWarmGray",
+                        ),
+                        "nvidia_precast_concrete_gray": (
+                            "concrete_precast_dark_gray",
+                            "CinematicPrecastConcreteGray",
+                        ),
+                        "nvidia_precast_concrete_dark_gray": (
+                            "concrete_precast_dark_charcoal",
+                            "CinematicPrecastConcreteDarkGray",
                         ),
                     }
                     mdl_material_name, material_name = precast_styles[my_args.floor_style]
@@ -1502,6 +1832,10 @@ def main() -> None:
     )
     if sky_summary["applied"]:
         print(f"[render_simtoolreal_pretrained] applied sky background: {sky_summary}")
+    default_light_summary = None
+    if my_args.default_light_intensity is not None:
+        default_light_summary = _set_default_world_light_intensity(float(my_args.default_light_intensity))
+        print(f"[render_simtoolreal_pretrained] set default light: {default_light_summary}")
     backdrop_summary = _apply_backdrop_walls(
         env,
         style=my_args.backdrop_style,
@@ -1532,9 +1866,17 @@ def main() -> None:
             f"{goal_style_summary['num_styled']} GoalViz prims"
         )
     lighting_summary = None
-    if my_args.beauty_lighting:
+    lighting_style = "beauty" if my_args.beauty_lighting else my_args.lighting_style
+    if lighting_style == "beauty":
         lighting_summary = _apply_beauty_lighting()
         print(f"[render_simtoolreal_pretrained] applied beauty lighting: {lighting_summary}")
+    elif lighting_style == "single_sun":
+        lighting_summary = _apply_single_sun_lighting(
+            exposure=float(my_args.single_sun_exposure),
+            angle=float(my_args.single_sun_angle),
+            color_temperature=float(my_args.single_sun_color_temperature),
+        )
+        print(f"[render_simtoolreal_pretrained] applied single-sun lighting: {lighting_summary}")
 
     if my_args.camera_eye is not None:
         eye = torch.tensor(my_args.camera_eye, device=env.device)
@@ -1668,13 +2010,23 @@ def main() -> None:
         "table_style_summary": table_style_summary,
         "floor_style_summary": floor_style_summary,
         "sky_summary": sky_summary,
+        "default_light_summary": default_light_summary,
         "backdrop_summary": backdrop_summary,
         "goal_style_summary": goal_style_summary,
         "lighting_summary": lighting_summary,
+        "lighting_style": lighting_style,
+        "single_sun_exposure": float(my_args.single_sun_exposure),
+        "single_sun_angle": float(my_args.single_sun_angle),
+        "single_sun_color_temperature": float(my_args.single_sun_color_temperature),
         "hide_goal_viz": bool(my_args.hide_goal_viz),
         "goal_color": list(my_args.goal_color),
         "goal_opacity": float(my_args.goal_opacity),
+        "table_style": my_args.table_style,
         "table_color": list(my_args.table_color),
+        "table_texture_scale": float(my_args.table_texture_scale),
+        "table_texture_path": my_args.table_texture_path,
+        "table_normal_path": my_args.table_normal_path,
+        "table_orm_path": my_args.table_orm_path,
         "floor_style": my_args.floor_style,
         "floor_color": list(my_args.floor_color),
         "floor_tile_count": int(my_args.floor_tile_count),
@@ -1687,11 +2039,24 @@ def main() -> None:
         "sky_dome_intensity": float(my_args.sky_dome_intensity),
         "sky_hdri_preset": my_args.sky_hdri_preset,
         "sky_hdri_path": my_args.sky_hdri_path,
+        "default_light_intensity": (
+            float(my_args.default_light_intensity)
+            if my_args.default_light_intensity is not None
+            else None
+        ),
         "backdrop_style": my_args.backdrop_style,
         "backdrop_color": list(my_args.backdrop_color),
         "backdrop_distance": float(my_args.backdrop_distance),
         "backdrop_height": float(my_args.backdrop_height),
         "backdrop_extent_margin": float(my_args.backdrop_extent_margin),
+        "object_color_saturation": float(my_args.object_color_saturation),
+        "object_color_value_scale": float(my_args.object_color_value_scale),
+        "image_postprocess": {
+            "exposure": float(my_args.image_exposure),
+            "contrast": float(my_args.image_contrast),
+            "saturation": float(my_args.image_saturation),
+            "gamma": float(my_args.image_gamma),
+        },
         "requested_out_dir": str(requested_out_dir) if requested_out_dir is not None else None,
         "effective_out_dir": str(out_dir),
         "outputs": {"pngs": [], "video": None},
@@ -1825,6 +2190,13 @@ def main() -> None:
         if frame is None:
             print(f"[warning] no RGB frame at step {step_i}")
             return
+        frame = _postprocess_rgb_frame(
+            frame,
+            exposure=float(my_args.image_exposure),
+            contrast=float(my_args.image_contrast),
+            saturation=float(my_args.image_saturation),
+            gamma=float(my_args.image_gamma),
+        )
         write_png_ms = None
         if step_i in capture_steps:
             png_path = out_dir / f"step_{step_i:04d}.png"
