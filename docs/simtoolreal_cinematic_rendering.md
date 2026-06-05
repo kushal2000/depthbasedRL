@@ -38,15 +38,27 @@ The target should be closer to a bright outdoor architectural render, not a satu
 
 The white floor and white background are the main reason the current render lacks contrast. The robot has a white/gray body, so a pure white floor makes the robot, object colors, and shadows read as low-contrast. A dark floor has the opposite problem: it looks like a debug viewport and makes the scene feel less polished. The best compromise is a medium-light gray concrete/stone floor.
 
-Current script defaults in `bash_scripts/95_render_simtoolreal_ref_pan_cinematic.sh`:
+Current script defaults in `bash_scripts/95_render_simtoolreal_ref_pan_cinematic.sh` after the latest contrast pass:
 
-- Floor: `nvidia_precast_concrete_gray`.
-- Background: `gradient_sky` with a blue-gray horizon `(0.80, 0.86, 0.90)` and blue-gray top color `(0.42, 0.62, 0.82)`.
-- Dome sky/fill: muted blue dome `(0.60, 0.74, 0.90)`.
+- Floor: `nvidia_precast_concrete_dark_gray`. Visually this reads as medium gray in the camera render, not charcoal.
+- Background: `gradient_sky` with a blue-gray horizon `(0.68, 0.78, 0.88)` and blue top color `(0.25, 0.48, 0.76)`.
+- Backdrop extent margin: `80.0`. The wide SAPG pan otherwise sees the edge of a smaller diagonal sky panel.
+- Dome sky/fill: muted blue dome `(0.50, 0.66, 0.86)`.
 - Table: matte warm brown `(0.50, 0.32, 0.18)`.
-- Light: `single_sun` with default world/dome fill kept at `900`, sun exposure `6.8`, sun angle `0.45`, and color temperature `6000K`.
+- Light: `single_sun` with default world/dome fill kept at `450`, sun exposure `8.0`, sun angle `0.28`, color temperature `5900K`, and yaw offset `80 deg`.
 
 This is intentionally more in the direction of sunset/sunlight than the flat no-extra-light render, but avoids the orange cast from the previous hard-sun test. The single-sun color in `render_simtoolreal_pretrained.py` is now neutral-warm `(1.0, 0.97, 0.90)` instead of orange `(1.0, 0.92, 0.78)`. The backdrop horizon is configurable because a near-white horizon made the rendered camera image look like white floor against white background.
+
+Latest reviewed frame:
+
+`local_logs/2026-06-04_21-16-53_2026-06-04_21-16-53_refpan_palette_dark_floor_blue_sky_big_backdrop_frame600/step_0600.png`
+
+Assessment:
+
+- This is the best contrast so far. The scene no longer reads as white floor on white sky.
+- It is still a synthetic gradient backdrop, not a true HDRI/cloud sky. That is acceptable for now because IsaacLab camera captures did not reliably show the dome/HDRI sky like the viewport.
+- The floor now has enough contrast with the white robot and colored objects.
+- Directional shadows are visible but not extremely dramatic.
 
 ## Current Best Output
 
