@@ -62,13 +62,19 @@ Assessment:
 
 ## Current Best Output
 
-Latest good no-extra-light candidate:
+Latest high-contrast daylight candidate:
 
-`local_logs/2026-06-04_20-52-59_simtoolreal_ref_pan_pretty_gray_floor_brown_table_no_extra_light_20s/rollout.mp4`
+`local_logs/2026-06-04_21-19-59_2026-06-04_21-19-59_simtoolreal_ref_pan_high_contrast_daylight_20s/rollout.mp4`
 
-Main issue with that candidate:
+Quick review sheet:
 
-- It has the correct camera, robot, and motion, but still lacks contrast because the floor/background are too bright and the lighting is too flat.
+`local_logs/2026-06-04_21-19-59_2026-06-04_21-19-59_simtoolreal_ref_pan_high_contrast_daylight_20s/contact_sheet_start_mid_end.png`
+
+Main remaining issues:
+
+- The sky is still a synthetic gradient backdrop, so it has a visible horizon/band rather than a natural HDRI/cloud sky.
+- The table is a matte warm-brown material, not a true wood texture.
+- The floor is much better for contrast, but less like the bright white-stone reference than the earlier white variants.
 
 ## Next Test Matrix
 
