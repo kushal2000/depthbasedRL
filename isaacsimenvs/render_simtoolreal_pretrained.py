@@ -1078,6 +1078,7 @@ def _apply_backdrop_walls(
     *,
     style: str,
     color: tuple[float, float, float],
+    horizon_color: tuple[float, float, float],
     distance: float,
     height: float,
     extent_margin: float,
@@ -1121,7 +1122,7 @@ def _apply_backdrop_walls(
         # down to a pale horizon so the backdrop reads like atmosphere instead
         # of a flat blue wall.
         top = [float(v) for v in color]
-        horizon = [0.90, 0.93, 0.94]
+        horizon = [float(v) for v in horizon_color]
         band_colors = []
         for alpha in (0.0, 0.28, 0.62, 1.0):
             band_colors.append(tuple((1.0 - alpha) * h + alpha * t for h, t in zip(horizon, top)))
@@ -1659,6 +1660,7 @@ def main() -> None:
         help="Render-only background geometry for stronger sky contrast.",
     )
     parser.add_argument("--backdrop_color", type=float, nargs=3, default=(0.36, 0.58, 0.90))
+    parser.add_argument("--backdrop_horizon_color", type=float, nargs=3, default=(0.84, 0.89, 0.92))
     parser.add_argument("--backdrop_distance", type=float, default=5.0)
     parser.add_argument("--backdrop_height", type=float, default=18.0)
     parser.add_argument("--backdrop_extent_margin", type=float, default=10.0)
@@ -1992,6 +1994,7 @@ def main() -> None:
         env,
         style=my_args.backdrop_style,
         color=tuple(float(v) for v in my_args.backdrop_color),
+        horizon_color=tuple(float(v) for v in my_args.backdrop_horizon_color),
         distance=float(my_args.backdrop_distance),
         height=float(my_args.backdrop_height),
         extent_margin=float(my_args.backdrop_extent_margin),
