@@ -914,9 +914,20 @@ def _apply_single_sun_lighting(
     exposure: float = 5.5,
     angle: float = 1.2,
     color_temperature: float = 5200.0,
+    yaw_offset_deg: float = 0.0,
 ) -> dict[str, Any]:
     """Add one directional sun light without the overexposing key/fill stack."""
     import isaaclab.sim as sim_utils
+
+    def quat_mul_wxyz(a, b):
+        aw, ax, ay, az = a
+        bw, bx, by, bz = b
+        return (
+            aw * bw - ax * bx - ay * by - az * bz,
+            aw * bx + ax * bw + ay * bz - az * by,
+            aw * by - ax * bz + ay * bw + az * bx,
+            aw * bz + ax * by - ay * bx + az * bw,
+        )
 
     sun = sim_utils.DistantLightCfg(
         intensity=1.0,
@@ -926,7 +937,10 @@ def _apply_single_sun_lighting(
         enable_color_temperature=True,
         color_temperature=float(color_temperature),
     )
-    orientation = (0.76041, -0.20648, 0.59052, 0.17299)
+    base_orientation = (0.76041, -0.20648, 0.59052, 0.17299)
+    yaw_rad = math.radians(float(yaw_offset_deg))
+    yaw_orientation = (math.cos(0.5 * yaw_rad), 0.0, 0.0, math.sin(0.5 * yaw_rad))
+    orientation = quat_mul_wxyz(yaw_orientation, base_orientation)
     sun.func("/World/CinematicSingleSun", sun, orientation=orientation)
     return {
         "style": "single_sun",
@@ -937,6 +951,7 @@ def _apply_single_sun_lighting(
                 "exposure": float(exposure),
                 "angle": float(angle),
                 "color_temperature": float(color_temperature),
+                "yaw_offset_deg": float(yaw_offset_deg),
                 "orientation_wxyz": list(orientation),
             }
         ],
@@ -1569,6 +1584,12 @@ def main() -> None:
     parser.add_argument("--single_sun_angle", type=float, default=1.2)
     parser.add_argument("--single_sun_color_temperature", type=float, default=5200.0)
     parser.add_argument(
+        "--single_sun_yaw_offset_deg",
+        type=float,
+        default=0.0,
+        help="Rotate the cinematic sun around world Z while preserving its base elevation.",
+    )
+    parser.add_argument(
         "--default_light_intensity",
         type=float,
         default=None,
@@ -2003,6 +2024,7 @@ def main() -> None:
             exposure=float(my_args.single_sun_exposure),
             angle=float(my_args.single_sun_angle),
             color_temperature=float(my_args.single_sun_color_temperature),
+            yaw_offset_deg=float(my_args.single_sun_yaw_offset_deg),
         )
         print(f"[render_simtoolreal_pretrained] applied single-sun lighting: {lighting_summary}")
 
@@ -2151,6 +2173,7 @@ def main() -> None:
         "single_sun_exposure": float(my_args.single_sun_exposure),
         "single_sun_angle": float(my_args.single_sun_angle),
         "single_sun_color_temperature": float(my_args.single_sun_color_temperature),
+        "single_sun_yaw_offset_deg": float(my_args.single_sun_yaw_offset_deg),
         "hide_goal_viz": bool(my_args.hide_goal_viz),
         "goal_color": list(my_args.goal_color),
         "goal_opacity": float(my_args.goal_opacity),
