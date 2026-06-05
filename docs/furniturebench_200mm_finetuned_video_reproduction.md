@@ -220,3 +220,45 @@ Key reset overrides:
   `(0.015, 0.015, 0.005) m`
 - Object reset orientation:
   `identity`
+
+## 20 Second Left-Fixture Right-Leg Clip
+
+This is the updated preferred clip for presentation composition. The fixture is
+biased to camera-left/world `-X`, and the leg starts camera-right/world `+X`.
+Both still have small randomized offsets, and the leg has yaw-only orientation
+noise so it does not look like a single hard-coded pose.
+
+```bash
+OUT_DIR=local_logs/furniturebench_200mm_left_fixture_right_leg_yaw_20s_seed0 \
+STEPS=1200 \
+CAPTURE_PNG_STEPS=0,300,600,900,1200 \
+MAKE_VIDEO=1 \
+SEED=0 \
+RANDOM_GOAL_FRACTION=0.0 \
+TRAIN_DR=1 \
+bash_scripts/96_render_furniturebench_200mm_finetuned.sh
+```
+
+Output:
+
+`local_logs/2026-06-04_23-39-38_furniturebench_200mm_left_fixture_right_leg_yaw_20s_seed0/rollout.mp4`
+
+Observed result:
+
+- Episode 1 completed all `10/10` goals at step `593`.
+- Episode 2 completed all `10/10` goals at step `1157`.
+
+Key reset overrides:
+
+- Hole/fixture `x` range:
+  `[-0.085, -0.055] m`
+- Hole/fixture `y` range:
+  `[-0.075, -0.055] m`
+- Hole/fixture yaw range:
+  `±3 deg`
+- Object reset center:
+  `(x=0.075, y=0.07)`
+- Object reset position noise:
+  `(0.025, 0.015, 0.005) m`
+- Object reset orientation:
+  yaw-only, `±20 deg`
