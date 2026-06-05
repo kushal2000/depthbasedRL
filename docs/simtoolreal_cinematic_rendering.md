@@ -31,7 +31,7 @@ The target should be closer to a bright outdoor architectural render, not a satu
 - Floor: medium-light warm gray concrete or stone, not pure white. This should contrast with the white/gray robot while still feeling bright.
 - Background: pale blue-gray sky gradient, not white. The horizon should be very light and the top slightly cooler/bluer.
 - Table: warm beige/brown. It should be darker than the floor but not glossy or saturated.
-- Lighting: keep ambient fill, then add a warm daylight sun for readable shadows. Use roughly 5600-6200K daylight, not orange 5200K sunset tones.
+- Lighting: keep ambient fill, then add a warm daylight/golden sun for readable shadows. The best current direction is warmer than neutral daylight, but not full orange sunset.
 - Shadows: visible and directional, but not so dark that they dominate the foreground.
 
 ## Current Palette Decision
@@ -45,20 +45,35 @@ Current script defaults in `bash_scripts/95_render_simtoolreal_ref_pan_cinematic
 - Backdrop extent margin: `80.0`. The wide SAPG pan otherwise sees the edge of a smaller diagonal sky panel.
 - Dome sky/fill: muted blue dome `(0.50, 0.66, 0.86)`.
 - Table: matte warm brown `(0.50, 0.32, 0.18)`.
-- Light: `single_sun` with default world/dome fill kept at `450`, sun exposure `8.0`, sun angle `0.28`, color temperature `5900K`, and yaw offset `80 deg`.
+- Light: `single_sun` with default world/dome fill kept at `360`, sun exposure `9.35`, sun angle `0.12`, color temperature `5250K`, and yaw offset `70 deg`.
 
-This is intentionally more in the direction of sunset/sunlight than the flat no-extra-light render, but avoids the orange cast from the previous hard-sun test. The single-sun color in `render_simtoolreal_pretrained.py` is now neutral-warm `(1.0, 0.97, 0.90)` instead of orange `(1.0, 0.92, 0.78)`. The backdrop horizon is configurable because a near-white horizon made the rendered camera image look like white floor against white background.
+This is intentionally more golden/sunlit than the flat no-extra-light render. The sun is low enough to make shadows visible, but there is still enough ambient fill that the background does not collapse to black. The single-sun color in `render_simtoolreal_pretrained.py` is neutral-warm `(1.0, 0.97, 0.90)` instead of orange `(1.0, 0.92, 0.78)`. The backdrop horizon is configurable because a near-white horizon made the rendered camera image look like white floor against white background.
 
 Latest reviewed frame:
 
-`local_logs/2026-06-04_21-16-53_2026-06-04_21-16-53_refpan_palette_dark_floor_blue_sky_big_backdrop_frame600/step_0600.png`
+`local_logs/2026-06-04_21-44-25_2026-06-04_21-44-25_refpan_palette_bright_golden_sun_shadow_probe/step_0600.png`
 
 Assessment:
 
-- This is the best contrast so far. The scene no longer reads as white floor on white sky.
+- This is the best sunlight/shadow setting so far. It is warmer and more directional than the previous high-contrast default.
 - It is still a synthetic gradient backdrop, not a true HDRI/cloud sky. That is acceptable for now because IsaacLab camera captures did not reliably show the dome/HDRI sky like the viewport.
 - The floor now has enough contrast with the white robot and colored objects.
-- Directional shadows are visible but not extremely dramatic.
+- Directional shadows are visible without making the whole render too dark.
+
+Comparison sheet for the current lighting/sky probes:
+
+`local_logs/2026-06-04_render_sky_sun_probe_review/sky_sun_probe_comparison_with_bright_step0600.png`
+
+## Proper Sky / HDRI Probe Results
+
+The "proper sky" paths were re-tested with the synthetic backdrop disabled and extra script lighting disabled:
+
+- `SKY_STYLE=dynamic_clear_sky BACKDROP_STYLE=none LIGHTING_STYLE=none`: dynamic clear sky imports, but the camera image is badly overexposed and reads as a white background.
+- `SKY_STYLE=dynamic_clear_sky BACKDROP_STYLE=none LIGHTING_STYLE=none DEFAULT_LIGHT_INTENSITY=0`: removing the default light avoids the overexposure, but the saved camera frame background becomes black.
+- `SKY_STYLE=hdri SKY_HDRI_PRESET=cloudy_vondelpark BACKDROP_STYLE=none LIGHTING_STYLE=none`: HDRI at normal dome intensity is also overexposed/white.
+- `SKY_STYLE=hdri SKY_HDRI_PRESET=cloudy_vondelpark SKY_DOME_INTENSITY=250 BACKDROP_STYLE=none LIGHTING_STYLE=none DEFAULT_LIGHT_INTENSITY=0`: lowering the HDRI intensity avoids overexposure, but the camera frame background becomes black.
+
+Conclusion: for this IsaacLab camera capture path, a synthetic gradient backdrop is currently more reliable than the dynamic/HDRI sky. The proper sky may still work in an interactive viewport/path-traced capture, but it is not reliable in the saved camera frames used by this script.
 
 ## Current Best Output
 
@@ -75,13 +90,14 @@ Main remaining issues:
 - The sky is still a synthetic gradient backdrop, so it has a visible horizon/band rather than a natural HDRI/cloud sky.
 - The table is a matte warm-brown material, not a true wood texture.
 - The floor is much better for contrast, but less like the bright white-stone reference than the earlier white variants.
+- The current default lighting has only been rendered as a frame probe so far. A full MP4 should be regenerated once the palette is accepted.
 
 ## Next Test Matrix
 
 Keep the camera and policy fixed. Only vary visual stack:
 
-- Candidate A: medium gray concrete floor, brown table, blue-gray gradient backdrop, no extra sun.
-- Candidate B: same as A, but with a warm daylight sun and strong ambient fill left on.
-- Candidate C: slightly darker warm gray floor, brown table, blue-gray gradient backdrop, softer daylight sun.
+- Candidate A: current brighter golden default, full 20s MP4.
+- Candidate B: same palette, but slightly cooler/less golden if the robot/table look too yellow in motion.
+- Candidate C: revisit proper HDRI only if using an interactive viewport/path-traced capture path instead of IsaacLab camera frames.
 
 Compare frames at `0`, `600`, and `1200` before committing to a full MP4.

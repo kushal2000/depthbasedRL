@@ -36,6 +36,9 @@ SKY_STYLE="${SKY_STYLE:-blue_dome}"
 SKY_COLOR_R="${SKY_COLOR_R:-0.50}"
 SKY_COLOR_G="${SKY_COLOR_G:-0.66}"
 SKY_COLOR_B="${SKY_COLOR_B:-0.86}"
+SKY_DOME_INTENSITY="${SKY_DOME_INTENSITY:-1200}"
+SKY_HDRI_PRESET="${SKY_HDRI_PRESET:-stinson_beach}"
+SKY_HDRI_PATH="${SKY_HDRI_PATH:-}"
 BACKDROP_STYLE="${BACKDROP_STYLE:-gradient_sky}"
 BACKDROP_COLOR_R="${BACKDROP_COLOR_R:-0.25}"
 BACKDROP_COLOR_G="${BACKDROP_COLOR_G:-0.48}"
@@ -47,6 +50,7 @@ BACKDROP_DISTANCE="${BACKDROP_DISTANCE:-5.0}"
 BACKDROP_HEIGHT="${BACKDROP_HEIGHT:-18.0}"
 BACKDROP_EXTENT_MARGIN="${BACKDROP_EXTENT_MARGIN:-80.0}"
 LIGHTING_STYLE="${LIGHTING_STYLE:-single_sun}"
+DEFAULT_LIGHT_INTENSITY="${DEFAULT_LIGHT_INTENSITY:-}"
 
 VIDEO_ARGS=()
 if [[ "${MAKE_VIDEO}" == "1" ]]; then
@@ -55,13 +59,21 @@ fi
 
 LIGHTING_ARGS=(--lighting_style "${LIGHTING_STYLE}")
 if [[ "${LIGHTING_STYLE}" == "single_sun" ]]; then
+  DEFAULT_LIGHT_INTENSITY="${DEFAULT_LIGHT_INTENSITY:-360}"
   LIGHTING_ARGS+=(
-    --default_light_intensity "${DEFAULT_LIGHT_INTENSITY:-450}"
-    --single_sun_exposure "${SINGLE_SUN_EXPOSURE:-8.0}"
-    --single_sun_angle "${SINGLE_SUN_ANGLE:-0.28}"
-    --single_sun_color_temperature "${SINGLE_SUN_COLOR_TEMPERATURE:-5900}"
-    --single_sun_yaw_offset_deg "${SINGLE_SUN_YAW_OFFSET_DEG:-80}"
+    --single_sun_exposure "${SINGLE_SUN_EXPOSURE:-9.35}"
+    --single_sun_angle "${SINGLE_SUN_ANGLE:-0.12}"
+    --single_sun_color_temperature "${SINGLE_SUN_COLOR_TEMPERATURE:-5250}"
+    --single_sun_yaw_offset_deg "${SINGLE_SUN_YAW_OFFSET_DEG:-70}"
   )
+fi
+if [[ -n "${DEFAULT_LIGHT_INTENSITY}" ]]; then
+  LIGHTING_ARGS+=(--default_light_intensity "${DEFAULT_LIGHT_INTENSITY}")
+fi
+
+SKY_ARGS=(--sky_hdri_preset "${SKY_HDRI_PRESET}")
+if [[ -n "${SKY_HDRI_PATH}" ]]; then
+  SKY_ARGS+=(--sky_hdri_path "${SKY_HDRI_PATH}")
 fi
 
 "${PYTHON_BIN}" isaacsimenvs/render_simtoolreal_pretrained.py \
@@ -94,6 +106,8 @@ fi
   --floor_tile_gap "${FLOOR_TILE_GAP:-0.006}" \
   --sky_style "${SKY_STYLE}" \
   --sky_color "${SKY_COLOR_R}" "${SKY_COLOR_G}" "${SKY_COLOR_B}" \
+  --sky_dome_intensity "${SKY_DOME_INTENSITY}" \
+  "${SKY_ARGS[@]}" \
   --backdrop_style "${BACKDROP_STYLE}" \
   --backdrop_color "${BACKDROP_COLOR_R}" "${BACKDROP_COLOR_G}" "${BACKDROP_COLOR_B}" \
   --backdrop_horizon_color "${BACKDROP_HORIZON_COLOR_R}" "${BACKDROP_HORIZON_COLOR_G}" "${BACKDROP_HORIZON_COLOR_B}" \
