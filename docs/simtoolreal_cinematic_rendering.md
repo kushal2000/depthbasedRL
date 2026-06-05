@@ -72,8 +72,17 @@ The "proper sky" paths were re-tested with the synthetic backdrop disabled and e
 - `SKY_STYLE=dynamic_clear_sky BACKDROP_STYLE=none LIGHTING_STYLE=none DEFAULT_LIGHT_INTENSITY=0`: removing the default light avoids the overexposure, but the saved camera frame background becomes black.
 - `SKY_STYLE=hdri SKY_HDRI_PRESET=cloudy_vondelpark BACKDROP_STYLE=none LIGHTING_STYLE=none`: HDRI at normal dome intensity is also overexposed/white.
 - `SKY_STYLE=hdri SKY_HDRI_PRESET=cloudy_vondelpark SKY_DOME_INTENSITY=250 BACKDROP_STYLE=none LIGHTING_STYLE=none DEFAULT_LIGHT_INTENSITY=0`: lowering the HDRI intensity avoids overexposure, but the camera frame background becomes black.
+- `SKY_STYLE=hdri SKY_HDRI_PATH=/home/tylerlum/github_repos/RoboLab/assets/backgrounds/default/empty_warehouse.hdr DOME_LIGHT_UPPER_LOWER_STRATEGY=0 BACKDROP_STYLE=none LIGHTING_STYLE=none DEFAULT_LIGHT_INTENSITY=0 CAPTURE_SOURCE=camera_sensor`: real `.hdr` texture plus full IBL strategy still gives black background in the IsaacLab camera sensor output.
+- The viewport/path-tracing capture path was also tried with the same `.hdr` setup, but the Kit capture extension hung in this headless script. Do not rely on `CAPTURE_SOURCE=viewport` until that path is debugged separately.
 
-Conclusion: for this IsaacLab camera capture path, a synthetic gradient backdrop is currently more reliable than the dynamic/HDRI sky. The proper sky may still work in an interactive viewport/path-traced capture, but it is not reliable in the saved camera frames used by this script.
+Conclusion: for this IsaacLab camera sensor capture path, a synthetic gradient backdrop is currently more reliable than the dynamic/HDRI sky. The dome/HDRI can illuminate the scene, but it is not reliably visible as the camera background in saved RGB sensor frames. The proper sky may still work in an interactive viewport/path-traced capture, but it is not reliable in the saved camera frames used by this script.
+
+Relevant render controls now exposed by `bash_scripts/95_render_simtoolreal_ref_pan_cinematic.sh`:
+
+- `CAPTURE_SOURCE=camera_sensor|viewport`
+- `DOME_LIGHT_UPPER_LOWER_STRATEGY=0|3|4`
+- `SKY_HDRI_PATH=/path/to/file.hdr`
+- `SKY_DOME_INTENSITY=...`
 
 ## Current Best Output
 

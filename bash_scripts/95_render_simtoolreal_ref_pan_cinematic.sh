@@ -23,6 +23,8 @@ QUALITY="${QUALITY:-high}"
 RENDER_QUALITY_PRESET="${RENDER_QUALITY_PRESET:-beauty}"
 RENDER_MODE="${RENDER_MODE:-rt}"
 RENDER_SPP="${RENDER_SPP:-64}"
+CAPTURE_SOURCE="${CAPTURE_SOURCE:-camera_sensor}"
+DOME_LIGHT_UPPER_LOWER_STRATEGY="${DOME_LIGHT_UPPER_LOWER_STRATEGY:-}"
 
 MAKE_VIDEO="${MAKE_VIDEO:-0}"
 CAPTURE_PNG_STEPS="${CAPTURE_PNG_STEPS:-0,60,180,360,600,900,1200}"
@@ -76,6 +78,16 @@ if [[ -n "${SKY_HDRI_PATH}" ]]; then
   SKY_ARGS+=(--sky_hdri_path "${SKY_HDRI_PATH}")
 fi
 
+RENDER_ARGS=(
+  --render_quality_preset "${RENDER_QUALITY_PRESET}"
+  --render_mode "${RENDER_MODE}"
+  --render_samples_per_pixel "${RENDER_SPP}"
+  --capture_source "${CAPTURE_SOURCE}"
+)
+if [[ -n "${DOME_LIGHT_UPPER_LOWER_STRATEGY}" ]]; then
+  RENDER_ARGS+=(--dome_light_upper_lower_strategy "${DOME_LIGHT_UPPER_LOWER_STRATEGY}")
+fi
+
 "${PYTHON_BIN}" isaacsimenvs/render_simtoolreal_pretrained.py \
   --num_envs "${NUM_ENVS}" \
   --grid_cols "${GRID_COLS}" \
@@ -87,9 +99,7 @@ fi
   --quality "${QUALITY}" \
   --width "${WIDTH}" \
   --height "${HEIGHT}" \
-  --render_quality_preset "${RENDER_QUALITY_PRESET}" \
-  --render_mode "${RENDER_MODE}" \
-  --render_samples_per_pixel "${RENDER_SPP}" \
+  "${RENDER_ARGS[@]}" \
   --deterministic \
   --checkpoint "${CHECKPOINT}" \
   --robot_urdf "${ROBOT_URDF}" \

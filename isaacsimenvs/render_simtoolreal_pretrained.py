@@ -803,7 +803,13 @@ def _apply_pbr_tile_floor(
     }
 
 
-def _apply_beauty_render_settings(env_cfg, *, preset: str, samples_per_pixel: int) -> dict[str, Any]:
+def _apply_beauty_render_settings(
+    env_cfg,
+    *,
+    preset: str,
+    samples_per_pixel: int,
+    dome_light_upper_lower_strategy: int | None,
+) -> dict[str, Any]:
     """Apply render-only quality settings to the env config before construction."""
     if preset == "default":
         return {"preset": preset, "applied": False}
@@ -824,6 +830,8 @@ def _apply_beauty_render_settings(env_cfg, *, preset: str, samples_per_pixel: in
         "enable_dl_denoiser": True,
         "samples_per_pixel": int(samples_per_pixel),
     }
+    if dome_light_upper_lower_strategy is not None:
+        settings["dome_light_upper_lower_strategy"] = int(dome_light_upper_lower_strategy)
     applied = {}
     for key, value in settings.items():
         if hasattr(render_cfg, key):
@@ -832,7 +840,13 @@ def _apply_beauty_render_settings(env_cfg, *, preset: str, samples_per_pixel: in
     return {"preset": preset, "applied": True, "settings": applied}
 
 
-def _apply_runtime_render_settings(*, preset: str, render_mode: str, samples_per_pixel: int) -> dict[str, Any]:
+def _apply_runtime_render_settings(
+    *,
+    preset: str,
+    render_mode: str,
+    samples_per_pixel: int,
+    dome_light_upper_lower_strategy: int | None,
+) -> dict[str, Any]:
     """Apply RTX settings that live in carb settings rather than env_cfg.sim.render."""
     import carb
 
@@ -848,7 +862,7 @@ def _apply_runtime_render_settings(*, preset: str, render_mode: str, samples_per
 
     if preset == "beauty":
         spp = int(samples_per_pixel)
-        for key, value in {
+        runtime_settings = {
             "/rtx/pathtracing/spp": spp,
             "/rtx/pathtracing/totalSpp": spp,
             "/rtx/pathtracing/maxBounces": 8,
@@ -856,7 +870,15 @@ def _apply_runtime_render_settings(*, preset: str, render_mode: str, samples_per
             "/rtx/pathtracing/maxVolumeBounces": 2,
             "/rtx/pathtracing/optixDenoiser/enabled": True,
             "/rtx/pathtracing/clampSpp": 0,
-        }.items():
+        }
+        if dome_light_upper_lower_strategy is not None:
+            strategy = int(dome_light_upper_lower_strategy)
+            runtime_settings["/rtx/domeLight/upperLowerStrategy"] = strategy
+            # IsaacLab RenderCfg uses the dotted carb key name in examples.
+            # Set both forms because Isaac/Kit settings APIs accept different
+            # spellings in different versions.
+            runtime_settings["rtx.domeLight.upperLowerStrategy"] = strategy
+        for key, value in runtime_settings.items():
             try:
                 settings.set(key, value)
                 applied[key] = value
@@ -1479,6 +1501,15 @@ def main() -> None:
     )
     parser.add_argument("--render_samples_per_pixel", type=int, default=64)
     parser.add_argument(
+        "--dome_light_upper_lower_strategy",
+        type=int,
+        default=None,
+        help=(
+            "Optional RTX dome light upper/lower strategy. IsaacLab docs use 0 for full IBL "
+            "and 4 for approximate sky-with-separate-sun."
+        ),
+    )
+    parser.add_argument(
         "--render_mode",
         choices=("auto", "default", "rt", "pt"),
         default="auto",
@@ -1784,6 +1815,7 @@ def main() -> None:
         preset=my_args.render_quality_preset,
         render_mode=my_args.render_mode,
         samples_per_pixel=my_args.render_samples_per_pixel,
+        dome_light_upper_lower_strategy=my_args.dome_light_upper_lower_strategy,
     )
 
     import gymnasium as gym
@@ -1805,6 +1837,7 @@ def main() -> None:
         env_cfg,
         preset=my_args.render_quality_preset,
         samples_per_pixel=my_args.render_samples_per_pixel,
+        dome_light_upper_lower_strategy=my_args.dome_light_upper_lower_strategy,
     )
     if hasattr(env_cfg, "seed"):
         env_cfg.seed = my_args.seed
@@ -2137,6 +2170,11 @@ def main() -> None:
         "height": height,
         "render_quality_preset": my_args.render_quality_preset,
         "render_samples_per_pixel": my_args.render_samples_per_pixel,
+        "dome_light_upper_lower_strategy": (
+            int(my_args.dome_light_upper_lower_strategy)
+            if my_args.dome_light_upper_lower_strategy is not None
+            else None
+        ),
         "render_mode": my_args.render_mode,
         "render_quality_summary": render_quality_summary,
         "runtime_render_summary": runtime_render_summary,
