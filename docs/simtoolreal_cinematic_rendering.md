@@ -110,3 +110,53 @@ Keep the camera and policy fixed. Only vary visual stack:
 - Candidate C: revisit proper HDRI only if using an interactive viewport/path-traced capture path instead of IsaacLab camera frames.
 
 Compare frames at `0`, `600`, and `1200` before committing to a full MP4.
+
+## 2026-06-05 Lighting/Backdrop Probe Update
+
+Branch: `2026-06-05_Tyler_SimVideos_LightingAdjust`
+
+New controls added:
+
+- `--dynamic_sky_preset remote_clear|local_simple|local_sunstudy`
+- `--dynamic_sky_path /path/or/url/to/sky.usd`
+- `--backdrop_gradient_bands N`
+- Bash pass-through for `FLOOR_COLOR_R/G/B`, `FLOOR_TEXTURE_SCALE`, `DYNAMIC_SKY_PRESET`, `DYNAMIC_SKY_PATH`, and `BACKDROP_GRADIENT_BANDS`.
+
+Probe workflow:
+
+```bash
+ROOT_DIR=local_logs/$(date +%F_%H-%M-%S)_simtoolreal_visual_stack_probe \
+  NUM_ENVS=16 GRID_COLS=4 STEPS=600 CAPTURE_PNG_STEPS=0,600 \
+  WIDTH=960 HEIGHT=540 RENDER_SPP=16 \
+  bash_scripts/96_probe_simtoolreal_visual_stack.sh
+```
+
+Quick probe generated:
+
+`local_logs/2026-06-05_01-34-06_simtoolreal_visual_stack_probe_quick/`
+
+Review sheets:
+
+- `contact_sheet_step_0000.png`
+- `contact_sheet_step_0600.png`
+
+Findings:
+
+- `01_smooth_gradient_current_concrete` is the safest improvement. It preserves the accepted concrete/table palette but uses 16 gradient bands, smaller tile gaps, and less repetitive floor texture scaling.
+- `02_slate_blue_gray_floor_smooth_gradient` and `04_dark_desaturated_blue_floor` add contrast, but the blue-gray floor reads more artificial than the concrete floor.
+- `05_dynamic_local_simple_no_backdrop` and `06_dynamic_local_sunstudy_no_backdrop` render visible local dynamic sky assets in camera-sensor mode, but they behave like a wrapped environment/floor and do not create a clean outdoor horizon.
+- `07_hdri_carlight_no_backdrop_low_intensity` is too dark with default light disabled; earlier high-intensity HDRI variants overexposed to white. This reinforces that the robust final path should use the geometry gradient backdrop for now.
+
+Selected candidate:
+
+```bash
+OUT_DIR=local_logs/$(date +%F_%H-%M-%S)_simtoolreal_ref_pan_smooth_gradient_concrete_candidate_20s \
+  MAKE_VIDEO=1 STEPS=1200 CAPTURE_PNG_STEPS=0,600,1200 \
+  NUM_ENVS=100 GRID_COLS=10 WIDTH=1920 HEIGHT=1080 RENDER_SPP=64 \
+  BACKDROP_GRADIENT_BANDS=16 FLOOR_TILE_GAP=0.002 FLOOR_TEXTURE_SCALE=2.5 \
+  bash_scripts/95_render_simtoolreal_ref_pan_cinematic.sh
+```
+
+Output:
+
+`local_logs/2026-06-05_01-44-51_simtoolreal_ref_pan_smooth_gradient_concrete_candidate_20s/rollout.mp4`

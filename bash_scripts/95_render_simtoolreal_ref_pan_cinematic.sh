@@ -55,6 +55,8 @@ SKY_COLOR_B="${SKY_COLOR_B:-0.86}"
 SKY_DOME_INTENSITY="${SKY_DOME_INTENSITY:-1200}"
 SKY_HDRI_PRESET="${SKY_HDRI_PRESET:-stinson_beach}"
 SKY_HDRI_PATH="${SKY_HDRI_PATH:-}"
+DYNAMIC_SKY_PRESET="${DYNAMIC_SKY_PRESET:-remote_clear}"
+DYNAMIC_SKY_PATH="${DYNAMIC_SKY_PATH:-}"
 BACKDROP_STYLE="${BACKDROP_STYLE:-gradient_sky}"
 BACKDROP_COLOR_R="${BACKDROP_COLOR_R:-0.25}"
 BACKDROP_COLOR_G="${BACKDROP_COLOR_G:-0.48}"
@@ -65,6 +67,7 @@ BACKDROP_HORIZON_COLOR_B="${BACKDROP_HORIZON_COLOR_B:-0.88}"
 BACKDROP_DISTANCE="${BACKDROP_DISTANCE:-5.0}"
 BACKDROP_HEIGHT="${BACKDROP_HEIGHT:-18.0}"
 BACKDROP_EXTENT_MARGIN="${BACKDROP_EXTENT_MARGIN:-80.0}"
+BACKDROP_GRADIENT_BANDS="${BACKDROP_GRADIENT_BANDS:-4}"
 LIGHTING_STYLE="${LIGHTING_STYLE:-single_sun}"
 DEFAULT_LIGHT_INTENSITY="${DEFAULT_LIGHT_INTENSITY:-}"
 
@@ -90,6 +93,10 @@ fi
 SKY_ARGS=(--sky_hdri_preset "${SKY_HDRI_PRESET}")
 if [[ -n "${SKY_HDRI_PATH}" ]]; then
   SKY_ARGS+=(--sky_hdri_path "${SKY_HDRI_PATH}")
+fi
+SKY_ARGS+=(--dynamic_sky_preset "${DYNAMIC_SKY_PRESET}")
+if [[ -n "${DYNAMIC_SKY_PATH}" ]]; then
+  SKY_ARGS+=(--dynamic_sky_path "${DYNAMIC_SKY_PATH}")
 fi
 
 RENDER_ARGS=(
@@ -140,9 +147,11 @@ fi
   --table_color "${TABLE_COLOR_R}" "${TABLE_COLOR_G}" "${TABLE_COLOR_B}" \
   --style_floor \
   --floor_style "${FLOOR_STYLE}" \
+  --floor_color "${FLOOR_COLOR_R:-0.60}" "${FLOOR_COLOR_G:-0.60}" "${FLOOR_COLOR_B:-0.56}" \
   --floor_tile_count "${FLOOR_TILE_COUNT:-96}" \
   --floor_tile_size "${FLOOR_TILE_SIZE:-0.9}" \
   --floor_tile_gap "${FLOOR_TILE_GAP:-0.006}" \
+  --floor_texture_scale "${FLOOR_TEXTURE_SCALE:-4.0}" \
   --sky_style "${SKY_STYLE}" \
   --sky_color "${SKY_COLOR_R}" "${SKY_COLOR_G}" "${SKY_COLOR_B}" \
   --sky_dome_intensity "${SKY_DOME_INTENSITY}" \
@@ -153,6 +162,7 @@ fi
   --backdrop_distance "${BACKDROP_DISTANCE}" \
   --backdrop_height "${BACKDROP_HEIGHT}" \
   --backdrop_extent_margin "${BACKDROP_EXTENT_MARGIN}" \
+  --backdrop_gradient_bands "${BACKDROP_GRADIENT_BANDS}" \
   "${LIGHTING_ARGS[@]}" \
   --camera_motion sapg_ref_pan \
   --sapg_ref_anchor_env -1 \

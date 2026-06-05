@@ -49,6 +49,16 @@ ISAAC_SAMPLE_MARBLE_TEXTURE = "Isaac/Samples/DR/Materials/Textures/marble_tile.p
 DEFAULT_DYNAMIC_CLEAR_SKY = (
     "http://omniverse-content-production.s3-us-west-2.amazonaws.com/Assets/Skies/Dynamic/ClearSky.usd"
 )
+DEFAULT_LOCAL_DYNAMIC_SIMPLE_SKY = (
+    REPO_ROOT
+    / ".venv-isaacsim-py311/lib/python3.11/site-packages/isaacsim/extscache/"
+    / "omni.kit.environment.core-1.3.24/data/tests/Skies/Dynamic/simple.usd"
+)
+DEFAULT_LOCAL_DYNAMIC_SUNSTUDY_SKY = (
+    REPO_ROOT
+    / ".venv-isaacsim-py311/lib/python3.11/site-packages/isaacsim/extscache/"
+    / "omni.kit.environment.core-1.3.24/data/tests/Skies/Dynamic/sunstudy.usd"
+)
 DEFAULT_WHITE_STONE_TEXTURE = REPO_ROOT / "assets/textures/cinematic_white_stone_slab.png"
 DEFAULT_NVIDIA_PRECAST_CONCRETE_MDL = (
     REPO_ROOT
@@ -584,6 +594,19 @@ def _resolve_hdri_path(preset: str, explicit_path: str | None) -> str | None:
     return None
 
 
+def _resolve_dynamic_sky_path(preset: str, explicit_path: str | None) -> str:
+    if explicit_path:
+        return str(Path(explicit_path).expanduser())
+    candidates_by_preset = {
+        "remote_clear": str(DEFAULT_DYNAMIC_CLEAR_SKY),
+        "local_simple": str(DEFAULT_LOCAL_DYNAMIC_SIMPLE_SKY),
+        "local_sunstudy": str(DEFAULT_LOCAL_DYNAMIC_SUNSTUDY_SKY),
+    }
+    if preset not in candidates_by_preset:
+        raise ValueError(f"Unsupported dynamic sky preset: {preset}")
+    return candidates_by_preset[preset]
+
+
 def _resolve_isaac_asset(asset_relpath: str) -> str | None:
     """Resolve an Isaac sample asset under the configured Isaac asset root."""
     import carb
@@ -1024,6 +1047,8 @@ def _apply_sky_background(
     dome_intensity: float,
     hdri_preset: str,
     hdri_path: str | None,
+    dynamic_sky_preset: str,
+    dynamic_sky_path: str | None,
 ) -> dict[str, Any]:
     """Set a presentation background without changing physics geometry."""
     if style == "default":
@@ -1095,13 +1120,14 @@ def _apply_sky_background(
             ext_manager.set_extension_enabled_immediate("omni.kit.environment.core", True)
         from omni.kit.environment.core import EnvironmentSettings, SkyHelper, SkyType, import_environment
 
-        url = DEFAULT_DYNAMIC_CLEAR_SKY
+        url = _resolve_dynamic_sky_path(dynamic_sky_preset, dynamic_sky_path)
         settings.set(EnvironmentSettings.SHOW_LIGHT_WARNING, False)
         sky_type = SkyHelper.get_env_file_type(url) or SkyType.DYNAMIC
         import_environment(sky_type, url)
         return {
             "style": style,
             "applied": True,
+            "dynamic_sky_preset": dynamic_sky_preset,
             "sky_type": sky_type,
             "sky_url": url,
         }
@@ -1118,6 +1144,7 @@ def _apply_backdrop_walls(
     distance: float,
     height: float,
     extent_margin: float,
+    gradient_bands: int,
 ) -> dict[str, Any]:
     """Add visual-only blue walls behind the grid to read like a clean sky backdrop."""
     if style == "none":
@@ -1160,7 +1187,9 @@ def _apply_backdrop_walls(
         top = [float(v) for v in color]
         horizon = [float(v) for v in horizon_color]
         band_colors = []
-        for alpha in (0.0, 0.28, 0.62, 1.0):
+        num_bands = max(2, int(gradient_bands))
+        for band_idx in range(num_bands):
+            alpha = band_idx / max(1, num_bands - 1)
             band_colors.append(tuple((1.0 - alpha) * h + alpha * t for h, t in zip(horizon, top)))
         bands = list(enumerate(band_colors))
         walls = []
@@ -1192,6 +1221,7 @@ def _apply_backdrop_walls(
             "distance": float(distance),
             "height": float(height),
             "extent_margin": float(extent_margin),
+            "gradient_bands": int(num_bands),
             "walls": walls,
         }
 
@@ -1723,6 +1753,17 @@ def main() -> None:
         help="Explicit local .hdr/.exr path for --sky_style=hdri. Overrides --sky_hdri_preset.",
     )
     parser.add_argument(
+        "--dynamic_sky_preset",
+        choices=("remote_clear", "local_simple", "local_sunstudy"),
+        default="remote_clear",
+        help="Dynamic sky asset used when --sky_style=dynamic_clear_sky and --dynamic_sky_path is unset.",
+    )
+    parser.add_argument(
+        "--dynamic_sky_path",
+        default=None,
+        help="Explicit dynamic sky USD path/URL for --sky_style=dynamic_clear_sky.",
+    )
+    parser.add_argument(
         "--backdrop_style",
         choices=("none", "blue_wall", "blue_walls", "gradient_sky"),
         default="none",
@@ -1733,6 +1774,7 @@ def main() -> None:
     parser.add_argument("--backdrop_distance", type=float, default=5.0)
     parser.add_argument("--backdrop_height", type=float, default=18.0)
     parser.add_argument("--backdrop_extent_margin", type=float, default=10.0)
+    parser.add_argument("--backdrop_gradient_bands", type=int, default=4)
     parser.add_argument(
         "--robot_urdf",
         type=Path,
@@ -2094,6 +2136,8 @@ def main() -> None:
         dome_intensity=float(my_args.sky_dome_intensity),
         hdri_preset=my_args.sky_hdri_preset,
         hdri_path=my_args.sky_hdri_path,
+        dynamic_sky_preset=my_args.dynamic_sky_preset,
+        dynamic_sky_path=my_args.dynamic_sky_path,
     )
     if sky_summary["applied"]:
         print(f"[render_simtoolreal_pretrained] applied sky background: {sky_summary}")
@@ -2109,6 +2153,7 @@ def main() -> None:
         distance=float(my_args.backdrop_distance),
         height=float(my_args.backdrop_height),
         extent_margin=float(my_args.backdrop_extent_margin),
+        gradient_bands=int(my_args.backdrop_gradient_bands),
     )
     if backdrop_summary["applied"]:
         print(f"[render_simtoolreal_pretrained] applied backdrop: {backdrop_summary}")
@@ -2341,6 +2386,8 @@ def main() -> None:
         "sky_dome_intensity": float(my_args.sky_dome_intensity),
         "sky_hdri_preset": my_args.sky_hdri_preset,
         "sky_hdri_path": my_args.sky_hdri_path,
+        "dynamic_sky_preset": my_args.dynamic_sky_preset,
+        "dynamic_sky_path": my_args.dynamic_sky_path,
         "default_light_intensity": (
             float(my_args.default_light_intensity)
             if my_args.default_light_intensity is not None
@@ -2348,9 +2395,11 @@ def main() -> None:
         ),
         "backdrop_style": my_args.backdrop_style,
         "backdrop_color": list(my_args.backdrop_color),
+        "backdrop_horizon_color": list(my_args.backdrop_horizon_color),
         "backdrop_distance": float(my_args.backdrop_distance),
         "backdrop_height": float(my_args.backdrop_height),
         "backdrop_extent_margin": float(my_args.backdrop_extent_margin),
+        "backdrop_gradient_bands": int(my_args.backdrop_gradient_bands),
         "object_color_saturation": float(my_args.object_color_saturation),
         "object_color_value_scale": float(my_args.object_color_value_scale),
         "image_postprocess": {
