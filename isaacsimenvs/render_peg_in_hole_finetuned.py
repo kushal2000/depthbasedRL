@@ -23,6 +23,10 @@ DEFAULT_CHECKPOINT = "/juno/u/kedia/depthbasedRL/train_dir/May26/screwing_newer/
 DEFAULT_TASK = "Isaacsimenvs-PegInHole-Direct-v0"
 DEFAULT_AGENT = "rl_games_sapg_cfg_entry_point"
 DEFAULT_PROBLEM = "furniture_bench.one_leg_leg4_200mm_matchedmass_sdf_hybrid_super_dense"
+DEFAULT_PRETTY_ROBOT_URDF = (
+    "/home/tylerlum/github_repos/sapg/assets/urdf/kuka_allegro_description/"
+    "iiwa14_left_sharpa_adjusted_restricted_pretty.urdf"
+)
 
 
 def _parse_step_list(value: str) -> list[int]:
@@ -34,6 +38,11 @@ def _parse_step_list(value: str) -> list[int]:
 def _apply_200mm_furniturebench_overrides(env_cfg, args) -> None:
     """Match the fig4 200 mm long-leg screwing finetune setup."""
     env_cfg.scene.num_envs = int(args.num_envs)
+    if args.robot_urdf:
+        robot_urdf = Path(args.robot_urdf).expanduser()
+        if not robot_urdf.exists():
+            raise FileNotFoundError(f"Robot URDF override does not exist: {robot_urdf}")
+        env_cfg.assets.robot_urdf = str(robot_urdf.resolve())
     env_cfg.peg_in_hole.problem = str(args.problem)
     env_cfg.peg_in_hole.goal_mode = str(args.goal_mode)
 
@@ -93,6 +102,47 @@ def _apply_200mm_furniturebench_overrides(env_cfg, args) -> None:
 
 def _tensor_list(x) -> list[float]:
     return [float(v) for v in x.detach().cpu().reshape(-1).tolist()]
+
+
+def _rotate_by_wxyz(wxyz: tuple[float, float, float, float], vec: tuple[float, float, float]):
+    """Rotate ``vec`` by a wxyz quaternion without depending on scipy."""
+    import torch
+
+    q = torch.tensor(wxyz, dtype=torch.float32)
+    q = q / torch.linalg.norm(q)
+    w, x, y, z = q
+    vx, vy, vz = torch.tensor(vec, dtype=torch.float32)
+    return torch.stack(
+        (
+            (1.0 - 2.0 * (y * y + z * z)) * vx + 2.0 * (x * y - z * w) * vy + 2.0 * (x * z + y * w) * vz,
+            2.0 * (x * y + z * w) * vx + (1.0 - 2.0 * (x * x + z * z)) * vy + 2.0 * (y * z - x * w) * vz,
+            2.0 * (x * z - y * w) * vx + 2.0 * (y * z + x * w) * vy + (1.0 - 2.0 * (x * x + y * y)) * vz,
+        )
+    )
+
+
+def _camera_eye_target(env, args):
+    """Return env-local camera eye/target.
+
+    If a viser pose is provided, treat wxyz as a camera-to-world quaternion. In
+    that convention the camera forward axis is +Z, which maps to roughly +Y for
+    Tyler's provided straight-on FurnitureBench pose.
+    """
+    import torch
+
+    env_origin = env.scene.env_origins[0]
+    if args.camera_xyz is not None and args.camera_wxyz is not None:
+        eye_local = torch.tensor(args.camera_xyz, device=env.device, dtype=torch.float32)
+        forward_local = _rotate_by_wxyz(
+            tuple(float(v) for v in args.camera_wxyz),
+            tuple(float(v) for v in args.camera_forward_axis),
+        ).to(device=env.device, dtype=torch.float32)
+        forward_local = forward_local / torch.linalg.norm(forward_local)
+        target_local = eye_local + float(args.camera_target_distance_m) * forward_local
+    else:
+        eye_local = torch.tensor(args.camera_eye, device=env.device, dtype=torch.float32)
+        target_local = torch.tensor(args.camera_target, device=env.device, dtype=torch.float32)
+    return env_origin + eye_local, env_origin + target_local
 
 
 def _style_scene_for_video(env, args) -> dict[str, Any]:
@@ -172,6 +222,7 @@ def main() -> None:
     parser.add_argument("--task", default=DEFAULT_TASK)
     parser.add_argument("--agent", default=DEFAULT_AGENT)
     parser.add_argument("--problem", default=DEFAULT_PROBLEM)
+    parser.add_argument("--robot_urdf", default=DEFAULT_PRETTY_ROBOT_URDF)
     parser.add_argument("--goal_mode", default="preInsertAndFinal")
     parser.add_argument("--num_envs", type=int, default=1)
     parser.add_argument("--steps", type=int, default=1200)
@@ -213,8 +264,12 @@ def main() -> None:
     # Fixed straight-on camera. Values are env-local, centered on env 0.
     parser.add_argument("--camera_eye", type=float, nargs=3, default=(0.12, -1.55, 0.98))
     parser.add_argument("--camera_target", type=float, nargs=3, default=(0.02, 0.02, 0.58))
-    parser.add_argument("--camera_focal_length_cm", type=float, default=24.0)
-    parser.add_argument("--camera_focus_distance_m", type=float, default=1.3)
+    parser.add_argument("--camera_xyz", type=float, nargs=3, default=None)
+    parser.add_argument("--camera_wxyz", type=float, nargs=4, default=None)
+    parser.add_argument("--camera_forward_axis", type=float, nargs=3, default=(0.0, 0.0, 1.0))
+    parser.add_argument("--camera_target_distance_m", type=float, default=1.4)
+    parser.add_argument("--camera_focal_length_cm", type=float, default=10.0)
+    parser.add_argument("--camera_focus_distance_m", type=float, default=0.8)
     parser.add_argument("--camera_f_stop", type=float, default=0.0)
     parser.add_argument("--camera_horizontal_aperture_cm", type=float, default=20.955)
     parser.add_argument("--camera_render_warmup_frames", type=int, default=1)
@@ -229,10 +284,10 @@ def main() -> None:
     parser.add_argument("--sky_style", choices=("default", "blue_color", "blue_dome", "hdri", "dynamic_clear_sky"), default="blue_dome")
     parser.add_argument("--sky_color", type=float, nargs=3, default=(0.50, 0.66, 0.86))
     parser.add_argument("--sky_dome_intensity", type=float, default=650.0)
-    parser.add_argument("--backdrop_style", choices=("none", "blue_wall", "blue_walls", "gradient_sky"), default="gradient_sky")
+    parser.add_argument("--backdrop_style", choices=("none", "blue_wall", "blue_walls", "gradient_sky"), default="blue_walls")
     parser.add_argument("--backdrop_color", type=float, nargs=3, default=(0.25, 0.48, 0.76))
     parser.add_argument("--backdrop_horizon_color", type=float, nargs=3, default=(0.68, 0.78, 0.88))
-    parser.add_argument("--backdrop_distance", type=float, default=5.0)
+    parser.add_argument("--backdrop_distance", type=float, default=8.0)
     parser.add_argument("--backdrop_height", type=float, default=18.0)
     parser.add_argument("--backdrop_extent_margin", type=float, default=30.0)
     parser.add_argument("--default_light_intensity", type=float, default=120.0)
@@ -364,6 +419,7 @@ def main() -> None:
         "task": args.task,
         "agent": args.agent,
         "problem": args.problem,
+        "robot_urdf": str(env_cfg.assets.robot_urdf),
         "goal_mode": args.goal_mode,
         "seed": int(args.seed),
         "num_envs": int(args.num_envs),
@@ -372,6 +428,10 @@ def main() -> None:
         "random_goal_fraction": float(args.random_goal_fraction),
         "camera_eye": list(args.camera_eye),
         "camera_target": list(args.camera_target),
+        "camera_xyz": None if args.camera_xyz is None else list(args.camera_xyz),
+        "camera_wxyz": None if args.camera_wxyz is None else list(args.camera_wxyz),
+        "camera_forward_axis": list(args.camera_forward_axis),
+        "camera_target_distance_m": float(args.camera_target_distance_m),
         "render_quality_summary": render_quality_summary,
         "runtime_render_summary": runtime_render_summary,
         "style_summary": style_summary,
@@ -384,9 +444,7 @@ def main() -> None:
             return
         import torch
 
-        env_origin = env.scene.env_origins[0]
-        eye = env_origin + torch.tensor(args.camera_eye, device=env.device, dtype=torch.float32)
-        target = env_origin + torch.tensor(args.camera_target, device=env.device, dtype=torch.float32)
+        eye, target = _camera_eye_target(env, args)
         _set_record_camera(camera, eye, target)
         if not args.headless:
             _set_active_viewport_camera("/World/RecordCamera")

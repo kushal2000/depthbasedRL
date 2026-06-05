@@ -112,3 +112,52 @@ For multiple candidate clips, vary `SEED`, `OUT_DIR`, and possibly `STEPS`.
 The seed-0 successful episode hits `10/10` by step `420` and resets at step
 `460`, so a `430` step video is intentionally cleaner than a longer `600` step
 clip.
+
+## 20 Second Viser-Pose Pretty-Robot Clip
+
+This is the requested longer fixed-camera clip using Tyler's Viser camera pose
+and the visually nicer robot URDF.
+
+```bash
+OUT_DIR=local_logs/furniturebench_200mm_viser_pose_pretty_20s_seed0 \
+SEED=0 \
+RANDOM_GOAL_FRACTION=0.0 \
+TRAIN_DR=1 \
+bash_scripts/96_render_furniturebench_200mm_finetuned.sh
+```
+
+Wrapper defaults for this command:
+
+- `STEPS=1200`, which is 20 seconds at the 60 Hz policy/env step.
+- `MAKE_VIDEO=1`
+- `WIDTH=1920`, `HEIGHT=1080`
+- `RENDER_QUALITY_PRESET=beauty`
+- `RENDER_MODE=rt`
+- `RENDER_SPP=64`
+- Camera xyz:
+  `(0.017118738815094965, -0.4115866854641337, 0.7392877590177354)`
+- Camera wxyz:
+  `(0.6051540840361335, -0.7945251569598455, -0.014533776794422243, 0.04803206079704674)`
+- Viser forward-axis interpretation:
+  camera-local `+Z`, which maps to roughly world `+Y` for this pose.
+- Camera focal length:
+  `10 cm`, widened from the default `24 cm` so the close Viser pose frames the
+  task instead of clipping into it.
+- Robot URDF:
+  `/home/tylerlum/github_repos/sapg/assets/urdf/kuka_allegro_description/iiwa14_left_sharpa_adjusted_restricted_pretty.urdf`
+
+Output:
+
+`local_logs/2026-06-04_23-03-58_furniturebench_200mm_viser_pose_pretty_20s_seed0/rollout.mp4`
+
+Review sheet:
+
+`local_logs/2026-06-04_23-03-58_furniturebench_200mm_viser_pose_pretty_20s_seed0/contact_sheet_steps.png`
+
+Observed result:
+
+- Episode 1 completed all `10/10` goals at step `460`.
+- Episode 2 reset at step `1060` with `0/10`.
+
+For polished success-only clips, prefer either the 430-step command above or
+run a seed sweep and select a 20-second rollout with cleaner later episodes.
