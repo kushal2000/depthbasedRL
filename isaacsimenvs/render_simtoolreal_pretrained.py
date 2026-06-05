@@ -1214,7 +1214,15 @@ def _apply_backdrop_walls(
     }
 
 
-def _make_camera_cfg(width: int, height: int):
+def _make_camera_cfg(
+    width: int,
+    height: int,
+    *,
+    focal_length_cm: float = 24.0,
+    focus_distance_m: float = 400.0,
+    f_stop: float = 0.0,
+    horizontal_aperture_cm: float = 20.955,
+):
     import isaaclab.sim as sim_utils
     from isaaclab.sensors import CameraCfg
 
@@ -1225,9 +1233,10 @@ def _make_camera_cfg(width: int, height: int):
         width=width,
         data_types=["rgb"],
         spawn=sim_utils.PinholeCameraCfg(
-            focal_length=24.0,
-            focus_distance=400.0,
-            horizontal_aperture=20.955,
+            focal_length=float(focal_length_cm),
+            focus_distance=float(focus_distance_m),
+            f_stop=float(f_stop),
+            horizontal_aperture=float(horizontal_aperture_cm),
             clipping_range=(0.1, 100.0),
         ),
         offset=CameraCfg.OffsetCfg(
@@ -1244,6 +1253,86 @@ def _capture_rgb(camera, *, dt: float):
     if rgb is None or rgb.shape[0] == 0:
         return None
     return rgb[0].detach().cpu().numpy()[:, :, :3]
+
+
+def _capture_viewport_rgb(
+    *,
+    camera_path: str,
+    output_dir: Path,
+    step_i: int,
+    width: int,
+    height: int,
+    samples_per_pixel: int,
+):
+    """Capture through Kit's viewport capture extension instead of the camera sensor."""
+    import time
+    import imageio.v2 as imageio
+    import omni.kit.app
+
+    app = omni.kit.app.get_app()
+    ext_manager = app.get_extension_manager()
+    for ext_name in ("omni.kit.viewport.window", "omni.kit.capture.viewport"):
+        if not ext_manager.is_extension_enabled(ext_name):
+            ext_manager.set_extension_enabled_immediate(ext_name, True)
+
+    from omni.kit.capture.viewport import CaptureExtension, CaptureOptions, CaptureRenderPreset
+
+    try:
+        from omni.kit.viewport.utility import get_active_viewport
+        from pxr import Sdf
+
+        viewport = get_active_viewport()
+        if viewport is not None:
+            viewport.camera_path = Sdf.Path(camera_path)
+            try:
+                viewport.resolution = (int(width), int(height))
+            except Exception:
+                pass
+    except Exception:
+        pass
+
+    capture_dir = output_dir / "_viewport_capture_tmp"
+    capture_dir.mkdir(parents=True, exist_ok=True)
+    capture = CaptureExtension.get_instance()
+    options = CaptureOptions()
+    options.file_type = ".png"
+    options.output_folder = str(capture_dir)
+    options.file_name = f"viewport_step_{step_i:04d}"
+    options.camera = camera_path
+    options.res_width = int(width)
+    options.res_height = int(height)
+    options.render_preset = CaptureRenderPreset.PATH_TRACE
+    options.path_trace_spp = int(samples_per_pixel)
+    options.hdr_output = False
+    options.overwrite_existing_frames = True
+    capture.options = options
+    if not capture.start():
+        raise RuntimeError("Viewport capture failed to start")
+
+    output_path = capture_dir / f"{options.file_name}1.png"
+    timeout_s = 45.0
+    deadline = time.time() + timeout_s
+    while not capture.done and time.time() < deadline:
+        if output_path.exists():
+            break
+        app.update()
+
+    outputs = capture.get_outputs()
+    if outputs:
+        output_path = Path(outputs[0])
+    for _ in range(50):
+        if output_path.exists():
+            break
+        app.update()
+        time.sleep(0.05)
+    if not output_path.exists():
+        raise FileNotFoundError(f"Viewport capture output was reported but not written: {output_path}")
+    if not capture.done:
+        try:
+            capture.cancel()
+        except Exception:
+            pass
+    return imageio.imread(output_path)[:, :, :3]
 
 
 def _save_manifest(out_dir: Path, manifest: dict[str, Any]) -> None:
@@ -1390,6 +1479,12 @@ def main() -> None:
         type=_parse_step_list,
         default=_parse_step_list("0,60,180,360"),
     )
+    parser.add_argument(
+        "--capture_source",
+        choices=("camera_sensor", "viewport"),
+        default="camera_sensor",
+        help="RGB capture path. 'viewport' uses Kit viewport capture and may show stage lighting/sky differently.",
+    )
     parser.add_argument("--make_video", action="store_true")
     parser.add_argument(
         "--metrics_interval",
@@ -1399,6 +1494,30 @@ def main() -> None:
     )
     parser.add_argument("--camera_eye", type=float, nargs=3, default=None)
     parser.add_argument("--camera_target", type=float, nargs=3, default=None)
+    parser.add_argument(
+        "--camera_focal_length_cm",
+        type=float,
+        default=24.0,
+        help="USD camera focal length in cm. Larger values narrow FOV and read more cinematic.",
+    )
+    parser.add_argument(
+        "--camera_focus_distance_m",
+        type=float,
+        default=400.0,
+        help="Focus plane distance in meters. Use scene-scale values such as 8-25 for DOF hero frames.",
+    )
+    parser.add_argument(
+        "--camera_f_stop",
+        type=float,
+        default=0.0,
+        help="USD camera aperture. 0 disables DOF; smaller positive values create stronger blur.",
+    )
+    parser.add_argument(
+        "--camera_horizontal_aperture_cm",
+        type=float,
+        default=20.955,
+        help="USD horizontal aperture in cm.",
+    )
     parser.add_argument(
         "--camera_motion",
         choices=("static", "orbit", "dolly_out", "orbit_dolly_out", "sapg_ref_pan"),
@@ -1678,7 +1797,16 @@ def main() -> None:
         )
         print(f"[diag] rectangular env layout = {rectangular_layout_summary}")
 
-    camera = Camera(cfg=_make_camera_cfg(width=width, height=height))
+    camera = Camera(
+        cfg=_make_camera_cfg(
+            width=width,
+            height=height,
+            focal_length_cm=float(my_args.camera_focal_length_cm),
+            focus_distance_m=float(my_args.camera_focus_distance_m),
+            f_stop=float(my_args.camera_f_stop),
+            horizontal_aperture_cm=float(my_args.camera_horizontal_aperture_cm),
+        )
+    )
     env.sim.reset()
 
     recolor_summary = None
@@ -1988,9 +2116,14 @@ def main() -> None:
         "video_fps": my_args.video_fps,
         "capture_every": capture_every,
         "capture_png_steps": sorted(capture_steps),
+        "capture_source": my_args.capture_source,
         "make_video": my_args.make_video,
         "camera_eye": eye.detach().cpu().tolist(),
         "camera_target": target.detach().cpu().tolist(),
+        "camera_focal_length_cm": my_args.camera_focal_length_cm,
+        "camera_focus_distance_m": my_args.camera_focus_distance_m,
+        "camera_f_stop": my_args.camera_f_stop,
+        "camera_horizontal_aperture_cm": my_args.camera_horizontal_aperture_cm,
         "camera_motion": my_args.camera_motion,
         "camera_orbit_deg": my_args.camera_orbit_deg,
         "camera_dolly_scale": my_args.camera_dolly_scale,
@@ -2185,7 +2318,17 @@ def main() -> None:
         # first frame after a camera move can use the previous camera pose.
         for _ in range(max(1, my_args.camera_render_warmup_frames)):
             env.sim.render()
-        frame = _capture_rgb(camera, dt=policy_dt)
+        if my_args.capture_source == "viewport":
+            frame = _capture_viewport_rgb(
+                camera_path="/World/RecordCamera",
+                output_dir=out_dir,
+                step_i=step_i,
+                width=width,
+                height=height,
+                samples_per_pixel=int(my_args.render_samples_per_pixel),
+            )
+        else:
+            frame = _capture_rgb(camera, dt=policy_dt)
         render_ms = (time.perf_counter() - capture_t0) * 1000.0
         if frame is None:
             print(f"[warning] no RGB frame at step {step_i}")
