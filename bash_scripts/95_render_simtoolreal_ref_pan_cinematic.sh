@@ -28,16 +28,22 @@ MAKE_VIDEO="${MAKE_VIDEO:-0}"
 CAPTURE_PNG_STEPS="${CAPTURE_PNG_STEPS:-0,60,180,360,600,900,1200}"
 OUT_DIR="${OUT_DIR:-local_logs/simtoolreal_ref_pan_cinematic_visual_probe}"
 
-FLOOR_STYLE="${FLOOR_STYLE:-nvidia_precast_concrete_warm_gray}"
+FLOOR_STYLE="${FLOOR_STYLE:-nvidia_precast_concrete_gray}"
 TABLE_COLOR_R="${TABLE_COLOR_R:-0.50}"
 TABLE_COLOR_G="${TABLE_COLOR_G:-0.32}"
 TABLE_COLOR_B="${TABLE_COLOR_B:-0.18}"
 SKY_STYLE="${SKY_STYLE:-blue_dome}"
-SKY_COLOR_R="${SKY_COLOR_R:-0.53}"
-SKY_COLOR_G="${SKY_COLOR_G:-0.81}"
-SKY_COLOR_B="${SKY_COLOR_B:-0.98}"
-BACKDROP_STYLE="${BACKDROP_STYLE:-none}"
-LIGHTING_STYLE="${LIGHTING_STYLE:-none}"
+SKY_COLOR_R="${SKY_COLOR_R:-0.60}"
+SKY_COLOR_G="${SKY_COLOR_G:-0.74}"
+SKY_COLOR_B="${SKY_COLOR_B:-0.90}"
+BACKDROP_STYLE="${BACKDROP_STYLE:-gradient_sky}"
+BACKDROP_COLOR_R="${BACKDROP_COLOR_R:-0.42}"
+BACKDROP_COLOR_G="${BACKDROP_COLOR_G:-0.62}"
+BACKDROP_COLOR_B="${BACKDROP_COLOR_B:-0.82}"
+BACKDROP_DISTANCE="${BACKDROP_DISTANCE:-5.0}"
+BACKDROP_HEIGHT="${BACKDROP_HEIGHT:-18.0}"
+BACKDROP_EXTENT_MARGIN="${BACKDROP_EXTENT_MARGIN:-10.0}"
+LIGHTING_STYLE="${LIGHTING_STYLE:-single_sun}"
 
 VIDEO_ARGS=()
 if [[ "${MAKE_VIDEO}" == "1" ]]; then
@@ -47,10 +53,10 @@ fi
 LIGHTING_ARGS=(--lighting_style "${LIGHTING_STYLE}")
 if [[ "${LIGHTING_STYLE}" == "single_sun" ]]; then
   LIGHTING_ARGS+=(
-    --default_light_intensity "${DEFAULT_LIGHT_INTENSITY:-3}"
-    --single_sun_exposure "${SINGLE_SUN_EXPOSURE:-9.5}"
-    --single_sun_angle "${SINGLE_SUN_ANGLE:-0.2}"
-    --single_sun_color_temperature "${SINGLE_SUN_COLOR_TEMPERATURE:-5200}"
+    --default_light_intensity "${DEFAULT_LIGHT_INTENSITY:-900}"
+    --single_sun_exposure "${SINGLE_SUN_EXPOSURE:-6.8}"
+    --single_sun_angle "${SINGLE_SUN_ANGLE:-0.45}"
+    --single_sun_color_temperature "${SINGLE_SUN_COLOR_TEMPERATURE:-6000}"
     --single_sun_yaw_offset_deg "${SINGLE_SUN_YAW_OFFSET_DEG:-90}"
   )
 fi
@@ -86,6 +92,10 @@ fi
   --sky_style "${SKY_STYLE}" \
   --sky_color "${SKY_COLOR_R}" "${SKY_COLOR_G}" "${SKY_COLOR_B}" \
   --backdrop_style "${BACKDROP_STYLE}" \
+  --backdrop_color "${BACKDROP_COLOR_R}" "${BACKDROP_COLOR_G}" "${BACKDROP_COLOR_B}" \
+  --backdrop_distance "${BACKDROP_DISTANCE}" \
+  --backdrop_height "${BACKDROP_HEIGHT}" \
+  --backdrop_extent_margin "${BACKDROP_EXTENT_MARGIN}" \
   "${LIGHTING_ARGS[@]}" \
   --camera_motion sapg_ref_pan \
   --sapg_ref_anchor_env -1 \

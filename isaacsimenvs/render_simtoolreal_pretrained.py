@@ -933,7 +933,9 @@ def _apply_single_sun_lighting(
         intensity=1.0,
         exposure=float(exposure),
         angle=float(angle),
-        color=(1.0, 0.92, 0.78),
+        # Keep the key light warm enough to read as sunlight, but avoid the
+        # orange/pink cast that made the white robot and object colors look flat.
+        color=(1.0, 0.97, 0.90),
         enable_color_temperature=True,
         color_temperature=float(color_temperature),
     )
@@ -1114,15 +1116,16 @@ def _apply_backdrop_walls(
             z_center,
         )
         width = (span_x**2 + span_y**2) ** 0.5 + 2.0 * float(extent_margin)
-        # Subtle synthetic sky for camera sensors that do not show the DomeLight
-        # texture reliably.  Keep the horizon pale and make the upper band bluer;
-        # this reads less like a flat blue wall after video color grading.
-        bands = [
-            (0, (0.84, 0.86, 0.86)),
-            (1, (0.72, 0.80, 0.88)),
-            (2, (0.58, 0.72, 0.88)),
-            (3, (0.42, 0.62, 0.86)),
-        ]
+        # Synthetic sky for camera sensors that do not show the DomeLight
+        # texture reliably.  Use --backdrop_color as the top color, then fade
+        # down to a pale horizon so the backdrop reads like atmosphere instead
+        # of a flat blue wall.
+        top = [float(v) for v in color]
+        horizon = [0.90, 0.93, 0.94]
+        band_colors = []
+        for alpha in (0.0, 0.28, 0.62, 1.0):
+            band_colors.append(tuple((1.0 - alpha) * h + alpha * t for h, t in zip(horizon, top)))
+        bands = list(enumerate(band_colors))
         walls = []
         for band_idx, band_color in bands:
             band_height = float(height) / len(bands)
