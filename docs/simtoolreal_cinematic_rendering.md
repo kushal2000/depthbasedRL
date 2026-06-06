@@ -352,3 +352,54 @@ Current lighting takeaway:
 - Use a side-biased low sun to create the reference-like daylight/shadow cue.
 - Do not drive sun exposure alone; pair stronger sun with more sky/default fill and a small negative output exposure, otherwise the table/floor overexposes and the robot colors flatten.
 - For final videos, prefer `01_side_sun_softened` unless the video needs a more dramatic hero-shot feel, in which case use `02_golden_contrast_balanced`.
+
+## Shorter Shadows And Grey/White Floor
+
+The low side-sun variants above had the right sunlit feel, but the light was too close to the horizon and created very long shadows. The script now supports an explicit sun elevation override:
+
+- `SINGLE_SUN_ELEVATION_DEG=...`
+- This controls sun height above the horizon.
+- `SINGLE_SUN_ANGLE` remains the angular size/softness of the sun, not the sun height.
+
+The greige floor wrapper also now defaults to `BACKDROP_GRADIENT_BANDS=16` so final videos do not accidentally use the coarse 4-band synthetic sky. For tighter lighting/floor comparisons, use:
+
+```bash
+bash_scripts/102_probe_simtoolreal_overhead_sun_gray_floors.sh
+```
+
+Useful probe outputs:
+
+- `local_logs/2026-06-06_02-14-03_simtoolreal_shorter_shadow_floor_probe/contact_sheet_step_0300.png`
+- `local_logs/2026-06-06_02-21-31_simtoolreal_overhead_sun_gray_floor_probe/contact_sheet_step_0300.png`
+
+Result:
+
+- Brown/sand-like floors blend too much with the table and make the scene read flatter.
+- The best non-brown direction so far is `04_soft_concrete_elev55`: light grey/white concrete floor, explicit 55 degree sun elevation, shorter shadows, and enough shadow contrast to keep depth cues.
+- The visible horizon is now mainly the synthetic floor/backdrop boundary, not the old coarse sky banding.
+
+Current short-shadow 20s candidate:
+
+`local_logs/2026-06-06_02-25-40_simtoolreal_ref_pan_soft_concrete_elev55_short_shadows_20s/rollout.mp4`
+
+Exact command:
+
+```bash
+OUT_DIR=local_logs/$(date +%F_%H-%M-%S)_simtoolreal_ref_pan_soft_concrete_elev55_short_shadows_20s \
+  MAKE_VIDEO=1 STEPS=1200 CAPTURE_PNG_STEPS=0,300,600,900,1200 \
+  BACKDROP_GRADIENT_BANDS=32 \
+  FLOOR_STYLE=soft_concrete_pbr_tiles \
+  FLOOR_COLOR_R=0.58 FLOOR_COLOR_G=0.58 FLOOR_COLOR_B=0.55 \
+  FLOOR_TILE_COUNT=1 FLOOR_TILE_SIZE=120 FLOOR_TILE_GAP=0 \
+  FLOOR_TEXTURE_SCALE=8.0 FLOOR_ROUGHNESS=0.92 FLOOR_NORMAL_STRENGTH=0.05 FLOOR_SPECULAR_LEVEL=0.04 \
+  SINGLE_SUN_ELEVATION_DEG=55 \
+  SINGLE_SUN_EXPOSURE=9.35 \
+  SINGLE_SUN_ANGLE=0.34 \
+  SINGLE_SUN_COLOR_TEMPERATURE=5250 \
+  SINGLE_SUN_COLOR_R=1.00 SINGLE_SUN_COLOR_G=0.97 SINGLE_SUN_COLOR_B=0.90 \
+  SINGLE_SUN_YAW_OFFSET_DEG=105 \
+  DEFAULT_LIGHT_INTENSITY=440 \
+  SKY_DOME_INTENSITY=1400 \
+  IMAGE_EXPOSURE=-0.18 \
+  bash_scripts/98_render_simtoolreal_ref_pan_cinematic_greige_floor.sh
+```

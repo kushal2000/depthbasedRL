@@ -1025,6 +1025,7 @@ def _apply_single_sun_lighting(
     color_temperature: float = 5200.0,
     yaw_offset_deg: float = 0.0,
     color: tuple[float, float, float] = (1.0, 0.97, 0.90),
+    elevation_deg: float | None = None,
 ) -> dict[str, Any]:
     """Add one directional sun light without the overexposing key/fill stack."""
     import isaaclab.sim as sim_utils
@@ -1038,6 +1039,40 @@ def _apply_single_sun_lighting(
             aw * by - ax * bz + ay * bw + az * bx,
             aw * bz + ax * by - ay * bx + az * bw,
         )
+
+    def quat_rotate_wxyz(q, v):
+        qv = (0.0, float(v[0]), float(v[1]), float(v[2]))
+        qc = (q[0], -q[1], -q[2], -q[3])
+        rotated = quat_mul_wxyz(quat_mul_wxyz(q, qv), qc)
+        return rotated[1:]
+
+    def normalize(v):
+        norm = math.sqrt(sum(float(x) * float(x) for x in v))
+        if norm <= 1e-8:
+            return (0.0, 0.0, 0.0)
+        return tuple(float(x) / norm for x in v)
+
+    def quat_from_vectors_wxyz(v_from, v_to):
+        v_from = normalize(v_from)
+        v_to = normalize(v_to)
+        dot = max(-1.0, min(1.0, sum(a * b for a, b in zip(v_from, v_to))))
+        if dot < -0.999999:
+            # Pick any axis perpendicular to v_from.
+            axis = normalize((1.0, 0.0, 0.0) if abs(v_from[0]) < 0.9 else (0.0, 1.0, 0.0))
+            axis = normalize(
+                (
+                    v_from[1] * axis[2] - v_from[2] * axis[1],
+                    v_from[2] * axis[0] - v_from[0] * axis[2],
+                    v_from[0] * axis[1] - v_from[1] * axis[0],
+                )
+            )
+            return (0.0, axis[0], axis[1], axis[2])
+        cross = (
+            v_from[1] * v_to[2] - v_from[2] * v_to[1],
+            v_from[2] * v_to[0] - v_from[0] * v_to[2],
+            v_from[0] * v_to[1] - v_from[1] * v_to[0],
+        )
+        return normalize((1.0 + dot, cross[0], cross[1], cross[2]))
 
     sun = sim_utils.DistantLightCfg(
         intensity=1.0,
@@ -1053,6 +1088,20 @@ def _apply_single_sun_lighting(
     yaw_rad = math.radians(float(yaw_offset_deg))
     yaw_orientation = (math.cos(0.5 * yaw_rad), 0.0, 0.0, math.sin(0.5 * yaw_rad))
     orientation = quat_mul_wxyz(yaw_orientation, base_orientation)
+    if elevation_deg is not None:
+        # Isaac distant lights emit along local -Z.  The old base orientation is
+        # intentionally preserved unless this override is passed.
+        old_direction = normalize(quat_rotate_wxyz(orientation, (0.0, 0.0, -1.0)))
+        horizontal = normalize((old_direction[0], old_direction[1], 0.0))
+        elevation_rad = math.radians(float(elevation_deg))
+        desired_direction = normalize(
+            (
+                horizontal[0] * math.cos(elevation_rad),
+                horizontal[1] * math.cos(elevation_rad),
+                -abs(math.sin(elevation_rad)),
+            )
+        )
+        orientation = quat_from_vectors_wxyz((0.0, 0.0, -1.0), desired_direction)
     sun.func("/World/CinematicSingleSun", sun, orientation=orientation)
     return {
         "style": "single_sun",
@@ -1065,6 +1114,7 @@ def _apply_single_sun_lighting(
                 "color_temperature": float(color_temperature),
                 "color": [float(v) for v in color],
                 "yaw_offset_deg": float(yaw_offset_deg),
+                "elevation_deg": None if elevation_deg is None else float(elevation_deg),
                 "orientation_wxyz": list(orientation),
             }
         ],
@@ -1748,6 +1798,12 @@ def main() -> None:
     parser.add_argument("--single_sun_color_temperature", type=float, default=5200.0)
     parser.add_argument("--single_sun_color", type=float, nargs=3, default=(1.0, 0.97, 0.90))
     parser.add_argument(
+        "--single_sun_elevation_deg",
+        type=float,
+        default=None,
+        help="Optional sun elevation above horizon in degrees. If unset, preserves the historical fixed orientation.",
+    )
+    parser.add_argument(
         "--single_sun_yaw_offset_deg",
         type=float,
         default=0.0,
@@ -2319,6 +2375,9 @@ def main() -> None:
             color_temperature=float(my_args.single_sun_color_temperature),
             yaw_offset_deg=float(my_args.single_sun_yaw_offset_deg),
             color=tuple(float(v) for v in my_args.single_sun_color),
+            elevation_deg=None
+            if my_args.single_sun_elevation_deg is None
+            else float(my_args.single_sun_elevation_deg),
         )
         print(f"[render_simtoolreal_pretrained] applied single-sun lighting: {lighting_summary}")
 
@@ -2497,6 +2556,9 @@ def main() -> None:
         "single_sun_angle": float(my_args.single_sun_angle),
         "single_sun_color_temperature": float(my_args.single_sun_color_temperature),
         "single_sun_color": list(my_args.single_sun_color),
+        "single_sun_elevation_deg": None
+        if my_args.single_sun_elevation_deg is None
+        else float(my_args.single_sun_elevation_deg),
         "single_sun_yaw_offset_deg": float(my_args.single_sun_yaw_offset_deg),
         "hide_goal_viz": bool(my_args.hide_goal_viz),
         "goal_color": list(my_args.goal_color),

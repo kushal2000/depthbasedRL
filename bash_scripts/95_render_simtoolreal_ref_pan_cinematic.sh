@@ -86,6 +86,9 @@ if [[ "${LIGHTING_STYLE}" == "single_sun" ]]; then
     --single_sun_color "${SINGLE_SUN_COLOR_R:-1.0}" "${SINGLE_SUN_COLOR_G:-0.97}" "${SINGLE_SUN_COLOR_B:-0.90}"
     --single_sun_yaw_offset_deg "${SINGLE_SUN_YAW_OFFSET_DEG:-70}"
   )
+  if [[ -n "${SINGLE_SUN_ELEVATION_DEG:-}" ]]; then
+    LIGHTING_ARGS+=(--single_sun_elevation_deg "${SINGLE_SUN_ELEVATION_DEG}")
+  fi
 fi
 if [[ -n "${DEFAULT_LIGHT_INTENSITY}" ]]; then
   LIGHTING_ARGS+=(--default_light_intensity "${DEFAULT_LIGHT_INTENSITY}")
