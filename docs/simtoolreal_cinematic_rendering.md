@@ -419,3 +419,64 @@ OUT_DIR=local_logs/$(date +%F_%H-%M-%S)_simtoolreal_ref_pan_soft_concrete_elev55
   IMAGE_EXPOSURE=-0.18 \
   bash_scripts/98_render_simtoolreal_ref_pan_cinematic_greige_floor.sh
 ```
+
+## 2026-06-06 Lighting Polish Probe
+
+Branch: `2026-06-06_Tyler_SimVideos_LightingPolish`
+
+Goal: preserve the accepted soft-concrete/short-shadow look, then make small improvements to table/floor separation, sky contrast, and shadow depth without returning to the overly long side-sun shadows.
+
+Probe command:
+
+```bash
+STEPS=300 CAPTURE_PNG_STEPS=0,150,300 \
+  bash_scripts/103_probe_simtoolreal_lighting_polish.sh
+```
+
+Probe output:
+
+`local_logs/2026-06-06_02-43-30_simtoolreal_lighting_polish_probe/`
+
+Review sheets:
+
+- `contact_sheet_step_0000.png`
+- `contact_sheet_step_0150.png`
+- `contact_sheet_step_0300.png`
+
+Finding:
+
+- `04_elev50_desaturated_table` is the best polish candidate. It keeps the light grey/white soft-concrete floor, lowers the sun from 55 to 50 degrees for slightly clearer depth cues, desaturates the table, and makes the gradient backdrop a little more blue/grey.
+- The change is intentionally subtle. It is more readable and less tan/yellow than the accepted `soft_concrete_elev55` candidate, but it does not solve the remaining synthetic horizon/backdrop limitation.
+
+Current polished 20s candidate:
+
+`local_logs/2026-06-06_02-47-46_simtoolreal_ref_pan_polished_desat_table_elev50_20s/rollout.mp4`
+
+Comparison sheet against the previously accepted short-shadow candidate:
+
+`local_logs/2026-06-06_video_comparisons/polished_elev50_vs_accepted_elev55_contact.png`
+
+Exact command:
+
+```bash
+OUT_DIR=local_logs/$(date +%F_%H-%M-%S)_simtoolreal_ref_pan_polished_desat_table_elev50_20s \
+  MAKE_VIDEO=1 STEPS=1200 CAPTURE_PNG_STEPS=0,300,600,900,1200 \
+  BACKDROP_GRADIENT_BANDS=32 \
+  FLOOR_STYLE=soft_concrete_pbr_tiles \
+  FLOOR_COLOR_R=0.57 FLOOR_COLOR_G=0.57 FLOOR_COLOR_B=0.54 \
+  FLOOR_TILE_COUNT=1 FLOOR_TILE_SIZE=120 FLOOR_TILE_GAP=0 \
+  FLOOR_TEXTURE_SCALE=8.0 FLOOR_ROUGHNESS=0.92 FLOOR_NORMAL_STRENGTH=0.05 FLOOR_SPECULAR_LEVEL=0.04 \
+  TABLE_COLOR_R=0.45 TABLE_COLOR_G=0.34 TABLE_COLOR_B=0.24 \
+  BACKDROP_COLOR_R=0.24 BACKDROP_COLOR_G=0.46 BACKDROP_COLOR_B=0.75 \
+  BACKDROP_HORIZON_COLOR_R=0.62 BACKDROP_HORIZON_COLOR_G=0.73 BACKDROP_HORIZON_COLOR_B=0.84 \
+  SINGLE_SUN_ELEVATION_DEG=50 \
+  SINGLE_SUN_EXPOSURE=9.45 \
+  SINGLE_SUN_ANGLE=0.32 \
+  SINGLE_SUN_COLOR_TEMPERATURE=5200 \
+  SINGLE_SUN_COLOR_R=1.00 SINGLE_SUN_COLOR_G=0.97 SINGLE_SUN_COLOR_B=0.89 \
+  SINGLE_SUN_YAW_OFFSET_DEG=105 \
+  DEFAULT_LIGHT_INTENSITY=430 \
+  SKY_DOME_INTENSITY=1350 \
+  IMAGE_EXPOSURE=-0.15 \
+  bash_scripts/98_render_simtoolreal_ref_pan_cinematic_greige_floor.sh
+```
