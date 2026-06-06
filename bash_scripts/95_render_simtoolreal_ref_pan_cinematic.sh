@@ -189,6 +189,9 @@ fi
   --sapg_ref_end_eye_grid_scale -0.8 -1.2 0.5 \
   --camera_render_warmup_frames "${CAMERA_RENDER_WARMUP_FRAMES:-1}" \
   --image_exposure "${IMAGE_EXPOSURE:-0.0}" \
+  --image_contrast "${IMAGE_CONTRAST:-1.0}" \
+  --image_saturation "${IMAGE_SATURATION:-1.0}" \
+  --image_gamma "${IMAGE_GAMMA:-1.0}" \
   --object_color_saturation "${OBJECT_COLOR_SATURATION:-1.6}" \
   --object_color_value_scale "${OBJECT_COLOR_VALUE_SCALE:-0.82}" \
   --no_timestamp_out_dir \

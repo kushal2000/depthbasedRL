@@ -480,3 +480,86 @@ OUT_DIR=local_logs/$(date +%F_%H-%M-%S)_simtoolreal_ref_pan_polished_desat_table
   IMAGE_EXPOSURE=-0.15 \
   bash_scripts/98_render_simtoolreal_ref_pan_cinematic_greige_floor.sh
 ```
+
+## 2026-06-06 Refined Contrast / Object Pop Candidate
+
+Branch: `2026-06-06_Tyler_SimVideos_LightingRefine`
+
+What changed from the polished candidate:
+
+- `bash_scripts/95_render_simtoolreal_ref_pan_cinematic.sh` now exposes the existing Python output-grade controls: `IMAGE_CONTRAST`, `IMAGE_SATURATION`, and `IMAGE_GAMMA`.
+- New probe script: `bash_scripts/104_probe_simtoolreal_lighting_refine.sh`.
+- New final-candidate wrapper: `bash_scripts/105_render_simtoolreal_ref_pan_refined_crisper_objectpop.sh`.
+
+Probe command:
+
+```bash
+STEPS=300 CAPTURE_PNG_STEPS=0,150,300 \
+  bash_scripts/104_probe_simtoolreal_lighting_refine.sh
+```
+
+Probe output:
+
+`local_logs/2026-06-06_02-55-59_simtoolreal_lighting_refine_probe/`
+
+Review sheets:
+
+- `contact_sheet_step_0000.png`
+- `contact_sheet_step_0150.png`
+- `contact_sheet_step_0300.png`
+
+Finding:
+
+- `05_slightly_crisper_sun` had the best shadow readability.
+- `03_darker_table_object_pop` had the best conservative table/object contrast.
+- The final candidate combines those settings: darker/desaturated table, slightly stronger object colors, 48 degree sun elevation, slightly crisper sun angle, and modest output grading.
+
+Current refined 20s candidate:
+
+`local_logs/2026-06-06_03-01-41_simtoolreal_ref_pan_refined_crisper_objectpop_20s/rollout.mp4`
+
+Comparison sheet against the previous polished and accepted candidates:
+
+`local_logs/2026-06-06_video_comparisons/refined_vs_polished_vs_accepted_contact.png`
+
+Quick regenerate command:
+
+```bash
+bash_scripts/105_render_simtoolreal_ref_pan_refined_crisper_objectpop.sh
+```
+
+Exact command:
+
+```bash
+OUT_DIR=local_logs/$(date +%F_%H-%M-%S)_simtoolreal_ref_pan_refined_crisper_objectpop_20s \
+  MAKE_VIDEO=1 STEPS=1200 CAPTURE_PNG_STEPS=0,300,600,900,1200 \
+  BACKDROP_GRADIENT_BANDS=32 \
+  FLOOR_STYLE=soft_concrete_pbr_tiles \
+  FLOOR_COLOR_R=0.56 FLOOR_COLOR_G=0.56 FLOOR_COLOR_B=0.53 \
+  FLOOR_TILE_COUNT=1 FLOOR_TILE_SIZE=120 FLOOR_TILE_GAP=0 \
+  FLOOR_TEXTURE_SCALE=8.0 FLOOR_ROUGHNESS=0.92 FLOOR_NORMAL_STRENGTH=0.05 FLOOR_SPECULAR_LEVEL=0.04 \
+  TABLE_COLOR_R=0.40 TABLE_COLOR_G=0.30 TABLE_COLOR_B=0.22 \
+  BACKDROP_COLOR_R=0.24 BACKDROP_COLOR_G=0.46 BACKDROP_COLOR_B=0.75 \
+  BACKDROP_HORIZON_COLOR_R=0.60 BACKDROP_HORIZON_COLOR_G=0.72 BACKDROP_HORIZON_COLOR_B=0.84 \
+  OBJECT_COLOR_SATURATION=1.75 \
+  OBJECT_COLOR_VALUE_SCALE=0.88 \
+  SINGLE_SUN_ELEVATION_DEG=48 \
+  SINGLE_SUN_EXPOSURE=9.62 \
+  SINGLE_SUN_ANGLE=0.24 \
+  SINGLE_SUN_COLOR_TEMPERATURE=5150 \
+  SINGLE_SUN_COLOR_R=1.00 SINGLE_SUN_COLOR_G=0.965 SINGLE_SUN_COLOR_B=0.87 \
+  SINGLE_SUN_YAW_OFFSET_DEG=105 \
+  DEFAULT_LIGHT_INTENSITY=390 \
+  SKY_DOME_INTENSITY=1260 \
+  IMAGE_EXPOSURE=-0.20 \
+  IMAGE_CONTRAST=1.08 \
+  IMAGE_SATURATION=1.06 \
+  IMAGE_GAMMA=0.98 \
+  bash_scripts/98_render_simtoolreal_ref_pan_cinematic_greige_floor.sh
+```
+
+Assessment:
+
+- This is the strongest current option if the goal is readable robot/object/table contrast. The object colors pop more, and the table is less washed into the floor.
+- The tradeoff is that it is a little more contrast-graded and less soft than the polished `elev50_desat_table` candidate.
+- The same remaining limitation still applies: the background is a synthetic gradient wall/backdrop, not a true visible HDRI sky.
