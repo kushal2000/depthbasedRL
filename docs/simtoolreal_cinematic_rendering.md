@@ -382,6 +382,22 @@ Current short-shadow 20s candidate:
 
 `local_logs/2026-06-06_02-25-40_simtoolreal_ref_pan_soft_concrete_elev55_short_shadows_20s/rollout.mp4`
 
+Comparison reference:
+
+`local_logs/2026-06-05_video_comparisons/pretraining_10_rollouts/01_seed43.mp4`
+
+Matched-frame contact sheet:
+
+`local_logs/2026-06-06_video_comparisons/soft_concrete_elev55_vs_seed43_contact.png`
+
+Comparison notes:
+
+- The new `soft_concrete_elev55` candidate has shorter, less side-biased shadows than `01_seed43`.
+- The new floor is closer to the desired white/grey concrete direction and avoids the old debug-grid look.
+- `01_seed43` has stronger floor/sky contrast and the grid gives useful depth cues, but it looks more synthetic and less like a clean cinematic floor.
+- The new candidate is cleaner overall, but still has two weaknesses: the table is still close to the floor/table color family, and the synthetic horizon remains visible.
+- If iterating further, the highest-value changes are to make the table slightly darker/desaturated brown for stronger floor separation, tune the backdrop horizon color lower/darker, and try one more sun elevation around 45-50 degrees with the same soft-concrete floor.
+
 Exact command:
 
 ```bash
