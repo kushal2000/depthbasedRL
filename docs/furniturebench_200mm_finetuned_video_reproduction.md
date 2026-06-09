@@ -352,10 +352,10 @@ shows the diagonal wall/cutoff artifact.
 This preserves visible reset variation while avoiding the initial fixture/leg
 collision and the gray left-side backdrop artifact.
 
-Command:
+Current command:
 
 ```bash
-OUT_DIR=local_logs/furniturebench_200mm_lighting_refine_reset_center_fix_leg_x018_20s_seed0 \
+OUT_DIR=local_logs/furniturebench_200mm_refined_fixed_gradient_20s_seed0 \
 SEED=0 \
 STEPS=1200 \
 CAPTURE_PNG_STEPS=0,300,600,900,1200 \
@@ -367,13 +367,42 @@ bash_scripts/96_render_furniturebench_200mm_finetuned.sh
 
 Output:
 
-`local_logs/2026-06-09_13-48-59_furniturebench_200mm_lighting_refine_reset_center_fix_leg_x018_20s_seed0/rollout.mp4`
+`local_logs/2026-06-09_14-31-22_furniturebench_200mm_refined_fixed_gradient_20s_seed0/rollout.mp4`
 
 Review strip:
 
-`local_logs/2026-06-09_13-48-59_furniturebench_200mm_lighting_refine_reset_center_fix_leg_x018_20s_seed0/review_strip.png`
+`local_logs/2026-06-09_14-31-22_furniturebench_200mm_refined_fixed_gradient_20s_seed0/review_strip.png`
 
 Observed result:
 
 - Episode 1 completed all `10/10` goals and reset at step `663`.
 - Episode 2 reached `9/10` by step `1200`.
+
+Current wrapper defaults:
+
+- `BACKDROP_STYLE=fixed_gradient_sky`
+- `BACKDROP_WIDTH=36`
+- `BACKDROP_Y=2.6`
+- `BACKDROP_COLOR=(0.24, 0.46, 0.75)`
+- `BACKDROP_HORIZON_COLOR=(0.60, 0.72, 0.84)`
+- `DEFAULT_LIGHT_INTENSITY=390`
+- `SKY_DOME_INTENSITY=1260`
+- `SINGLE_SUN_EXPOSURE=9.62`
+- `SINGLE_SUN_ANGLE=0.24`
+- `SINGLE_SUN_COLOR_TEMPERATURE=5150`
+- `SINGLE_SUN_ELEVATION_DEG=48`
+- `SINGLE_SUN_YAW_OFFSET_DEG=105`
+- `IMAGE_EXPOSURE=-0.20`
+- `IMAGE_CONTRAST=1.08`
+- `IMAGE_SATURATION=1.06`
+- `IMAGE_GAMMA=0.98`
+
+The exact SimToolReal panning backdrop (`gradient_sky`) is still available via
+`BACKDROP_STYLE=gradient_sky`, but for the close straight-on FurnitureBench
+camera it can reveal a gray diagonal wall/cutoff at the image edge. The fixed
+camera-facing gradient is the current safer default for this script.
+
+If the fixed backdrop ever needs to be tested with multiple envs, use
+`CAMERA_ENV_ID` with `ENV_SPACING_X/Y` and `GRID_COLS`. The camera and fixed
+backdrop both use the selected env origin, so the camera pose remains identical
+relative to that env's robot/table.

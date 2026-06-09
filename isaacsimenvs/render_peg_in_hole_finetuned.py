@@ -38,6 +38,10 @@ def _parse_step_list(value: str) -> list[int]:
 def _apply_200mm_furniturebench_overrides(env_cfg, args) -> None:
     """Match the fig4 200 mm long-leg screwing finetune setup."""
     env_cfg.scene.num_envs = int(args.num_envs)
+    if args.env_spacing_xy is not None:
+        env_cfg.scene.env_spacing = max(float(args.env_spacing_xy[0]), float(args.env_spacing_xy[1]))
+    else:
+        env_cfg.scene.env_spacing = float(args.env_spacing)
     if args.robot_urdf:
         robot_urdf = Path(args.robot_urdf).expanduser()
         if not robot_urdf.exists():
@@ -139,7 +143,7 @@ def _camera_eye_target(env, args):
     """
     import torch
 
-    env_origin = env.scene.env_origins[0]
+    env_origin = _camera_env_origin(env, args)
     if args.camera_xyz is not None and args.camera_forward_world is not None:
         eye_local = torch.tensor(args.camera_xyz, device=env.device, dtype=torch.float32)
         forward_local = torch.tensor(
@@ -161,6 +165,14 @@ def _camera_eye_target(env, args):
     return env_origin + eye_local, env_origin + target_local
 
 
+def _camera_env_origin(env, args):
+    camera_env_id = int(args.camera_env_id)
+    num_envs = int(env.scene.env_origins.shape[0])
+    if camera_env_id < 0 or camera_env_id >= num_envs:
+        raise ValueError(f"--camera_env_id must be in [0, {num_envs - 1}], got {camera_env_id}")
+    return env.scene.env_origins[camera_env_id]
+
+
 def _apply_fixed_camera_gradient_backdrop(env, args) -> dict[str, Any]:
     """Add a camera-facing gradient backdrop for the single-env furniture shot.
 
@@ -172,7 +184,7 @@ def _apply_fixed_camera_gradient_backdrop(env, args) -> dict[str, Any]:
     from isaaclab.sim.utils import get_current_stage
 
     stage = get_current_stage()
-    origin = env.scene.env_origins[0].detach().cpu()
+    origin = _camera_env_origin(env, args).detach().cpu()
     root_path = "/World/FurnitureBenchFixedCameraBackdrop"
     UsdGeom.Xform.Define(stage, root_path)
 
@@ -228,6 +240,7 @@ def _style_scene_for_video(env, args) -> dict[str, Any]:
         _apply_sky_background,
         _set_default_world_light_intensity,
         _style_prim_trees,
+        _rectangular_env_origins,
     )
 
     summary: dict[str, Any] = {}
@@ -280,8 +293,28 @@ def _style_scene_for_video(env, args) -> dict[str, Any]:
     if args.backdrop_style == "fixed_gradient_sky":
         summary["backdrop"] = _apply_fixed_camera_gradient_backdrop(env, args)
     else:
+        backdrop_env = env
+        if int(args.backdrop_reference_num_envs) > 0:
+            class _SceneProxy:
+                pass
+
+            class _EnvProxy:
+                pass
+
+            scene_proxy = _SceneProxy()
+            scene_proxy.env_origins = _rectangular_env_origins(
+                int(args.backdrop_reference_num_envs),
+                float(args.backdrop_reference_env_spacing_xy[0]),
+                float(args.backdrop_reference_env_spacing_xy[1]),
+                device=env.device,
+                grid_cols=int(args.backdrop_reference_grid_cols),
+            )
+            origin = env.scene.env_origins[0].detach()
+            scene_proxy.env_origins = scene_proxy.env_origins + origin
+            backdrop_env = _EnvProxy()
+            backdrop_env.scene = scene_proxy
         summary["backdrop"] = _apply_backdrop_walls(
-            env,
+            backdrop_env,
             style=args.backdrop_style,
             color=tuple(float(v) for v in args.backdrop_color),
             horizon_color=tuple(float(v) for v in args.backdrop_horizon_color),
@@ -320,6 +353,9 @@ def main() -> None:
     parser.add_argument("--rl_device", default="cuda:0")
     parser.add_argument("--out_dir", type=Path, default=Path("local_logs/furniturebench_200mm_finetuned"))
     parser.add_argument("--no_timestamp_out_dir", action="store_true")
+    parser.add_argument("--env_spacing", type=float, default=1.2)
+    parser.add_argument("--env_spacing_xy", type=float, nargs=2, default=None)
+    parser.add_argument("--grid_cols", type=int, default=None)
 
     # The finetune run used rgf=0.1. For videos, default to screwing episodes
     # only so a single-env rollout does not randomly become a free-space goal.
@@ -369,6 +405,7 @@ def main() -> None:
     parser.add_argument("--camera_f_stop", type=float, default=0.0)
     parser.add_argument("--camera_horizontal_aperture_cm", type=float, default=20.955)
     parser.add_argument("--camera_render_warmup_frames", type=int, default=1)
+    parser.add_argument("--camera_env_id", type=int, default=0)
 
     parser.add_argument("--table_color", type=float, nargs=3, default=(0.40, 0.30, 0.22))
     parser.add_argument("--floor_color", type=float, nargs=3, default=(0.56, 0.56, 0.53))
@@ -386,14 +423,17 @@ def main() -> None:
     parser.add_argument(
         "--backdrop_style",
         choices=("none", "blue_wall", "blue_walls", "gradient_sky", "fixed_gradient_sky"),
-        default="fixed_gradient_sky",
+        default="gradient_sky",
     )
     parser.add_argument("--backdrop_color", type=float, nargs=3, default=(0.24, 0.46, 0.75))
-    parser.add_argument("--backdrop_horizon_color", type=float, nargs=3, default=(0.50, 0.66, 0.86))
+    parser.add_argument("--backdrop_horizon_color", type=float, nargs=3, default=(0.60, 0.72, 0.84))
     parser.add_argument("--backdrop_distance", type=float, default=5.0)
     parser.add_argument("--backdrop_height", type=float, default=18.0)
     parser.add_argument("--backdrop_extent_margin", type=float, default=80.0)
     parser.add_argument("--backdrop_gradient_bands", type=int, default=32)
+    parser.add_argument("--backdrop_reference_num_envs", type=int, default=0)
+    parser.add_argument("--backdrop_reference_grid_cols", type=int, default=10)
+    parser.add_argument("--backdrop_reference_env_spacing_xy", type=float, nargs=2, default=(0.8, 2.45))
     parser.add_argument("--backdrop_x", type=float, default=0.0)
     parser.add_argument("--backdrop_y", type=float, default=2.2)
     parser.add_argument("--backdrop_width", type=float, default=14.0)
@@ -474,6 +514,17 @@ def main() -> None:
     mod_name, cls_name = spec.entry_point.split(":")
     env_cls = getattr(importlib.import_module(mod_name), cls_name)
     env = env_cls(cfg=env_cfg)
+    rectangular_layout_summary = None
+    if args.env_spacing_xy is not None:
+        from isaacsimenvs.render_simtoolreal_pretrained import _apply_rectangular_env_layout
+
+        rectangular_layout_summary = _apply_rectangular_env_layout(
+            env,
+            x_spacing=float(args.env_spacing_xy[0]),
+            y_spacing=float(args.env_spacing_xy[1]),
+            grid_cols=args.grid_cols,
+        )
+        print(f"[render_peg_in_hole_finetuned] rectangular env layout = {rectangular_layout_summary}")
 
     camera = None
     if not args.no_render:
@@ -532,6 +583,11 @@ def main() -> None:
         "goal_mode": args.goal_mode,
         "seed": int(args.seed),
         "num_envs": int(args.num_envs),
+        "camera_env_id": int(args.camera_env_id),
+        "env_spacing": float(args.env_spacing),
+        "env_spacing_xy": None if args.env_spacing_xy is None else list(args.env_spacing_xy),
+        "grid_cols": args.grid_cols,
+        "rectangular_layout_summary": rectangular_layout_summary,
         "steps": int(args.steps),
         "train_dr": bool(args.train_dr),
         "random_goal_fraction": float(args.random_goal_fraction),
@@ -566,6 +622,9 @@ def main() -> None:
         "backdrop_style": args.backdrop_style,
         "backdrop_color": list(args.backdrop_color),
         "backdrop_horizon_color": list(args.backdrop_horizon_color),
+        "backdrop_reference_num_envs": int(args.backdrop_reference_num_envs),
+        "backdrop_reference_grid_cols": int(args.backdrop_reference_grid_cols),
+        "backdrop_reference_env_spacing_xy": list(args.backdrop_reference_env_spacing_xy),
         "render_quality_summary": render_quality_summary,
         "runtime_render_summary": runtime_render_summary,
         "style_summary": style_summary,
