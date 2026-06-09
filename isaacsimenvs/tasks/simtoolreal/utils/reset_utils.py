@@ -281,10 +281,12 @@ def _reset_object_pose(env, env_ids: torch.Tensor) -> None:
         quat = fixed[3:].unsqueeze(0).expand(n, -1)
     else:
         noise = torch.empty(n, 3, device=env.device).uniform_(-1.0, 1.0)
+        center_x = float(getattr(cfg, "reset_position_center_x", 0.0))
+        center_y = float(getattr(cfg, "reset_position_center_y", 0.0))
         pos_local = torch.stack(
             (
-                noise[:, 0] * cfg.reset_position_noise_x,
-                noise[:, 1] * cfg.reset_position_noise_y,
+                center_x + noise[:, 0] * cfg.reset_position_noise_x,
+                center_y + noise[:, 1] * cfg.reset_position_noise_y,
                 env._table_z_per_env[env_ids]
                 + cfg.table_object_z_offset
                 + noise[:, 2] * cfg.reset_position_noise_z,

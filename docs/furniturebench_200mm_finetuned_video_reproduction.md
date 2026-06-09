@@ -316,32 +316,46 @@ Visual stack:
 - Image grading:
   exposure `-0.20`, contrast `1.08`, saturation `1.06`, gamma `0.98`
 
-## 2026-06-09 Safer Left/Right Spawn Revision
+## 2026-06-09 Reset-Center Fix And Preferred Lighting-Refine Clip
 
-The first lighting-refine clip still allowed the 200 mm leg and fixture to
-start too close in the worst case. The default wrapper now keeps the fixture
-clearly camera-left/world `-X` and the leg camera-right/world `+X`:
+The earlier wrapper exposed `RESET_POSITION_CENTER_X/Y`, but
+`_reset_object_pose()` was not actually adding these center offsets. As of this
+revision, `ResetCfg` has explicit `reset_position_center_x/y` fields and reset
+sampling uses:
+
+`object_xy = reset_position_center_xy + uniform_noise * reset_position_noise_xy`
+
+The default values for normal training remain `0.0`, so this is backwards
+compatible for existing training configs. For the FurnitureBench video, this
+makes the wrapper's intended left-fixture/right-leg composition real.
+
+The current preferred setup keeps the old good fixture pose range from
+`2026-06-03_Tyler_SimVideosFinetune`, places the leg camera-right/world `+X`,
+and uses a fixed camera-facing gradient backdrop so the left edge no longer
+shows the diagonal wall/cutoff artifact.
 
 - Hole/fixture `x` range:
-  `[-0.130, -0.110] m`
+  `[-0.085, -0.055] m`
 - Hole/fixture `y` range:
   `[-0.075, -0.055] m`
 - Hole/fixture yaw range:
   `±3 deg`
 - Object reset center:
-  `(x=0.160, y=0.070)`
+  `(x=0.180, y=0.070)`
 - Object reset position noise:
   `(0.010, 0.015, 0.005) m`
 - Object reset orientation:
-  yaw-only, `±12 deg`
+  yaw-only, `±8 deg`
+- Backdrop:
+  `fixed_gradient_sky`, a 32-band +Y-facing wall behind the table
 
-This preserves visible reset variation while avoiding the ugly initial
-fixture/leg collisions.
+This preserves visible reset variation while avoiding the initial fixture/leg
+collision and the gray left-side backdrop artifact.
 
 Command:
 
 ```bash
-OUT_DIR=local_logs/furniturebench_200mm_lighting_refine_more_separated_spawn_20s_seed0 \
+OUT_DIR=local_logs/furniturebench_200mm_lighting_refine_reset_center_fix_leg_x018_20s_seed0 \
 SEED=0 \
 STEPS=1200 \
 CAPTURE_PNG_STEPS=0,300,600,900,1200 \
@@ -353,13 +367,13 @@ bash_scripts/96_render_furniturebench_200mm_finetuned.sh
 
 Output:
 
-`local_logs/2026-06-09_13-26-23_furniturebench_200mm_lighting_refine_more_separated_spawn_20s_seed0/rollout.mp4`
+`local_logs/2026-06-09_13-48-59_furniturebench_200mm_lighting_refine_reset_center_fix_leg_x018_20s_seed0/rollout.mp4`
 
 Review strip:
 
-`local_logs/2026-06-09_13-26-23_furniturebench_200mm_lighting_refine_more_separated_spawn_20s_seed0/review_strip.png`
+`local_logs/2026-06-09_13-48-59_furniturebench_200mm_lighting_refine_reset_center_fix_leg_x018_20s_seed0/review_strip.png`
 
 Observed result:
 
-- Episode 1 completed all `10/10` goals at step `961`.
-- Episode 2 was at `0/10` by step `1200`.
+- Episode 1 completed all `10/10` goals and reset at step `663`.
+- Episode 2 reached `9/10` by step `1200`.

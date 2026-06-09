@@ -161,6 +161,63 @@ def _camera_eye_target(env, args):
     return env_origin + eye_local, env_origin + target_local
 
 
+def _apply_fixed_camera_gradient_backdrop(env, args) -> dict[str, Any]:
+    """Add a camera-facing gradient backdrop for the single-env furniture shot.
+
+    The SimToolReal pan renderer uses a diagonal wall sized for a large env grid.
+    For this fixed +Y camera view, that diagonal wall can expose a gray side/cutoff
+    at the left edge.  A simple +Y-facing wall behind the table is more reliable.
+    """
+    from pxr import Gf, UsdGeom
+    from isaaclab.sim.utils import get_current_stage
+
+    stage = get_current_stage()
+    origin = env.scene.env_origins[0].detach().cpu()
+    root_path = "/World/FurnitureBenchFixedCameraBackdrop"
+    UsdGeom.Xform.Define(stage, root_path)
+
+    top = [float(v) for v in args.backdrop_color]
+    horizon = [float(v) for v in args.backdrop_horizon_color]
+    num_bands = max(2, int(args.backdrop_gradient_bands))
+    band_height = float(args.backdrop_height) / num_bands
+    width = float(args.backdrop_width)
+    thickness = 0.04
+    center_x = float(origin[0]) + float(args.backdrop_x)
+    center_y = float(origin[1]) + float(args.backdrop_y)
+    walls = []
+    for band_idx in range(num_bands):
+        alpha = band_idx / max(1, num_bands - 1)
+        color = tuple((1.0 - alpha) * h + alpha * t for h, t in zip(horizon, top))
+        center_z = band_height * (band_idx + 0.5)
+        prim_path = f"{root_path}/Band_{band_idx:02d}"
+        prim = stage.DefinePrim(prim_path, "Cube")
+        cube = UsdGeom.Cube(prim)
+        cube.CreateSizeAttr(1.0)
+        xform = UsdGeom.Xformable(prim)
+        xform.ClearXformOpOrder()
+        xform.AddTranslateOp().Set(Gf.Vec3d(center_x, center_y, center_z))
+        xform.AddScaleOp().Set(Gf.Vec3d(width, thickness, band_height + 0.02))
+        UsdGeom.Gprim(prim).GetDisplayColorAttr().Set([Gf.Vec3f(*color)])
+        walls.append(
+            {
+                "path": prim_path,
+                "translate": [center_x, center_y, center_z],
+                "scale": [width, thickness, band_height + 0.02],
+                "color": list(color),
+            }
+        )
+    return {
+        "style": "fixed_gradient_sky",
+        "applied": True,
+        "x": float(args.backdrop_x),
+        "y": float(args.backdrop_y),
+        "width": float(args.backdrop_width),
+        "height": float(args.backdrop_height),
+        "gradient_bands": int(num_bands),
+        "walls": walls,
+    }
+
+
 def _style_scene_for_video(env, args) -> dict[str, Any]:
     from isaacsimenvs.render_simtoolreal_pretrained import (
         DEFAULT_SOFT_CONCRETE_NORMAL,
@@ -220,16 +277,19 @@ def _style_scene_for_video(env, args) -> dict[str, Any]:
         dynamic_sky_path=None,
     )
     summary["default_light"] = _set_default_world_light_intensity(float(args.default_light_intensity))
-    summary["backdrop"] = _apply_backdrop_walls(
-        env,
-        style=args.backdrop_style,
-        color=tuple(float(v) for v in args.backdrop_color),
-        horizon_color=tuple(float(v) for v in args.backdrop_horizon_color),
-        distance=float(args.backdrop_distance),
-        height=float(args.backdrop_height),
-        extent_margin=float(args.backdrop_extent_margin),
-        gradient_bands=int(args.backdrop_gradient_bands),
-    )
+    if args.backdrop_style == "fixed_gradient_sky":
+        summary["backdrop"] = _apply_fixed_camera_gradient_backdrop(env, args)
+    else:
+        summary["backdrop"] = _apply_backdrop_walls(
+            env,
+            style=args.backdrop_style,
+            color=tuple(float(v) for v in args.backdrop_color),
+            horizon_color=tuple(float(v) for v in args.backdrop_horizon_color),
+            distance=float(args.backdrop_distance),
+            height=float(args.backdrop_height),
+            extent_margin=float(args.backdrop_extent_margin),
+            gradient_bands=int(args.backdrop_gradient_bands),
+        )
     summary["sun"] = _apply_single_sun_lighting(
         exposure=float(args.single_sun_exposure),
         angle=float(args.single_sun_angle),
@@ -266,7 +326,7 @@ def main() -> None:
     parser.add_argument("--random_goal_fraction", type=float, default=0.0)
     parser.add_argument("--goal_xy_obs_noise", type=float, default=0.002)
     parser.add_argument("--goal_yaw_obs_noise_deg", type=float, default=1.0)
-    parser.add_argument("--hole_x_range", type=float, nargs=2, default=(-0.130, -0.110))
+    parser.add_argument("--hole_x_range", type=float, nargs=2, default=(-0.085, -0.055))
     parser.add_argument("--hole_y_range", type=float, nargs=2, default=(-0.08, -0.08))
     parser.add_argument("--hole_yaw_range_deg", type=float, default=0.0)
     parser.add_argument("--train_dr", action=argparse.BooleanOptionalAction, default=True)
@@ -275,13 +335,13 @@ def main() -> None:
     parser.add_argument("--force_only_when_lifted", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--torque_only_when_lifted", action=argparse.BooleanOptionalAction, default=True)
 
-    parser.add_argument("--reset_position_center_x", type=float, default=0.160)
+    parser.add_argument("--reset_position_center_x", type=float, default=0.180)
     parser.add_argument("--reset_position_center_y", type=float, default=0.07)
     parser.add_argument("--reset_position_noise_x", type=float, default=0.010)
     parser.add_argument("--reset_position_noise_y", type=float, default=0.015)
     parser.add_argument("--reset_position_noise_z", type=float, default=0.005)
     parser.add_argument("--reset_orientation_mode", default="yaw")
-    parser.add_argument("--reset_orientation_yaw_range_deg", type=float, default=12.0)
+    parser.add_argument("--reset_orientation_yaw_range_deg", type=float, default=8.0)
     parser.add_argument("--reset_orientation_axis_angle_range_deg", type=float, default=0.0)
     parser.add_argument("--reset_dof_pos_noise_arm", type=float, default=0.1)
     parser.add_argument("--reset_dof_pos_noise_fingers", type=float, default=0.1)
@@ -323,13 +383,20 @@ def main() -> None:
     parser.add_argument("--sky_style", choices=("default", "blue_color", "blue_dome", "hdri", "dynamic_clear_sky"), default="blue_dome")
     parser.add_argument("--sky_color", type=float, nargs=3, default=(0.50, 0.66, 0.86))
     parser.add_argument("--sky_dome_intensity", type=float, default=1260.0)
-    parser.add_argument("--backdrop_style", choices=("none", "blue_wall", "blue_walls", "gradient_sky"), default="gradient_sky")
+    parser.add_argument(
+        "--backdrop_style",
+        choices=("none", "blue_wall", "blue_walls", "gradient_sky", "fixed_gradient_sky"),
+        default="fixed_gradient_sky",
+    )
     parser.add_argument("--backdrop_color", type=float, nargs=3, default=(0.24, 0.46, 0.75))
-    parser.add_argument("--backdrop_horizon_color", type=float, nargs=3, default=(0.60, 0.72, 0.84))
+    parser.add_argument("--backdrop_horizon_color", type=float, nargs=3, default=(0.50, 0.66, 0.86))
     parser.add_argument("--backdrop_distance", type=float, default=5.0)
     parser.add_argument("--backdrop_height", type=float, default=18.0)
     parser.add_argument("--backdrop_extent_margin", type=float, default=80.0)
     parser.add_argument("--backdrop_gradient_bands", type=int, default=32)
+    parser.add_argument("--backdrop_x", type=float, default=0.0)
+    parser.add_argument("--backdrop_y", type=float, default=2.2)
+    parser.add_argument("--backdrop_width", type=float, default=14.0)
     parser.add_argument("--default_light_intensity", type=float, default=390.0)
     parser.add_argument("--single_sun_exposure", type=float, default=9.62)
     parser.add_argument("--single_sun_angle", type=float, default=0.24)
@@ -483,6 +550,10 @@ def main() -> None:
             float(args.reset_position_noise_z),
         ],
         "reset_orientation_mode": str(args.reset_orientation_mode),
+        "reset_orientation_yaw_range_deg": float(args.reset_orientation_yaw_range_deg),
+        "reset_orientation_axis_angle_range_deg": float(
+            args.reset_orientation_axis_angle_range_deg
+        ),
         "camera_eye": list(args.camera_eye),
         "camera_target": list(args.camera_target),
         "camera_xyz": None if args.camera_xyz is None else list(args.camera_xyz),
@@ -492,6 +563,9 @@ def main() -> None:
         ),
         "camera_forward_axis": list(args.camera_forward_axis),
         "camera_target_distance_m": float(args.camera_target_distance_m),
+        "backdrop_style": args.backdrop_style,
+        "backdrop_color": list(args.backdrop_color),
+        "backdrop_horizon_color": list(args.backdrop_horizon_color),
         "render_quality_summary": render_quality_summary,
         "runtime_render_summary": runtime_render_summary,
         "style_summary": style_summary,

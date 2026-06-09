@@ -356,7 +356,9 @@ class RewardCfg:
 class ResetCfg:
     """Initial-state distribution + goal sampling (sampled at every reset)."""
 
-    # Initial object pose noise
+    # Initial object pose center + noise
+    reset_position_center_x: float = 0.0
+    reset_position_center_y: float = 0.0
     reset_position_noise_x: float = 0.1
     reset_position_noise_y: float = 0.1
     reset_position_noise_z: float = 0.02
