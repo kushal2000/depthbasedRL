@@ -315,3 +315,51 @@ Visual stack:
   color `(1.0, 0.965, 0.87)`, elevation `48 deg`, yaw offset `105 deg`
 - Image grading:
   exposure `-0.20`, contrast `1.08`, saturation `1.06`, gamma `0.98`
+
+## 2026-06-09 Safer Left/Right Spawn Revision
+
+The first lighting-refine clip still allowed the 200 mm leg and fixture to
+start too close in the worst case. The default wrapper now keeps the fixture
+clearly camera-left/world `-X` and the leg camera-right/world `+X`:
+
+- Hole/fixture `x` range:
+  `[-0.130, -0.110] m`
+- Hole/fixture `y` range:
+  `[-0.075, -0.055] m`
+- Hole/fixture yaw range:
+  `±3 deg`
+- Object reset center:
+  `(x=0.160, y=0.070)`
+- Object reset position noise:
+  `(0.010, 0.015, 0.005) m`
+- Object reset orientation:
+  yaw-only, `±12 deg`
+
+This preserves visible reset variation while avoiding the ugly initial
+fixture/leg collisions.
+
+Command:
+
+```bash
+OUT_DIR=local_logs/furniturebench_200mm_lighting_refine_more_separated_spawn_20s_seed0 \
+SEED=0 \
+STEPS=1200 \
+CAPTURE_PNG_STEPS=0,300,600,900,1200 \
+MAKE_VIDEO=1 \
+RANDOM_GOAL_FRACTION=0.0 \
+TRAIN_DR=1 \
+bash_scripts/96_render_furniturebench_200mm_finetuned.sh
+```
+
+Output:
+
+`local_logs/2026-06-09_13-26-23_furniturebench_200mm_lighting_refine_more_separated_spawn_20s_seed0/rollout.mp4`
+
+Review strip:
+
+`local_logs/2026-06-09_13-26-23_furniturebench_200mm_lighting_refine_more_separated_spawn_20s_seed0/review_strip.png`
+
+Observed result:
+
+- Episode 1 completed all `10/10` goals at step `961`.
+- Episode 2 was at `0/10` by step `1200`.
