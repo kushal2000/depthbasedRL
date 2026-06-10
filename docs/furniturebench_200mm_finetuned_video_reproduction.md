@@ -419,3 +419,65 @@ If the fixed backdrop ever needs to be tested with multiple envs, use
 `CAMERA_ENV_ID` with `ENV_SPACING_X/Y` and `GRID_COLS`. The camera and fixed
 backdrop both use the selected env origin, so the camera pose remains identical
 relative to that env's robot/table.
+
+## 2026-06-10 Nine-Seed V2 Review Batch
+
+This batch keeps the v2 visual stack fixed and varies only `SEED=0..8`. With
+the current reset config, the seed changes the small randomized fixture and leg
+initial poses while preserving the same camera, lighting, policy, task, and
+20-second horizon.
+
+Branch:
+
+`2026-06-09_Tyler_SimVideos_LightingRefine_Finetune_v2`
+
+Base command:
+
+```bash
+RUN_ROOT="local_logs/$(date +%Y-%m-%d_%H-%M-%S)_furniturebench_v2_9_seed_rollouts"
+mkdir -p "$RUN_ROOT"
+echo "$RUN_ROOT" | tee local_logs/latest_furniturebench_v2_9_seed_rollouts.txt
+
+for seed in $(seq 0 8); do
+  seed_dir="$RUN_ROOT/seed_$(printf '%02d' "$seed")"
+  echo "[furniturebench_v2_batch] seed=${seed} out=${seed_dir}" | tee -a "$RUN_ROOT/batch.log"
+  OUT_DIR="$seed_dir" \
+  EXTRA_ARGS="--no_timestamp_out_dir" \
+  SEED="$seed" \
+  STEPS=1200 \
+  CAPTURE_PNG_STEPS=0,300,600,900,1200 \
+  MAKE_VIDEO=1 \
+  RANDOM_GOAL_FRACTION=0.0 \
+  TRAIN_DR=1 \
+  bash_scripts/96_render_furniturebench_200mm_finetuned.sh 2>&1 | tee "$seed_dir.render.log"
+done
+```
+
+Actual output root:
+
+`local_logs/2026-06-10_02-36-59_furniturebench_v2_9_seed_rollouts`
+
+Per-seed videos:
+
+- `seed_00/rollout.mp4`
+- `seed_01/rollout.mp4`
+- `seed_02/rollout.mp4`
+- `seed_03/rollout.mp4`
+- `seed_04/rollout.mp4`
+- `seed_05/rollout.mp4`
+- `seed_06/rollout.mp4`
+- `seed_07/rollout.mp4`
+- `seed_08/rollout.mp4`
+
+Review outputs:
+
+- `local_logs/2026-06-10_02-36-59_furniturebench_v2_9_seed_rollouts/furniturebench_v2_9_seed_grid_3x3.mp4`
+- `local_logs/2026-06-10_02-36-59_furniturebench_v2_9_seed_rollouts/furniturebench_v2_9_seed_grid_3x3_t0.png`
+- `local_logs/2026-06-10_02-36-59_furniturebench_v2_9_seed_rollouts/furniturebench_v2_9_seed_grid_3x3_t8.png`
+
+Observed result:
+
+- All 9 seeds completed one full `10/10` episode at step `663`.
+- All 9 seeds reached `9/10` in the second episode by step `1200`.
+- First-frame hashes differ across seeds, confirming the seed changes the
+  reset initialization while leaving the fixed render setup intact.
