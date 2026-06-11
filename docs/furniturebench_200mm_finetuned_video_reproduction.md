@@ -93,7 +93,7 @@ FurnitureBench task.
 - Camera focal length:
   `10 cm`
 - Robot URDF:
-  `/home/tylerlum/github_repos/sapg/assets/urdf/kuka_allegro_description/iiwa14_left_sharpa_adjusted_restricted_pretty.urdf`
+  `assets/urdf/kuka_allegro_description/iiwa14_left_sharpa_adjusted_restricted_pretty.urdf`
 - Default light intensity:
   `360`
 - Sky dome intensity:
@@ -164,7 +164,7 @@ Historical wrapper defaults for this command:
   `10 cm`, widened from the default `24 cm` so the close Viser pose frames the
   task instead of clipping into it.
 - Robot URDF:
-  `/home/tylerlum/github_repos/sapg/assets/urdf/kuka_allegro_description/iiwa14_left_sharpa_adjusted_restricted_pretty.urdf`
+  `assets/urdf/kuka_allegro_description/iiwa14_left_sharpa_adjusted_restricted_pretty.urdf`
 
 Output:
 

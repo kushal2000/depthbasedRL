@@ -23,9 +23,9 @@ DEFAULT_CHECKPOINT = "/juno/u/kedia/depthbasedRL/train_dir/May26/screwing_newer/
 DEFAULT_TASK = "Isaacsimenvs-PegInHole-Direct-v0"
 DEFAULT_AGENT = "rl_games_sapg_cfg_entry_point"
 DEFAULT_PROBLEM = "furniture_bench.one_leg_leg4_200mm_matchedmass_sdf_hybrid_super_dense"
-DEFAULT_PRETTY_ROBOT_URDF = (
-    "/home/tylerlum/github_repos/sapg/assets/urdf/kuka_allegro_description/"
-    "iiwa14_left_sharpa_adjusted_restricted_pretty.urdf"
+DEFAULT_PRETTY_ROBOT_URDF = str(
+    Path(__file__).resolve().parents[1]
+    / "assets/urdf/kuka_allegro_description/iiwa14_left_sharpa_adjusted_restricted_pretty.urdf"
 )
 
 

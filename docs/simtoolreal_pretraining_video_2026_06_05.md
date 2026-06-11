@@ -109,7 +109,7 @@ The script preserves the previous cinematic composition:
 - `ENV_SPACING_Y=2.45`
 - `camera_motion=sapg_ref_pan`
 - Pretty robot URDF from
-  `/home/tylerlum/github_repos/sapg/assets/urdf/kuka_allegro_description/iiwa14_left_sharpa_adjusted_restricted_pretty.urdf`
+  `assets/urdf/kuka_allegro_description/iiwa14_left_sharpa_adjusted_restricted_pretty.urdf`
 - `render_quality_preset=beauty`
 - `render_mode=rt`
 - `render_samples_per_pixel=64`

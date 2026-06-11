@@ -7,7 +7,7 @@ cd "${REPO_DIR}"
 PYTHON_BIN="${PYTHON_BIN:-.venv-isaacsim-py311/bin/python}"
 
 CHECKPOINT="${CHECKPOINT:-/juno/u/kedia/depthbasedRL/train_dir/TrainingObjective/Play2Win/model.pth}"
-ROBOT_URDF="${ROBOT_URDF:-/home/tylerlum/github_repos/sapg/assets/urdf/kuka_allegro_description/iiwa14_left_sharpa_adjusted_restricted_pretty.urdf}"
+ROBOT_URDF="${ROBOT_URDF:-assets/urdf/kuka_allegro_description/iiwa14_left_sharpa_adjusted_restricted_pretty.urdf}"
 SEED="${SEED:-42}"
 
 # Defaults reproduce the camera path from:
