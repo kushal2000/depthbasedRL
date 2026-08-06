@@ -33,11 +33,25 @@ INK = "#333333"
 MUTED = "#777777"
 
 
-def _rate(path: str | None):
+def _load(path: str | None):
     if not path:
-        return None, 0
-    r = json.load(open(path))["results"][0]["early_drop_filtered"]
-    return 100.0 * r["retract_rate"], r["n"]
+        return None
+    blob = json.load(open(path))
+    return blob["results"][0], blob["num_envs"]
+
+
+def _rates(bolted: str, unbolted: str | None):
+    """Both conditions share one denominator: N minus the early-drop count from
+    the BOLTED run. Unstable initial placement is a property of the reset
+    distribution, so that count is the legitimate exclusion; filtering the
+    unbolted run by its own (higher) count would credit it for failures the
+    free fixture caused, and would silently drop budget-censored envs."""
+    b, n_env = _load(bolted)
+    denom = n_env - b["n_dropped_early"]
+    br = 100.0 * b["early_drop_filtered"]["retracted"] / denom
+    u = _load(unbolted)
+    ur = 100.0 * u[0]["early_drop_filtered"]["retracted"] / denom if u else None
+    return br, ur, denom
 
 
 def main() -> None:
@@ -55,10 +69,8 @@ def main() -> None:
         parts = spec.split(":")
         name, bolted = parts[0], parts[1]
         unbolted = parts[2] if len(parts) > 2 and parts[2] else None
-        b, bn = _rate(bolted)
-        u, un = _rate(unbolted)
-        tasks.append({"name": name, "bolted": b, "bolted_n": bn,
-                      "unbolted": u, "unbolted_n": un})
+        b, u, denom = _rates(bolted, unbolted)
+        tasks.append({"name": name, "bolted": b, "unbolted": u, "n": denom})
 
     configure_rcparams()
     width = max(4.2, 1.9 * len(tasks) + 1.6)
@@ -112,8 +124,8 @@ def main() -> None:
                     bbox_inches="tight", pad_inches=0.06)
     print(f"wrote {out / f'{args.name}.png'}")
     for t in tasks:
-        print(f"  {t['name']:16s} bolted={t['bolted']} (n={t['bolted_n']})  "
-              f"unbolted={t['unbolted']} (n={t['unbolted_n']})")
+        u = f"{t['unbolted']:.2f}" if t["unbolted"] is not None else "pending"
+        print(f"  {t['name']:14s} n={t['n']:4d}  bolted={t['bolted']:6.2f}  unbolted={u}")
 
 
 if __name__ == "__main__":

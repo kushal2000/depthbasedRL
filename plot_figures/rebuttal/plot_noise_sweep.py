@@ -29,6 +29,7 @@ from _style import configure_rcparams  # noqa: E402
 #   CVD worst protan/deutan dE 9.2 (target 8), normal-vision 24.0 (floor 15).
 PALETTE = ["#2a78d6", "#eb6834", "#1baf7a"]
 C_LINE = PALETTE[0]
+TRAIN_XYZ_CM, TRAIN_ROT = 1.0, 5.0  # training sigmas
 INK = "#333333"
 MUTED = "#777777"
 
@@ -41,17 +42,42 @@ def main() -> None:
                     help="series label, one per --json")
     ap.add_argument("--name", default="lpeg_noise_sweep", help="output basename")
     ap.add_argument("--title", default=None)
+    ap.add_argument("--x-mode", choices=["xyz", "multiple"], default="xyz",
+                    help="'xyz': x = translational sigma (cm). 'multiple': x = "
+                         "multiple of the training sigma (1 cm / 5 deg), which "
+                         "is the only shared axis when each sweep varies a "
+                         "different quantity.")
+    ap.add_argument("--per-condition-filter", action="store_true",
+                    help="filter early drops per condition instead of using the "
+                         "zero-noise baseline count as a fixed denominator")
     ap.add_argument("--outdir", default=str(Path(__file__).resolve().parent / "outputs"))
     args = ap.parse_args()
 
     series = []
     for k, path in enumerate(args.json):
-        rows = json.load(open(path))["results"]
+        blob = json.load(open(path))
+        rows = blob["results"]
+        # Fixed denominator: exclude only the number of early drops seen at the
+        # ZERO-noise point. Unstable initial placement is a property of the reset
+        # distribution (identical init states at every level), so that count is
+        # the legitimate exclusion. Filtering per-condition instead would also
+        # discard noise-induced failures -- and would silently drop envs censored
+        # by the step budget, which must count as failures, not vanish.
+        n_env = blob["num_envs"]
+        denom = n_env - rows[0]["n_dropped_early"]
+        if args.per_condition_filter:
+            succ = [100 * r["early_drop_filtered"]["retract_rate"] for r in rows]
+        else:
+            succ = [100 * r["early_drop_filtered"]["retracted"] / denom for r in rows]
+        xyz_cm = [100 * r["obj_xyz_noise_std_m"] for r in rows]
+        rot = [r["obj_rot_noise_deg"] for r in rows]
+        # If only rotation varies, the x axis IS rotation (absolute degrees);
+        # otherwise it is translational sigma in cm.
+        varies_rot = len(set(rot)) > 1 and len(set(xyz_cm)) == 1
+        x = rot if varies_rot else xyz_cm
         series.append({
             "label": args.label[k] if k < len(args.label) else Path(path).stem,
-            "xyz_cm": [100 * r["obj_xyz_noise_std_m"] for r in rows],
-            "rot": [r["obj_rot_noise_deg"] for r in rows],
-            "succ": [100 * r["early_drop_filtered"]["retract_rate"] for r in rows],
+            "xyz_cm": x, "raw_cm": xyz_cm, "rot": rot, "succ": succ,
         })
     # Tick positions come from the longest series; all sweeps share a grid.
     ref = max(series, key=lambda s: len(s["xyz_cm"]))
@@ -94,8 +120,14 @@ def main() -> None:
                         fontsize=8.5, color=INK)
 
     ax.set_ylabel("Success rate")
-    ax.set_xlabel("Object-pose observation noise      "
-                  "translational σ (cm)  /  rotational σ (deg)")
+    if len(set(rot)) > 1 and len(set(ref["raw_cm"])) == 1:
+        _xlab = "Rotational observation noise σ (deg)"
+    elif len(set(rot)) == 1:
+        _xlab = "Translational observation noise σ (cm)"
+    else:
+        _xlab = ("Object-pose observation noise      "
+                 "translational σ (cm)  /  rotational σ (deg)")
+    ax.set_xlabel(_xlab)
     ax.set_ylim(-3, 108)
     ax.set_yticks([0, 25, 50, 75, 100])
     ax.set_yticklabels([f"{v}%" for v in (0, 25, 50, 75, 100)])
@@ -103,9 +135,16 @@ def main() -> None:
     # Thin the ticks if the points are too dense to read.
     step = 1 if len(xyz_cm) <= 12 else 2
     ax.set_xticks(xyz_cm[::step])
-    ax.set_xticklabels(
-        [f"{c:.1f}\n{d:.0f}°" for c, d in zip(xyz_cm[::step], rot[::step])], fontsize=8
-    )
+    if len(set(rot)) > 1 and len(set(ref["raw_cm"])) == 1:
+        ax.set_xticklabels([f"{v:.1f}" for v in xyz_cm[::step]], fontsize=8.5)
+    elif len(set(rot)) == 1:
+        # Rotation is held constant (the title says at what) -- repeating it on
+        # every tick is noise.
+        ax.set_xticklabels([f"{c:.1f}" for c in xyz_cm[::step]], fontsize=8.5)
+    else:
+        ax.set_xticklabels(
+            [f"{c:.1f}\n{d:.0f}°" for c, d in zip(xyz_cm[::step], rot[::step])],
+            fontsize=8)
     ax.set_title(args.title or "Success rate vs object-pose observation noise",
                  loc="left", fontsize=10.5, pad=8)
 
