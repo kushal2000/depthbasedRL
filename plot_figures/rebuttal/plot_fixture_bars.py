@@ -67,7 +67,8 @@ def main() -> None:
     tasks = []
     for spec in args.task:
         parts = spec.split(":")
-        name, bolted = parts[0], parts[1]
+        # allow "\n" in a --task name to wrap the tick label
+        name, bolted = parts[0].replace("\\n", "\n"), parts[1]
         unbolted = parts[2] if len(parts) > 2 and parts[2] else None
         b, u, denom = _rates(bolted, unbolted)
         tasks.append({"name": name, "bolted": b, "unbolted": u, "n": denom})
