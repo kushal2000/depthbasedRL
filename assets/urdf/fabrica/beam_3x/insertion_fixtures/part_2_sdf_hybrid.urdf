@@ -67,7 +67,12 @@
       </geometry>
       <sdf resolution="256"/>
     </collision>
-  </link>
+      <inertial>
+      <mass value="0.3826"/>
+      <origin xyz="-0.001749 0.000000 0.018990" rpy="0 0 0"/>
+      <inertia ixx="1.426335e-04" ixy="-1.508985e-10" ixz="-1.050224e-06" iyy="7.433142e-04" iyz="-3.340209e-12" izz="7.935145e-04"/>
+    </inertial>
+</link>
   <material name="bulk">
     <color rgba="0.78 0.55 0.30 1.0"/>
   </material>

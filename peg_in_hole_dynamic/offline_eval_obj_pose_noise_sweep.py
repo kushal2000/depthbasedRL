@@ -66,6 +66,10 @@ def _parse_args() -> argparse.Namespace:
                    help="sweep points, evenly spaced from 0 to the maxima inclusive")
     p.add_argument("--xyz-max", type=float, default=0.5, help="metres")
     p.add_argument("--rot-max", type=float, default=45.0, help="degrees")
+    p.add_argument("--hold-xyz", type=float, default=None,
+                   help="freeze translational σ (m) and sweep rotation alone")
+    p.add_argument("--hold-rot", type=float, default=None,
+                   help="freeze rotational σ (deg) and sweep translation alone")
     p.add_argument("--num-envs", type=int, default=512)
     p.add_argument("--max-steps-per-episode", type=int, default=600)
     p.add_argument("--seed", type=int, default=42)
@@ -86,15 +90,24 @@ def _reseed(seed: int) -> None:
     np.random.seed(seed)
 
 
-def _sweep_points(n: int, xyz_max: float, rot_max: float) -> list[tuple[str, float, float]]:
-    """n points from 0 to the maxima inclusive; both axes scale together."""
+def _sweep_points(n: int, xyz_max: float, rot_max: float,
+                  hold_xyz: float | None = None,
+                  hold_rot: float | None = None) -> list[tuple[str, float, float]]:
+    """n points from 0 to the maxima inclusive.
+
+    By default both axes scale together. Pass --hold-rot to freeze rotation at a
+    constant (usually the training σ) and sweep translation alone, or --hold-xyz
+    for the mirror case -- that isolates which axis drives the collapse, which a
+    joint sweep cannot attribute.
+    """
     if n < 2:
         return [("xyz0.000_rot0.0", 0.0, 0.0)]
     out = []
     for i in range(n):
         f = i / (n - 1)
-        xyz, rot = f * xyz_max, f * rot_max
-        out.append((f"xyz{xyz:.3f}m_rot{rot:.1f}deg", xyz, rot))
+        xyz = hold_xyz if hold_xyz is not None else f * xyz_max
+        rot = hold_rot if hold_rot is not None else f * rot_max
+        out.append((f"xyz{xyz:.3f}m_rot{rot:.1f}deg", float(xyz), float(rot)))
     return out
 
 
@@ -256,7 +269,8 @@ def main() -> int:
             "unfinished_envs": int((~finished).sum().item()),
         }
 
-    points = _sweep_points(int(args.points), float(args.xyz_max), float(args.rot_max))
+    points = _sweep_points(int(args.points), float(args.xyz_max), float(args.rot_max),
+                           hold_xyz=args.hold_xyz, hold_rot=args.hold_rot)
     print(f"=> {len(points)} sweep points, num_envs={args.num_envs}, seed={args.seed}",
           flush=True)
 
@@ -286,6 +300,8 @@ def main() -> int:
             "points": int(args.points),
             "xyz_max_m": float(args.xyz_max),
             "rot_max_deg": float(args.rot_max),
+            "hold_xyz_m": args.hold_xyz,
+            "hold_rot_deg": args.hold_rot,
             "early_drop_steps": int(args.early_drop_steps),
             "train_overrides": train_overrides,
             "cli_overrides": cli_overrides,

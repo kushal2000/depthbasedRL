@@ -113,7 +113,12 @@
       <origin xyz="0.05625 -0.05687 0.002" rpy="0 0 0"/>
       <geometry><cylinder radius="0.016" length="0.027"/></geometry>
     </collision>
-  </link>
+      <inertial>
+      <mass value="0.2798"/>
+      <origin xyz="-0.002718 0.002718 -0.006647" rpy="0 0 0"/>
+      <inertia ixx="8.501496e-04" ixy="4.071367e-05" ixz="6.958884e-06" iyy="8.501371e-04" iyz="-6.899132e-06" izz="1.653383e-03"/>
+    </inertial>
+</link>
   <material name="bulk">
     <color rgba="0.78 0.55 0.30 1.0"/>
   </material>

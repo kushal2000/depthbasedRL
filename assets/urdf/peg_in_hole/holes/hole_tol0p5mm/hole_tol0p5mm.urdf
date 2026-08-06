@@ -49,10 +49,18 @@
       <origin xyz="0.000000 -0.027750 0.035000" rpy="0 0 0"/>
       <geometry><box size="0.021000 0.024500 0.050000"/></geometry>
     </collision>
+    <!-- Rigid-body properties computed exactly from the 5 collision boxes at
+         solid-PLA density (1240 kg/m^3): V = 351.4 cm^3 -> m = 0.436 kg, with
+         the COM and inertia tensor derived by parallel-axis from the same
+         boxes. The previous values (10 kg, I = 0.1, COM z = 0.055 which sat
+         above the part) were placeholders that never mattered while the
+         fixture was baked kinematic; they do matter now that
+         peg_in_hole.fixture_bolted=False makes it a dynamic body. A 10 kg
+         block barely responds to peg contact. -->
     <inertial>
-      <mass value="10.0"/>
-      <origin xyz="0 0 0.055" rpy="0 0 0"/>
-      <inertia ixx="0.1" ixy="0" ixz="0" iyy="0.1" iyz="0" izz="0.1"/>
+      <mass value="0.436"/>
+      <origin xyz="0 0 0.029537" rpy="0 0 0"/>
+      <inertia ixx="0.000384" ixy="0" ixz="0" iyy="0.000386" iyz="0" izz="0.000503"/>
     </inertial>
   </link>
 </robot>

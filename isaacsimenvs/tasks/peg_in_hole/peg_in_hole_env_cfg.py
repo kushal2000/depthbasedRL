@@ -38,6 +38,17 @@ class PegInHoleCfg:
     problem: str = "peg.tol0p5mm"
     goal_mode: str = "preInsertAndFinal"
 
+    # When True the receptive/fixture is a kinematic body: infinite effective
+    # mass, unaffected by contact -- i.e. bolted to the table. Set False to make
+    # it a dynamic body that rests under gravity and can be pushed by the peg.
+    # With a free fixture the insertion goal is re-derived from the fixture's
+    # live pose every step (see PegInHoleEnv._refresh_free_fixture_goal), so the
+    # policy's goal observation tracks the fixture and no retraining is needed.
+    # NOTE: the fixture's sliding friction against the table comes from the
+    # URDF/default physics material -- _bake_usd's prop map has no friction key,
+    # so tuning it needs a PhysicsMaterial on the hole prim (not done here).
+    fixture_bolted: bool = True
+
     hole_x_range: tuple[float, float] = (-0.1875, 0.1875)
     hole_y_range: tuple[float, float] = (-0.1, 0.1)
     # Per-episode yaw randomization about +Z applied to the hole and to the

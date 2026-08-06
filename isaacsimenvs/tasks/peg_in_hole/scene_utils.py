@@ -93,6 +93,22 @@ def setup_scene(env) -> None:
         collision_enabled=False,
     )
 
+    # A bolted fixture is kinematic: infinite effective mass, ignores contact.
+    # Unbolted, it becomes a dynamic body resting on the table under gravity, so
+    # the peg can push it. The bolted branch below is byte-for-byte the original
+    # prop set -- max_depenetration_velocity is added only in the dynamic case
+    # (it is meaningless for a kinematic body, which never depenetrates), so
+    # fixture_bolted=True leaves the baked USD exactly as it was.
+    _fixture_bolted = bool(getattr(env.cfg.peg_in_hole, "fixture_bolted", True))
+    _hole_props = dict(
+        kinematic_enabled=_fixture_bolted,
+        disable_gravity=_fixture_bolted,
+        articulation_enabled=False,
+        rb_solver_position_iterations=4,
+        rb_solver_velocity_iterations=0,
+    )
+    if not _fixture_bolted:
+        _hole_props["max_depenetration_velocity"] = 1000.0
     hole_usd_path = _bake_usd(
         _convert_urdf_to_usd(
             _asset_path(env._pih_receptive_urdf_abs),
@@ -101,13 +117,7 @@ def setup_scene(env) -> None:
         ),
         bake_root,
         "hole",
-        props=dict(
-            kinematic_enabled=True,
-            disable_gravity=True,
-            articulation_enabled=False,
-            rb_solver_position_iterations=4,
-            rb_solver_velocity_iterations=0,
-        ),
+        props=_hole_props,
     )
 
     robot_usd_path = _bake_usd(

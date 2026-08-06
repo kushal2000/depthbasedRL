@@ -413,7 +413,14 @@ class PegInHoleEnv(SimToolRealEnv):
         self._clear_goal_trackers(env_ids)
         self._write_goal_pose(env_ids, is_first_goal=True)
 
-    def _write_goal_pose(self, env_ids: torch.Tensor, is_first_goal: bool = False) -> None:
+    def _write_goal_pose(self, env_ids: torch.Tensor, is_first_goal: bool = False,
+                         subgoal_override: torch.Tensor | None = None) -> None:
+        """subgoal_override: per-env subgoal index, bypassing the `_successes %
+        env_max_goals` wrap. The wrap sends a completed env (successes ==
+        max_goals) back to subgoal 0, which is correct for the random-goal
+        cycle but wrong for a caller that re-writes the goal every step -- it
+        would snap the marker back to pre-insert the moment insertion lands.
+        See _refresh_free_fixture_goal."""
         n = env_ids.numel()
         env_origins = self.scene.env_origins[env_ids]
         is_random_goal = self.is_random_goal_env[env_ids]
@@ -426,9 +433,12 @@ class PegInHoleEnv(SimToolRealEnv):
         insertion_mask = ~is_random_goal
         if insertion_mask.any():
             ins_ids = env_ids[insertion_mask]
-            subgoal_idx = (
-                self._successes[ins_ids] % self.env_max_goals[ins_ids]
-            ).long()
+            if subgoal_override is not None:
+                subgoal_idx = subgoal_override[insertion_mask].long()
+            else:
+                subgoal_idx = (
+                    self._successes[ins_ids] % self.env_max_goals[ins_ids]
+                ).long()
             ins_pos_local = torch.zeros(
                 ins_ids.numel(), 3, dtype=torch.float32, device=self.device
             )
@@ -587,8 +597,55 @@ class PegInHoleEnv(SimToolRealEnv):
         """
         return ~self.retract_phase
 
+    def _refresh_free_fixture_goal(self) -> None:
+        """Re-derive the insertion goal from the fixture's live pose.
+
+        With ``fixture_bolted=False`` the hole is a dynamic body, so the peg can
+        shove it. ``hole_pos`` / ``hole_quat_wxyz`` are otherwise only written at
+        reset (they are pushed *to* sim, never read back), and the goal is only
+        rewritten at reset and on subgoal transitions -- so both would go stale
+        the moment the fixture moved, leaving the goal where the hole used to be.
+
+        Reading the pose back each step and rewriting the goal keeps ``goal_viz``
+        -- which is what the policy actually observes (``obs_utils`` reads
+        ``env.goal_viz.data.root_pos_w``) -- glued to the fixture. The
+        observation layout is unchanged, so no retraining is required.
+
+        Only non-random-goal envs currently in the tail (post-prelude) phase are
+        refreshed: random-goal envs have targets sampled at reset that must not
+        be overwritten, and prelude goals are prebuilt world-frame poses.
+        """
+        if self.cfg.peg_in_hole.fixture_bolted:
+            return
+
+        insertion = ~self.is_random_goal_env
+        if not bool(insertion.any()):
+            return
+
+        # Only insertion envs: random-goal envs park the hole at a z=-1 sentinel
+        # at reset (see _reset_peg_episode), which must not be overwritten.
+        env_origins = self.scene.env_origins
+        live_pos = self.hole.data.root_pos_w - env_origins
+        self.hole_pos[insertion] = live_pos[insertion]
+        self.hole_quat_wxyz[insertion] = self.hole.data.root_quat_w[insertion]
+
+        # Clamp instead of wrapping: an env that has hit every goal is in the
+        # retract phase and its target must STAY at the final insertion pose
+        # (still tracking the fixture, so retract is judged against where the
+        # hole actually is now). The modulo used elsewhere would send it back to
+        # subgoal 0 and yank the marker to pre-insert.
+        subgoal_idx = torch.minimum(self._successes, self.env_max_goals - 1).long()
+        eligible = insertion & (subgoal_idx >= self._num_prelude_goals)
+        ids = eligible.nonzero(as_tuple=False).squeeze(-1)
+        if ids.numel() > 0:
+            self._write_goal_pose(ids, is_first_goal=False,
+                                  subgoal_override=subgoal_idx[ids])
+
     def _get_dones(self) -> tuple[torch.Tensor, torch.Tensor]:
         update_tolerance_curriculum(self)
+        # Must precede compute_intermediate_values so rewards, terminations and
+        # observations all see the same fixture-tracked goal this step.
+        self._refresh_free_fixture_goal()
         compute_intermediate_values(self)
 
         pih_cfg = self.cfg.peg_in_hole
