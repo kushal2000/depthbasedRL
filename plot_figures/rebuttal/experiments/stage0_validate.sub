@@ -1,0 +1,87 @@
+#!/bin/bash
+#SBATCH -N 1
+#SBATCH -n 1
+#SBATCH --cpus-per-task=12
+#SBATCH --get-user-env
+#SBATCH --mem=200000
+#SBATCH -t 0-02:00:00
+#SBATCH --partition=portal
+#SBATCH --exclude=portal-compute-01
+#SBATCH --gres=gpu:1
+#SBATCH -J stage0_validate
+#SBATCH -o /share/portal/kk837/depthbasedRL/plot_figures/rebuttal/experiments/logs/stage0_validate_%j.out
+#SBATCH -e /share/portal/kk837/depthbasedRL/plot_figures/rebuttal/experiments/logs/stage0_validate_%j.err
+
+# The two Stage 0 paths the peg bolted eval does not reach. Both would fail
+# SILENTLY, which is why they gate Stage 1.
+#
+#  (1) transportPreInsertFinal -- bit-exactness pre vs post refactor. Exercises
+#      the prelude mask, _prelude_lift_off_env, _prelude_pose_world sizing, the
+#      tail gather's prelude offset and the coarse-tolerance branch. Run via a
+#      detached git worktree at the pre-refactor commit so the working tree is
+#      untouched.
+#  (2) PegInHoleFixturedEnv -- asserts its goal budget reached the Phase C
+#      tables through _override_goal_counts. Before that hook, the subclass
+#      wrote the scalars directly and Phase C would have ignored them.
+
+set -uo pipefail
+
+REPO_ROOT="/share/portal/kk837/depthbasedRL"
+OUT_DIR="$REPO_ROOT/plot_figures/rebuttal/experiments/outputs"
+WT="/tmp/${USER}_stage0_pre_worktree"
+# Parent of the Stage 0 commit = the last pre-refactor state.
+PRE_REF="$(cd "$REPO_ROOT" && git rev-parse HEAD~1)"
+
+PROBLEM="Lpeg_dense_traj.tol0p5mm"
+GOAL_MODE="transportPreInsertFinal"
+NUM_ENVS=128
+STEPS=60
+SEED=0
+
+mkdir -p "$OUT_DIR" "$REPO_ROOT/plot_figures/rebuttal/experiments/logs"
+
+export OMNI_KIT_ACCEPT_EULA=YES
+export OMNI_KIT_CACHE_PATH="/tmp/${USER}_ov_cache_stage0"
+mkdir -p "$OMNI_KIT_CACHE_PATH"
+
+run_dump () {  # $1=tree  $2=out.pt
+  cd "$1"
+  source "$REPO_ROOT/.venv_isaacsim/bin/activate"
+  python -u isaacsimenvs/tests/validate_multiproblem_stage0.py \
+      --mode dump --problem "$PROBLEM" --goal-mode "$GOAL_MODE" \
+      --num-envs "$NUM_ENVS" --steps "$STEPS" --seed "$SEED" --out "$2"
+}
+
+echo "############ (1) transportPreInsertFinal: pre vs post"
+echo "pre-refactor ref: $PRE_REF"
+rm -rf "$WT"
+cd "$REPO_ROOT" && git worktree prune && git worktree add --detach "$WT" "$PRE_REF"
+# The venv lives in the main tree; the worktree only needs the repo source.
+ln -sfn "$REPO_ROOT/.venv_isaacsim" "$WT/.venv_isaacsim"
+ln -sfn "$REPO_ROOT/assets"          "$WT/assets"
+ln -sfn "$REPO_ROOT/train_dir"       "$WT/train_dir"
+# The harness postdates PRE_REF, so the worktree has no copy of it. Copy the
+# HEAD version in: we want the same measurement code on both trees, differing
+# only in the env implementation under test.
+mkdir -p "$WT/isaacsimenvs/tests"
+cp "$REPO_ROOT/isaacsimenvs/tests/validate_multiproblem_stage0.py" \
+   "$WT/isaacsimenvs/tests/validate_multiproblem_stage0.py"
+
+run_dump "$WT"        "$OUT_DIR/stage0_pre.pt"
+run_dump "$REPO_ROOT" "$OUT_DIR/stage0_post.pt"
+
+cd "$REPO_ROOT"
+source .venv_isaacsim/bin/activate
+python -u isaacsimenvs/tests/validate_multiproblem_stage0.py \
+    --mode compare --a "$OUT_DIR/stage0_pre.pt" --b "$OUT_DIR/stage0_post.pt"
+CMP_RC=$?
+
+echo "############ (2) PegInHoleFixturedEnv goal budget"
+python -u isaacsimenvs/tests/validate_multiproblem_stage0.py --mode fixtured
+FIX_RC=$?
+
+cd "$REPO_ROOT" && git worktree remove --force "$WT" 2>/dev/null || true
+
+echo "############ RESULT  prelude_compare=$CMP_RC  fixtured=$FIX_RC"
+[ "$CMP_RC" -eq 0 ] && [ "$FIX_RC" -eq 0 ] && echo "STAGE 0 VALIDATION PASSED" \
+  || echo "STAGE 0 VALIDATION FAILED"

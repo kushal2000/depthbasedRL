@@ -264,3 +264,6 @@ assets/urdf/fabrica_copied/
 peg_in_hole_dynamic/offline_eval_outputs/
 
 peg_in_hole_dynamic/eval_teacher_student_outputs/
+
+# Slurm job logs from plot_figures/*/experiments/*.sub (regenerable churn)
+plot_figures/*/experiments/logs/
