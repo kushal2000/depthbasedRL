@@ -180,8 +180,24 @@ def extract_run_wandb(run) -> dict | None:
 
 
 def find_runs_wandb(task: str, api) -> list[tuple[str, str, int, "object"]]:
-    """-> (axis, level, seed, wandb_run), incl. reused runs from other projects."""
-    out = []
+    """-> (axis, level, seed, wandb_run), incl. reused runs from other projects.
+
+    A (checkpoint, seed) can match MULTIPLE wandb runs when a run was cancelled
+    and resubmitted (the stale cancelled run lingers in the project). Keep only
+    the most recently created run per (axis, level, seed) so partial cancelled
+    runs never shadow the real one.
+    """
+    best: dict[tuple, object] = {}  # (axis, level, seed) -> newest run
+
+    def consider(axis, level, seed, run):
+        key = (axis, level, seed)
+        cur = best.get(key)
+        if cur is None or str(run.created_at) > str(cur.created_at):
+            if cur is not None:
+                print(f"  (deduped {axis}/{level}/seed{seed}: keeping newer "
+                      f"{run.name} over {cur.name})", flush=True)
+            best[key] = run
+
     pat = re.compile(rf"^{re.escape(task)}__(?P<slug>.+)__seed(?P<seed>\d+)_")
     for run in api.runs(f"{WANDB_ENTITY}/{WANDB_PROJECT}"):
         m = pat.match(run.name)
@@ -192,15 +208,16 @@ def find_runs_wandb(task: str, api) -> list[tuple[str, str, int, "object"]]:
             print(f"  (skipping unknown slug '{slug}': {run.name})", flush=True)
             continue
         axis, level = SLUG_MAP[slug]
-        out.append((axis, level, int(m.group("seed")), run))
+        consider(axis, level, int(m.group("seed")), run)
     for project, prefix, axis, level, seed in WANDB_REUSE.get(task, []):
         matches = [r for r in api.runs(f"{WANDB_ENTITY}/{project}")
                    if r.name.startswith(prefix)]
         if not matches:
             print(f"!! reused run not found on wandb: {project}/{prefix}", flush=True)
             continue
-        out.append((axis, level, seed, matches[0]))
-    return sorted(out, key=lambda r: (r[0], r[1], r[2]))
+        consider(axis, level, seed, max(matches, key=lambda r: str(r.created_at)))
+    return sorted(((a, lv, s, r) for (a, lv, s), r in best.items()),
+                  key=lambda r: (r[0], r[1], r[2]))
 
 
 def extract_run(event_file: str) -> dict | None:

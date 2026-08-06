@@ -40,6 +40,7 @@ TASKS = [
     ("furniture_bench", "FurnitureBench (Leg Screw)"),
     ("beam_part0", "Beam — Part 0"),
     ("beam_part2", "Beam — Part 2"),
+    ("peg", "L-Peg Insertion"),
 ]
 
 

@@ -1,0 +1,24 @@
+#!/bin/bash
+#SBATCH -N 1
+#SBATCH -n 1
+#SBATCH --cpus-per-task=8
+#SBATCH --get-user-env
+#SBATCH --mem=64000
+#SBATCH -t 00:30:00
+#SBATCH --partition=portal
+#SBATCH --exclude=portal-compute-01
+#SBATCH --gres=gpu:1
+#SBATCH -o /share/portal/kk837/depthbasedRL/plot_figures/fig2/outputs/thesis_presentation/render_grid.log
+#SBATCH -e /share/portal/kk837/depthbasedRL/plot_figures/fig2/outputs/thesis_presentation/render_grid.err
+
+# Render a 5x5 grid of beam_0 parallel envs at diverse init states (presentation).
+set -euo pipefail
+REPO_ROOT="/share/portal/kk837/depthbasedRL"
+cd "$REPO_ROOT"
+mkdir -p plot_figures/fig2/outputs/thesis_presentation
+source .venv_isaacsim/bin/activate
+export OMNI_KIT_ACCEPT_EULA=YES
+export OMNI_KIT_CACHE_PATH="/tmp/${USER}_ov_cache"
+mkdir -p "$OMNI_KIT_CACHE_PATH"
+
+python -u plot_figures/fig2/render_beam0_parallel_grid.py "$@"

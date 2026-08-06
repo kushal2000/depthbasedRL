@@ -100,7 +100,9 @@ def ours_fall_denominator(curves: dict):
     if got is None:
         raise SystemExit("play2win fall series missing — re-run extract_curves.py")
     t, falls = got
-    denom = np.clip(1.0 - np.nanmean(falls, axis=0), 0.05, 1.0)
+    with warnings.catch_warnings():  # all-NaN columns past the play2win frontier
+        warnings.simplefilter("ignore", category=RuntimeWarning)
+        denom = np.clip(1.0 - np.nanmean(falls, axis=0), 0.05, 1.0)
     return t, denom
 
 
@@ -113,10 +115,18 @@ def main():
     ap.add_argument("--norm", default="ours_fall", choices=["ours_fall", "none"],
                     help="ours_fall: divide EVERY line by the same 1-fall(t) of the "
                          "play2win (Ours) line; none: plot un-normalized.")
+    ap.add_argument("--band", default="minmax",
+                    choices=["minmax", "sem", "ci95", "std", "iqr"],
+                    help="seed band: minmax (default), sem (mean+/-SEM), ci95, std, iqr")
+    ap.add_argument("--outdir", default=None, help="output dir (default: outputs/)")
+    ap.add_argument("--name", default=None,
+                    help="output basename (default: fig3_ablations_<task>)")
     args = ap.parse_args()
 
-    out_dir = Path(__file__).resolve().parent / "outputs"
-    curves = json.load(open(out_dir / f"{args.task}_curves.json"))
+    data_dir = Path(__file__).resolve().parent / "outputs"
+    out_dir = Path(args.outdir) if args.outdir else data_dir
+    out_dir.mkdir(parents=True, exist_ok=True)
+    curves = json.load(open(data_dir / f"{args.task}_curves.json"))
 
     denom = ours_fall_denominator(curves) if args.norm == "ours_fall" else None
 
@@ -138,7 +148,21 @@ def main():
             with warnings.catch_warnings():
                 warnings.simplefilter("ignore", category=RuntimeWarning)
                 mean = np.nanmean(ys, axis=0)
-                lo, hi = np.nanmin(ys, axis=0), np.nanmax(ys, axis=0)
+                sd = np.nanstd(ys, axis=0)
+                n = np.sum(~np.isnan(ys), axis=0)
+                sem = sd / np.sqrt(np.clip(n, 1, None))
+                if args.band == "sem":
+                    lo, hi = mean - sem, mean + sem
+                elif args.band == "ci95":
+                    lo, hi = mean - 1.96 * sem, mean + 1.96 * sem
+                elif args.band == "std":
+                    lo, hi = mean - sd, mean + sd
+                elif args.band == "iqr":
+                    lo = np.nanpercentile(ys, 25, axis=0)
+                    hi = np.nanpercentile(ys, 75, axis=0)
+                else:  # minmax
+                    lo, hi = np.nanmin(ys, axis=0), np.nanmax(ys, axis=0)
+                lo, hi = np.clip(lo, 0, 100), np.clip(hi, 0, 100)
             ax.fill_between(t, lo, hi, color=color, alpha=0.18, linewidth=0)
             (line,) = ax.plot(t, mean, color=color, linewidth=1.7, solid_capstyle="round")
             handles.insert(0, line)
@@ -171,7 +195,7 @@ def main():
 
     fig.subplots_adjust(left=0.06, right=0.995, top=0.88, bottom=0.34, wspace=0.14)
 
-    name = f"fig3_ablations_{args.task}"
+    name = args.name if args.name else f"fig3_ablations_{args.task}"
     png = out_dir / f"{name}.png"
     fig.savefig(png, dpi=600, facecolor="white", bbox_inches="tight", pad_inches=0.1)
     fig.savefig(out_dir / f"{name}.pdf", facecolor="white", bbox_inches="tight", pad_inches=0.1)
