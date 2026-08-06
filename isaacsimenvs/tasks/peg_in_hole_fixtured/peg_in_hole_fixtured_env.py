@@ -108,10 +108,15 @@ class PegInHoleFixturedEnv(PegInHoleEnv):
         # For fixtured modes, the trajectory comes from scenes.npz. We always
         # need enough prelude buffer slots to hold the full dense trajectory
         # (so we can switch goal_mode without re-allocating).
+        if len(getattr(cfg.peg_in_hole, "problems", ()) or ()) > 1:
+            raise ValueError(
+                "PegInHoleFixturedEnv does not support cfg.peg_in_hole.problems "
+                "(multi-problem): it sources trajectories from scenes.npz and "
+                "builds its own scene. Use PegInHoleEnv for multi-problem runs."
+            )
         if goal_mode in ("dense", "preInsertAndFinal", "finalGoalOnly"):
-            self._num_prelude_goals = self._scenes_max_traj_len
-            self._num_insertion_goals = 0
-            self._num_total_insertion_goals = self._num_prelude_goals
+            # Goes through the base hook so Phase C's (P,) tables see it.
+            self._override_goal_counts(prelude=self._scenes_max_traj_len, tail=0)
 
     def _setup_scene(self) -> None:
         setup_scene(self)

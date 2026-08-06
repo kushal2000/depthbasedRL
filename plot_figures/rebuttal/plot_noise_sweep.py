@@ -27,9 +27,13 @@ from _style import configure_rcparams  # noqa: E402
 # contrast vs a light surface.
 # Categorical slots 1-2 of the validated theme. Validated on all pairs, light:
 #   CVD worst protan/deutan dE 9.2 (target 8), normal-vision 24.0 (floor 15).
-PALETTE = ["#2a78d6", "#eb6834", "#1baf7a"]
+# 4-series set, validated on ALL pairs (light): CVD worst protan/deutan dE 9.2
+# (target 8), normal-vision worst 16.3 (floor 15). The theme's slot-4 yellow
+# (#eda100) fails normal-vision against orange at dE 13.7 on an all-pairs
+# list, so violet takes the fourth slot instead.
+PALETTE = ["#2a78d6", "#eb6834", "#1baf7a", "#4a3aa7"]
 C_LINE = PALETTE[0]
-TRAIN_XYZ_CM, TRAIN_ROT = 1.0, 5.0  # training sigmas
+TRAIN_XYZ_CM, TRAIN_ROT = 1.0, 5.0  # training-time object-state noise sigmas
 INK = "#333333"
 MUTED = "#777777"
 
@@ -84,7 +88,8 @@ def main() -> None:
     xyz_cm, rot, succ = ref["xyz_cm"], ref["rot"], ref["succ"]
 
     configure_rcparams()
-    fig, ax = plt.subplots(figsize=(6.8, 3.6))
+    fig, ax = plt.subplots(figsize=(5.4, 4.6))
+    ax.set_axisbelow(True)
 
     # Data-driven limits: the sweep range varies between runs (and partial runs
     # are plotted mid-sweep), so nothing here may assume a fixed span.
@@ -92,16 +97,29 @@ def main() -> None:
     pad = 0.06 * span if span > 0 else 1.0
     ax.set_xlim(min(xyz_cm) - pad, max(xyz_cm) + pad)
 
+    # Training-noise reference: the sigma the policies were actually trained
+    # with, so the curve can be read as "how far past training does this hold".
+    _x_is_rot = len(set(rot)) > 1 and len(set(ref["raw_cm"])) == 1
+    _train_x = TRAIN_ROT if _x_is_rot else TRAIN_XYZ_CM
+    if min(xyz_cm) <= _train_x <= max(xyz_cm):
+        ax.axvline(_train_x, color=MUTED, linestyle=":", linewidth=1.1, zorder=1)
+        # Horizontal and offset into the empty region right of the line -- a
+        # rotated label centred on the line sat on top of it and was unreadable.
+        _span = max(xyz_cm) - min(xyz_cm)
+        ax.annotate("training DR",
+                    (_train_x + 0.03 * _span, 46), fontsize=8, color=MUTED,
+                    ha="left", va="center", linespacing=1.5)
+
     for k, s in enumerate(series):
         c = PALETTE[k % len(PALETTE)]
-        ax.plot(s["xyz_cm"], s["succ"], color=c, linewidth=2.0, marker="o",
-                markersize=5, markerfacecolor=c, markeredgecolor="white",
-                markeredgewidth=1.0, clip_on=False, zorder=3 + k,
-                solid_capstyle="round", label=s["label"])
+        ax.plot(s["xyz_cm"], s["succ"], color=c, linewidth=1.8, marker="o",
+                markersize=4.5, markerfacecolor=c, markeredgecolor="white",
+                markeredgewidth=0.9, clip_on=False, zorder=3 + k,
+                solid_capstyle="round", solid_joinstyle="round", label=s["label"])
 
     if len(series) > 1:
         # >= 2 series: a legend is mandatory so identity is never colour-alone.
-        ax.legend(loc="lower left", frameon=False, fontsize=9,
+        ax.legend(loc="upper right", frameon=False, fontsize=9,
                   handlelength=1.4, handletextpad=0.5, borderaxespad=0.4)
     else:
         # Single series: no legend (the title names it); label the first point
@@ -125,15 +143,18 @@ def main() -> None:
     elif len(set(rot)) == 1:
         _xlab = "Translational observation noise σ (cm)"
     else:
-        _xlab = ("Object-pose observation noise      "
-                 "translational σ (cm)  /  rotational σ (deg)")
+        # Ticks carry their own units, so the label needn't decode them.
+        _xlab = "Object-pose observation noise σ"
     ax.set_xlabel(_xlab)
-    ax.set_ylim(-3, 108)
+    ax.set_ylim(-2, 104)
     ax.set_yticks([0, 25, 50, 75, 100])
     ax.set_yticklabels([f"{v}%" for v in (0, 25, 50, 75, 100)])
     # Every swept point labelled with BOTH magnitudes, since they move together.
     # Thin the ticks if the points are too dense to read.
-    step = 1 if len(xyz_cm) <= 12 else 2
+    # Thin to every other point: 10 two-line ticks on a square canvas leaves no
+    # room for units, and without units the two rows are ambiguous. The markers
+    # still show every swept point.
+    step = 1 if len(xyz_cm) <= 6 else 2
     ax.set_xticks(xyz_cm[::step])
     if len(set(rot)) > 1 and len(set(ref["raw_cm"])) == 1:
         ax.set_xticklabels([f"{v:.1f}" for v in xyz_cm[::step]], fontsize=8.5)
@@ -142,17 +163,19 @@ def main() -> None:
         # every tick is noise.
         ax.set_xticklabels([f"{c:.1f}" for c in xyz_cm[::step]], fontsize=8.5)
     else:
+        # Single-line ticks: both magnitudes on one row, thinned so they fit.
         ax.set_xticklabels(
-            [f"{c:.1f}\n{d:.0f}°" for c, d in zip(xyz_cm[::step], rot[::step])],
-            fontsize=8)
+            [f"{c:.1f} cm / {d:.0f}°" for c, d in zip(xyz_cm[::step], rot[::step])],
+            fontsize=8.5)
     ax.set_title(args.title or "Success rate vs object-pose observation noise",
                  loc="left", fontsize=10.5, pad=8)
 
     for s in ("top", "right"):
         ax.spines[s].set_visible(False)
-    ax.spines["left"].set_color(INK)
-    ax.spines["bottom"].set_color(INK)
-    ax.tick_params(colors=INK, labelcolor=INK)
+    for s in ("left", "bottom"):
+        ax.spines[s].set_color("#9a9a9a")
+        ax.spines[s].set_linewidth(0.8)
+    ax.tick_params(colors="#9a9a9a", labelcolor=INK, length=3, width=0.8)
 
     fig.tight_layout()
     out = Path(args.outdir)
