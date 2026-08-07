@@ -41,17 +41,38 @@ def _load(path: str | None):
 
 
 def _rates(bolted: str, unbolted: str | None):
-    """Both conditions share one denominator: N minus the early-drop count from
-    the BOLTED run. Unstable initial placement is a property of the reset
-    distribution, so that count is the legitimate exclusion; filtering the
-    unbolted run by its own (higher) count would credit it for failures the
-    free fixture caused, and would silently drop budget-censored envs."""
+    """Each condition uses its OWN post-early-drop denominator, so the plotted
+    number equals what the eval logs report.
+
+    This previously pinned both bars to the bolted run's denominator, on the
+    reasoning that unstable initial placement belongs to the reset distribution
+    and filtering the unbolted run by its own (assumed larger) drop count would
+    credit it for failures the free fixture caused. Measurement went the other
+    way: on beam Step 2 the bolted run dropped 82 envs at reset while the
+    unbolted arms dropped 36-45, so the shared denominator inflated the unbolted
+    bar by 4-6 points (5 kg read 94.4% against a true 88.1%) -- the opposite of
+    the intent. Per-run denominators are the conservative reading and keep the
+    figure consistent with every number in the logs.
+
+    Read `early_drop_filtered.retract_rate` straight from the JSON rather than
+    recomputing a denominator here -- an earlier attempt used
+    `num_envs - n_dropped_early`, which is NOT that field's denominator: it is
+    `num_envs - n_dropped_early - unfinished_envs`, so the plot silently
+    disagreed with the logs by a few points.
+
+    CAVEAT worth carrying into the caption: that denominator also excludes
+    budget-censored envs (`unfinished_envs`), which is optimistic -- an env
+    still running at the step cap is more likely a failure than a success. It
+    matters unevenly across conditions: bolted censored 0, the unbolted arms
+    6-21."""
     b, n_env = _load(bolted)
-    denom = n_env - b["n_dropped_early"]
-    br = 100.0 * b["early_drop_filtered"]["retracted"] / denom
-    u = _load(unbolted)
-    ur = 100.0 * u[0]["early_drop_filtered"]["retracted"] / denom if u else None
-    return br, ur, denom
+    br = 100.0 * b["early_drop_filtered"]["retract_rate"]
+    b_n = (b["early_drop_filtered"]["n"], b["unfinished_envs"])
+    ur = u_n = None
+    if (u := _load(unbolted)) is not None:
+        ur = 100.0 * u[0]["early_drop_filtered"]["retract_rate"]
+        u_n = (u[0]["early_drop_filtered"]["n"], u[0]["unfinished_envs"])
+    return br, ur, b_n, u_n
 
 
 def main() -> None:
@@ -70,8 +91,9 @@ def main() -> None:
         # allow "\n" in a --task name to wrap the tick label
         name, bolted = parts[0].replace("\\n", "\n"), parts[1]
         unbolted = parts[2] if len(parts) > 2 and parts[2] else None
-        b, u, denom = _rates(bolted, unbolted)
-        tasks.append({"name": name, "bolted": b, "unbolted": u, "n": denom})
+        b, u, b_n, u_n = _rates(bolted, unbolted)
+        tasks.append({"name": name, "bolted": b, "unbolted": u,
+                      "n": b_n, "nu": u_n})
 
     configure_rcparams()
     width = max(4.2, 1.9 * len(tasks) + 1.6)
@@ -125,8 +147,13 @@ def main() -> None:
                     bbox_inches="tight", pad_inches=0.06)
     print(f"wrote {out / f'{args.name}.png'}")
     for t in tasks:
-        u = f"{t['unbolted']:.2f}" if t["unbolted"] is not None else "pending"
-        print(f"  {t['name']:14s} n={t['n']:4d}  bolted={t['bolted']:6.2f}  unbolted={u}")
+        def _f(rate, nn):
+            if rate is None:
+                return "pending"
+            n, unf = nn
+            return f"{rate:6.2f} (n={n}, censored={unf})"
+        print(f"  {t['name']:22s} bolted={_f(t['bolted'], t['n'])}  "
+              f"unbolted={_f(t['unbolted'], t['nu'])}")
 
 
 if __name__ == "__main__":
