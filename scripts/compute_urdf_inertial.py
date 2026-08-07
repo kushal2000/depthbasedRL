@@ -81,6 +81,15 @@ def main() -> None:
     ap.add_argument("urdf")
     ap.add_argument("--density", type=float, default=1240.0,
                     help="kg/m^3; default solid PLA")
+    ap.add_argument("--mass", type=float, default=None,
+                    help="target mass in kg; overrides --density by back-solving "
+                         "the density that hits it (mass and inertia scale together, "
+                         "so the COM and the tensor's shape are unchanged)")
+    ap.add_argument("--com-z", type=float, default=None,
+                    help="override the COM height (m), keeping mass and the "
+                         "inertia tensor. SYNTHETIC: the collision geometry is "
+                         "unchanged, so this models ballasting the base rather "
+                         "than a real solid. Probe only.")
     ap.add_argument("--write", action="store_true",
                     help="insert/replace the <inertial> block in-place")
     args = ap.parse_args()
@@ -91,18 +100,38 @@ def main() -> None:
         raise SystemExit(f"no collision geometry found in {path}")
 
     V = sum(s[0] for s in solids)
-    M = args.density * V
     com = sum(s[0] * s[1] for s in solids) / V
+
+    density = args.density
+    if args.mass is not None:
+        if args.mass <= 0:
+            raise SystemExit("--mass must be positive")
+        density = args.mass / V
+
+    M = density * V
 
     I = np.zeros((3, 3))
     for Vi, ci, Ii in solids:
         d = ci - com
-        I += args.density * (Ii + Vi * (float(d @ d) * np.eye(3) - np.outer(d, d)))
+        I += density * (Ii + Vi * (float(d @ d) * np.eye(3) - np.outer(d, d)))
+
+    geom_com_z = float(com[2])
+    if args.com_z is not None:
+        # Tipping completes only once the body rotates past atan(d / z_com), so
+        # COM height sets how recoverable a momentary tip is. Hold the tensor:
+        # a real ballasted base would differ slightly, but this isolates the
+        # single quantity under test.
+        com = com.copy()
+        com[2] = args.com_z
 
     print(f"{path.name}")
     print(f"  solids   : {len(solids)}")
     print(f"  volume   : {V * 1e6:.1f} cm^3")
-    print(f"  mass     : {M:.4f} kg  @ {args.density:.0f} kg/m^3")
+    print(f"  mass     : {M:.4f} kg  @ {density:.0f} kg/m^3"
+          + ("  (back-solved from --mass)" if args.mass is not None else ""))
+    if args.com_z is not None:
+        print(f"  com z    : {geom_com_z:.6f} -> {args.com_z:.6f}  "
+              f"(SYNTHETIC ballast; inertia tensor held)")
     print(f"  com      : {com[0]:.6f} {com[1]:.6f} {com[2]:.6f}")
     print(f"  ixx={I[0,0]:.6e} iyy={I[1,1]:.6e} izz={I[2,2]:.6e}")
     print(f"  ixy={I[0,1]:.3e} ixz={I[0,2]:.3e} iyz={I[1,2]:.3e}")
@@ -120,13 +149,25 @@ def main() -> None:
     )
     text = path.read_text()
     if "<inertial>" in text:
-        head, rest = text.split("<inertial>", 1)
-        _, tail = rest.split("</inertial>", 1)
-        head = head[: head.rstrip().rfind("\n") + 1] if head.rstrip().endswith(">") else head
-        text = head + block.lstrip("\n") + tail.lstrip("\n")
+        # Replace exactly the <inertial>...</inertial> span and nothing else.
+        # An earlier version trimmed back from the split point to the previous
+        # newline when the preceding text ended in ">", which ate the preceding
+        # element's closing tag and produced an unparseable URDF.
+        start = text.index("<inertial>")
+        end = text.index("</inertial>", start) + len("</inertial>")
+        # Keep the original indentation of the opening tag.
+        line_start = text.rfind("\n", 0, start) + 1
+        indent = text[line_start:start]
+        text = text[:line_start] + block.strip("\n").replace("    <inertial>", indent + "<inertial>", 1) + text[end:]
     else:
         idx = text.rindex("</link>")
         text = text[:idx] + block + text[idx:]
+    # Never write a URDF we just broke.
+    import xml.etree.ElementTree as _ET
+    try:
+        _ET.fromstring(text)
+    except _ET.ParseError as exc:
+        raise SystemExit(f"refusing to write {path}: result is not valid XML ({exc})")
     path.write_text(text)
     print(f"  -> wrote <inertial> into {path}")
 
