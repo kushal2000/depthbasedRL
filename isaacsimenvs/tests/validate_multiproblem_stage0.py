@@ -136,9 +136,16 @@ def main() -> int:
     env = _instantiate_env(task, cfg)
 
     if args.mode == "fixtured":
-        # The whole point of the _override_goal_counts hook: the fixtured env
-        # sources its trajectory from scenes.npz, so its goal budget must be
-        # _scenes_max_traj_len -- not whatever the Problem implied.
+        # PegInHoleFixturedEnv only rewrites its goal budget for the goal modes
+        # whose trajectory comes from scenes.npz. Under transportPreInsertFinal
+        # it deliberately keeps the Problem-derived counts, so asserting the
+        # scenes value unconditionally is a false failure.
+        _override_modes = ("dense", "preInsertAndFinal", "finalGoalOnly")
+        if args.goal_mode not in _override_modes:
+            print(f"goal_mode={args.goal_mode!r} does not trigger "
+                  f"_override_goal_counts (only {_override_modes}); "
+                  "nothing to assert. Re-run with --goal-mode preInsertAndFinal.")
+            return 1
         want = int(env._scenes_max_traj_len)
         got_scalar = int(env._num_total_insertion_goals)
         got_table = int(env._num_total_goals_p[0].item())

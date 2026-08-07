@@ -58,6 +58,9 @@ echo "checkpoint : $CHECKPOINT"
 echo "overrides  : $TRAIN_OVERRIDES"
 echo "output     : $OUT_JSON"
 
+# Detached + marker-polled: Isaac Sim can hang in Kit teardown after the JSON
+# is on disk, which would hold the node until the walltime limit for nothing.
+SWEEP_LOG="$OUT_DIR/screw_leg_ratio_sweep.log"
 python -u peg_in_hole_dynamic/offline_eval_obj_pose_noise_sweep.py \
     --teacher-checkpoint "$CHECKPOINT" \
     --train-overrides "$TRAIN_OVERRIDES" \
@@ -70,6 +73,15 @@ python -u peg_in_hole_dynamic/offline_eval_obj_pose_noise_sweep.py \
     --override env.domain_randomization.force_scale=0.0 \
     --override env.domain_randomization.torque_scale=0.0 \
     --override env.peg_in_hole.random_goal_fraction=0.0 \
-    --output-json "$OUT_JSON"
+    --output-json "$OUT_JSON" > "$SWEEP_LOG" 2>&1 &
+SWEEP_PID=$!
+# 10 points at ~650-900 s each -> allow ~4 h before giving up.
+for i in $(seq 1 1440); do
+  grep -q "=> wrote" "$SWEEP_LOG" 2>/dev/null && break
+  kill -0 $SWEEP_PID 2>/dev/null || break
+  sleep 10
+done
+grep -E "SWEEP\]|Traceback|Error" "$SWEEP_LOG" || true
+kill -9 $SWEEP_PID 2>/dev/null
 
 echo "=== sweep complete: $OUT_JSON ==="

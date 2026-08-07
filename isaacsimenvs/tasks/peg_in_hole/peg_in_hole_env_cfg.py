@@ -36,6 +36,32 @@ class PegInHoleAssetsCfg(AssetsCfg):
 @configclass
 class PegInHoleCfg:
     problem: str = "peg.tol0p5mm"
+    # Multi-problem co-training. When `problems` is non-empty it OVERRIDES
+    # `problem`, and different parallel envs run different problems in one run.
+    # `problem_mix` gives integer slot counts (one per entry, empty => uniform):
+    # integers rather than float weights because the spawner round-robins over a
+    # slot list, so integers are exactly what the mechanism expresses and there
+    # is no rounding gap between the requested and realized mix.
+    #   problems=[A, B, C], problem_mix=[3, 1, 1] -> slots [A,A,A,B,C], L=5
+    # Requires num_envs % L == 0, else the trailing envs skew the mix.
+    problems: tuple[str, ...] = ()
+    problem_mix: tuple[int, ...] = ()
+    problem_assignment_seed: int = 0
+    # False (default) -> the MultiUsdFileCfg list has one entry per mix slot and
+    # the spawner cycles it. True -> one entry per env, drawn from a shuffled
+    # balanced multiset.
+    #
+    # Measured at 512 envs, P=2: the spawn cost is driven entirely by LIST
+    # LENGTH, not by multi-asset mode --
+    #     P=1  UsdFileCfg            7.15 s
+    #     P=2  512-entry (shuffled) 172.00 s
+    #     P=2  2-entry   (periodic)   6.93 s
+    # and the periodic form is also BETTER stratified across SAPG blocks
+    # (worst deviation 0.10% vs 1.66% at 12288 envs / P=4), because the
+    # spawner's lexicographic prim ordering already decorrelates env index from
+    # problem. So shuffling costs 25x setup and buys nothing; it is kept only as
+    # an escape hatch. Totals are exact either way.
+    problem_assignment_shuffle: bool = False
     goal_mode: str = "preInsertAndFinal"
 
     # When True the receptive/fixture is a kinematic body: infinite effective

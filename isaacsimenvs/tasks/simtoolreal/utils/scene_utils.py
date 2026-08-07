@@ -1535,24 +1535,40 @@ def _materialize_env_prims(env) -> None:
             stage.DefinePrim(env_path, "Xform")
 
 
-def _build_object_scale_tensor(env, object_scales_normalized, num_object_usds: int) -> None:
-    num_envs = env.num_envs
-    object_prim_paths = find_matching_prim_paths("/World/envs/env_.*/Object")
-    if len(object_prim_paths) != num_envs:
-        raise RuntimeError(
-            f"Expected {num_envs} Object prims after MultiUsdFileCfg spawn, "
-            f"got {len(object_prim_paths)}. Cloner-drop bug may have returned."
-        )
+def recover_asset_index_per_env(env, prim_glob: str, num_usds: int) -> torch.Tensor:
+    """-> (num_envs,) long: which entry of a MultiUsdFileCfg list each env got.
 
-    env._object_scale_per_env = torch.zeros(num_envs, 3, device=env.device, dtype=torch.float32)
-    env._object_asset_index_per_env = torch.zeros(num_envs, device=env.device, dtype=torch.long)
-    for source_idx, obj_path in enumerate(object_prim_paths):
-        env_id = int(obj_path.rsplit("/", 2)[-2].removeprefix("env_"))
-        asset_index = source_idx % num_object_usds
-        env._object_scale_per_env[env_id] = torch.tensor(
-            object_scales_normalized[asset_index], device=env.device, dtype=torch.float32,
+    The spawner assigns `usd_path[source_idx % num_usds]` where `source_idx` is
+    the position in the prim-path iteration order -- which is LEXICOGRAPHIC over
+    "env_<n>", not numeric. So source_idx != env_id in general and the env_id
+    must be parsed out of the path rather than inferred from enumeration order.
+    Getting this wrong gives every env someone else's asset while training looks
+    perfectly healthy, so callers should cross-check the result (e.g. against
+    PhysX mass, or against a second asset's recovered mapping).
+    """
+    num_envs = env.num_envs
+    prim_paths = find_matching_prim_paths(prim_glob)
+    if len(prim_paths) != num_envs:
+        raise RuntimeError(
+            f"Expected {num_envs} prims for {prim_glob}, got {len(prim_paths)}. "
+            "Cloner-drop bug may have returned."
         )
-        env._object_asset_index_per_env[env_id] = asset_index
+    idx = torch.zeros(num_envs, device=env.device, dtype=torch.long)
+    for source_idx, prim_path in enumerate(prim_paths):
+        env_id = int(prim_path.rsplit("/", 2)[-2].removeprefix("env_"))
+        idx[env_id] = source_idx % num_usds
+    return idx
+
+
+def _build_object_scale_tensor(env, object_scales_normalized, num_object_usds: int) -> None:
+    asset_index = recover_asset_index_per_env(
+        env, "/World/envs/env_.*/Object", num_object_usds
+    )
+    scales = torch.as_tensor(
+        object_scales_normalized, device=env.device, dtype=torch.float32
+    )
+    env._object_asset_index_per_env = asset_index
+    env._object_scale_per_env = scales[asset_index].contiguous()
 
 
 def setup_scene(env) -> None:

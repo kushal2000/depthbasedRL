@@ -1,0 +1,118 @@
+#!/bin/bash
+#SBATCH -N 1
+#SBATCH -n 1
+#SBATCH --cpus-per-task=12
+#SBATCH --get-user-env
+#SBATCH --mem=200000
+#SBATCH -t 0-02:00:00
+#SBATCH --partition=portal
+#SBATCH --exclude=portal-compute-01
+#SBATCH --gres=gpu:1
+#SBATCH -J stage1_validate
+#SBATCH -o /share/portal/kk837/depthbasedRL/plot_figures/rebuttal/experiments/logs/stage1_validate_%j.out
+#SBATCH -e /share/portal/kk837/depthbasedRL/plot_figures/rebuttal/experiments/logs/stage1_validate_%j.err
+
+# Stage 1 gate: P > 1 with DUPLICATE problems.
+#
+# Both entries are the same problem, so the geometry every env sees is
+# identical to the P == 1 run -- but the code path is completely different:
+# MultiUsdFileCfg instead of UsdFileCfg, per-problem bake dirs, three-way
+# spawn-slot recovery, the mass cross-check, the SAPG block-balance assert and
+# every 2-D per-env gather. Any divergence from the P == 1 baseline is
+# therefore pure plumbing, not physics. That is what makes this the single
+# highest-value test in the multi-problem plan.
+#
+# Note the duplicate case deliberately exercises the stem-collision defence:
+# the two problems share a URDF, so only the per-problem work/bake dirs keep
+# their baked USDs distinct. If those dirs regressed, the tripwire fires here.
+
+set -uo pipefail
+
+REPO_ROOT="/share/portal/kk837/depthbasedRL"
+OUT_DIR="$REPO_ROOT/plot_figures/rebuttal/experiments/outputs"
+RUN_DIR="$REPO_ROOT/train_dir/fig4/beam_3x_teachers/beam_3x_part_0_finetune_rgf0_dr_wrench_2026-05-25_05-40-24"
+CHECKPOINT="$(ls "$RUN_DIR"/*/last/model.pth | head -1)"
+TRAIN_OVERRIDES="$RUN_DIR/.hydra/overrides.yaml"
+PROBLEM="fabrica.beam_3x.part_0_matchedmass_sdf_hybrid"
+
+NUM_ENVS=512
+SEED=42
+
+mkdir -p "$OUT_DIR" "$REPO_ROOT/plot_figures/rebuttal/experiments/logs"
+cd "$REPO_ROOT"
+source .venv_isaacsim/bin/activate
+export OMNI_KIT_ACCEPT_EULA=YES
+export OMNI_KIT_CACHE_PATH="/tmp/${USER}_ov_cache_stage1"
+mkdir -p "$OMNI_KIT_CACHE_PATH"
+
+# Isaac Sim hangs in Kit teardown after writing its output, so a foreground
+# python blocks the rest of the script indefinitely. Run detached and kill on
+# the "=> wrote" marker (same pattern as OFFLINE_EVAL.md prescribes).
+run_eval () {  # $1=logfile  $2...=python args
+  local log="$1"; shift
+  python -u peg_in_hole_dynamic/offline_eval_teacher_robustness.py "$@" > "$log" 2>&1 &
+  local pid=$!
+  local i
+  for i in $(seq 1 180); do
+    grep -q "=> wrote" "$log" 2>/dev/null && break
+    kill -0 $pid 2>/dev/null || break
+    sleep 10
+  done
+  kill -9 $pid 2>/dev/null
+  sleep 8
+  grep -E "problems=\[|envs per problem|mass cross-check|SAPG block mix|all envs|no early drop|terminations:|Traceback|Error" "$log" || true
+}
+
+common=(
+  --teacher-checkpoint "$CHECKPOINT"
+  --train-overrides "$TRAIN_OVERRIDES"
+  --exact-train --num-envs "$NUM_ENVS" --seed "$SEED"
+  --override env.domain_randomization.force_scale=0.0
+  --override env.domain_randomization.torque_scale=0.0
+)
+
+echo "############ (A) P == 1 baseline"
+run_eval "$OUT_DIR/stage1_p1.txt" "${common[@]}" --output-json "$OUT_DIR/stage1_p1.json"
+
+echo "############ (B) P == 2, duplicate problem (shuffled: 1 list entry per env)"
+run_eval "$OUT_DIR/stage1_p2dup.txt" "${common[@]}" \
+    --override "env.peg_in_hole.problems=[$PROBLEM,$PROBLEM]" \
+    --output-json "$OUT_DIR/stage1_p2dup.json"
+
+echo "############ (B2) P == 2, periodic (list length = 2)"
+# Isolates whether the MultiUsdFileCfg spawn cost scales with LIST LENGTH or is
+# a flat penalty for entering multi-asset mode at all. Part B spawns from a
+# 512-entry list, this one from a 2-entry list; compare the
+# "spawned robot/table/hole/object/goalviz" timings.
+run_eval "$OUT_DIR/stage1_p2per.txt" "${common[@]}" \
+    --override "env.peg_in_hole.problems=[$PROBLEM,$PROBLEM]" \
+    --override env.peg_in_hole.problem_assignment_shuffle=false \
+    --output-json "$OUT_DIR/stage1_p2per.json"
+
+echo "############ spawn cost comparison"
+for f in stage1_p1 stage1_p2dup stage1_p2per; do
+  printf "%-14s " "$f"
+  grep -oE "\[\+[0-9.]+s\] spawned robot" "$OUT_DIR/$f.txt" 2>/dev/null | tail -1 || echo "(none)"
+done
+
+echo "############ (C) compare"
+python - <<'PY'
+import json, sys
+OUT = "/share/portal/kk837/depthbasedRL/plot_figures/rebuttal/experiments/outputs"
+try:
+    a = json.load(open(f"{OUT}/stage1_p1.json"))["results"][0]
+    b = json.load(open(f"{OUT}/stage1_p2dup.json"))["results"][0]
+except Exception as exc:
+    print(f"==> FAIL: could not load results ({exc})"); sys.exit(1)
+ra, rb = a["early_drop_filtered"], b["early_drop_filtered"]
+pa, pb = 100 * ra["retract_rate"], 100 * rb["retract_rate"]
+print(f"P=1   success {pa:6.2f}%  (n={ra['n']})  terminations={a['termination_counts']}")
+print(f"P=2   success {pb:6.2f}%  (n={rb['n']})  terminations={b['termination_counts']}")
+d = abs(pa - pb)
+print(f"delta {d:.2f} pts")
+# Identical geometry, but the two spawn paths are not bit-reproducible on GPU
+# (measured earlier: two runs of the SAME code flip ~0.6% of env outcomes), so
+# require agreement to within 2 points rather than exact equality.
+print("==> PASS" if d <= 2.0 else "==> FAIL: divergence exceeds plumbing noise")
+sys.exit(0 if d <= 2.0 else 1)
+PY

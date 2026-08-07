@@ -159,6 +159,9 @@ class PegInHoleEnv(SimToolRealEnv):
         self._prelude_lift_off_env = self._prelude_lift_off_p[pidx]
         self._hole_z_offset_env = self._hole_z_offset_p[pidx]
 
+        if P > 1:
+            self._check_problem_assignment(P, pidx)
+
         self.hole_pos = torch.zeros(
             self.num_envs, 3, dtype=torch.float32, device=self.device
         )
@@ -265,12 +268,66 @@ class PegInHoleEnv(SimToolRealEnv):
         from dextoolbench.objects import NAME_TO_OBJECT
         from peg_in_hole_dynamic import PROBLEM_REGISTRY
 
-        problem_name = str(pih_cfg.problem)
-        if problem_name not in PROBLEM_REGISTRY:
-            raise KeyError(
-                f"Unknown peg-in-hole problem {problem_name!r}; "
-                f"known problems: {sorted(PROBLEM_REGISTRY)}"
+        # Multi-problem: `problems` overrides `problem` when non-empty. The
+        # per-problem lists are built below; index 0 keeps feeding the legacy
+        # scalars so the scene builder, pose_viewer and the fixtured subclass
+        # are untouched at P == 1.
+        problem_names = [str(p) for p in (pih_cfg.problems or ())]
+        if problem_names:
+            print(
+                f"[PegInHoleEnv] multi-problem: peg_in_hole.problems has "
+                f"{len(problem_names)} entries, IGNORING peg_in_hole.problem="
+                f"{pih_cfg.problem!r}",
+                flush=True,
             )
+        else:
+            problem_names = [str(pih_cfg.problem)]
+
+        for name in problem_names:
+            if name not in PROBLEM_REGISTRY:
+                raise KeyError(
+                    f"Unknown peg-in-hole problem {name!r}; "
+                    f"known problems: {sorted(PROBLEM_REGISTRY)}"
+                )
+
+        mix = [int(v) for v in (pih_cfg.problem_mix or ())]
+        if not mix:
+            mix = [1] * len(problem_names)
+        if len(mix) != len(problem_names):
+            raise ValueError(
+                f"peg_in_hole.problem_mix has {len(mix)} entries but "
+                f"problems has {len(problem_names)}; they must match."
+            )
+        if any(c < 1 for c in mix):
+            raise ValueError(f"peg_in_hole.problem_mix counts must be >= 1, got {mix}")
+        n_slots = sum(mix)
+        n_envs = int(cfg.scene.num_envs)
+        if n_envs % n_slots != 0:
+            raise ValueError(
+                f"scene.num_envs ({n_envs}) must be divisible by the mix total "
+                f"({n_slots} = sum(problem_mix)={mix}); otherwise the problem "
+                "totals would not come out exact."
+            )
+        # One entry per env (not per mix-slot): a balanced multiset, shuffled.
+        # Passing a length-num_envs list to MultiUsdFileCfg means the spawner's
+        # round-robin hands each env its own entry, so the assignment is this
+        # shuffle rather than a repeating period-L pattern. Balanced by
+        # construction -- every problem gets exactly num_envs/n_slots*count envs.
+        if bool(getattr(pih_cfg, "problem_assignment_shuffle", True)):
+            reps = n_envs // n_slots
+            slot_problem_idx = [i for i, c in enumerate(mix) for _ in range(c * reps)]
+            if len(problem_names) > 1:
+                import random as _random
+                _random.Random(int(pih_cfg.problem_assignment_seed)).shuffle(
+                    slot_problem_idx
+                )
+        else:
+            # One entry per mix slot: the spawner cycles it, giving a repeating
+            # period-L pattern instead of a shuffle. Same exact totals, much
+            # shorter MultiUsdFileCfg list.
+            slot_problem_idx = [i for i, c in enumerate(mix) for _ in range(c)]
+
+        problem_name = problem_names[0]
         problem = PROBLEM_REGISTRY[problem_name]
 
         if problem.insertion_object_name not in NAME_TO_OBJECT:
@@ -288,6 +345,47 @@ class PegInHoleEnv(SimToolRealEnv):
         if len(insert_pose_sequence) == 0:
             raise ValueError(f"Problem {problem_name!r} has no insertion subgoals.")
 
+        # Resolve every problem in the mix into parallel length-P lists.
+        # goal_mode is global, so the prelude count is derived per problem under
+        # the same mode -- a problem lacking prelude_lift_offset under
+        # transportPreInsertFinal is a hard error, same as the single case.
+        p_names, p_objs, p_obj_urdfs, p_rec_urdfs = [], [], [], []
+        p_scales, p_hole_z, p_seqs, p_tail = [], [], [], []
+        p_prelude, p_lift = [], []
+        for name in problem_names:
+            prob = PROBLEM_REGISTRY[name]
+            if prob.insertion_object_name not in NAME_TO_OBJECT:
+                raise KeyError(
+                    f"Problem {name!r} references object "
+                    f"{prob.insertion_object_name!r}, not in NAME_TO_OBJECT."
+                )
+            spec = NAME_TO_OBJECT[prob.insertion_object_name]
+            seq = prob.insert_pose_rel_receptive
+            if pih_cfg.goal_mode == "finalGoalOnly":
+                seq = (prob.final_insert_pose_rel_receptive,)
+            if len(seq) == 0:
+                raise ValueError(f"Problem {name!r} has no insertion subgoals.")
+            if pih_cfg.goal_mode == "transportPreInsertFinal":
+                if float(prob.prelude_lift_offset) <= 0.0:
+                    raise ValueError(
+                        f"goal_mode='transportPreInsertFinal' requires problem "
+                        f"{name!r} to set prelude_lift_offset > 0; got "
+                        f"{prob.prelude_lift_offset}."
+                    )
+                pre, lift = 2, float(prob.prelude_lift_offset)
+            else:
+                pre, lift = 0, 0.0
+            p_names.append(name)
+            p_objs.append(prob)
+            p_obj_urdfs.append(str(_resolve_asset_path(spec.urdf_path)))
+            p_rec_urdfs.append(str(_resolve_asset_path(prob.receptive_urdf)))
+            p_scales.append(tuple(float(v) for v in spec.scale))
+            p_hole_z.append(float(prob.hole_z_offset))
+            p_seqs.append(tuple(seq))
+            p_tail.append(len(seq))
+            p_prelude.append(pre)
+            p_lift.append(lift)
+
         self._pih_problem_name = problem_name
         self._pih_problem = problem
         self._pih_object_urdf_abs = str(object_urdf)
@@ -302,14 +400,16 @@ class PegInHoleEnv(SimToolRealEnv):
         # scene builder, the fixtured subclass and pose_viewer keep working
         # unchanged. Phase C (after super().__init__()) turns these into padded
         # (P, ...) tables and (N,) per-env gathers.
-        self._pih_problem_names = [problem_name]
-        self._pih_problems = [problem]
-        self._pih_object_urdfs = [str(object_urdf)]
-        self._pih_receptive_urdfs = [str(receptive_urdf)]
-        self._pih_object_scales = [self._pih_object_scale]
-        self._pih_hole_z_offsets = [self._pih_hole_z_offset]
-        self._pih_insert_pose_seqs = [tuple(insert_pose_sequence)]
-        self._pih_num_tail_goals = [self._num_insertion_goals]
+        self._pih_problem_names = p_names
+        self._pih_problems = p_objs
+        self._pih_object_urdfs = p_obj_urdfs
+        self._pih_receptive_urdfs = p_rec_urdfs
+        self._pih_object_scales = p_scales
+        self._pih_hole_z_offsets = p_hole_z
+        self._pih_insert_pose_seqs = p_seqs
+        self._pih_num_tail_goals = p_tail
+        self._pih_slot_problem_idx = slot_problem_idx
+        self._num_problems = len(p_names)
 
         # transportPreInsertFinal prepends two per-episode prelude waypoints
         # (lift-in-place, over-hole) onto the hole-frame insertion sequence.
@@ -329,11 +429,15 @@ class PegInHoleEnv(SimToolRealEnv):
         self._num_total_insertion_goals = (
             self._num_insertion_goals + self._num_prelude_goals
         )
-        self._pih_num_prelude_goals = [self._num_prelude_goals]
-        self._pih_prelude_lift_offs = [self._prelude_lift_offset]
-        self._pih_num_total_goals = [self._num_total_insertion_goals]
-        # Spawn mix: slot -> problem index. Length L; today L == P == 1.
-        self._pih_slot_problem_idx = [0]
+        self._pih_num_prelude_goals = p_prelude
+        self._pih_prelude_lift_offs = p_lift
+        self._pih_num_total_goals = [t + pr for t, pr in zip(p_tail, p_prelude)]
+        if self._num_problems > 1:
+            print(
+                f"[PegInHoleEnv] problems={p_names} mix={mix} "
+                f"slots={slot_problem_idx}",
+                flush=True,
+            )
 
         cfg.assets.object_name = problem.insertion_object_name
         cfg.assets.object_urdf = self._pih_object_urdf_abs
@@ -348,6 +452,88 @@ class PegInHoleEnv(SimToolRealEnv):
             )
         else:
             cfg.termination.max_consecutive_successes = self._num_total_insertion_goals
+
+    def _check_problem_assignment(self, num_problems: int, pidx: torch.Tensor) -> None:
+        """Two guards on the env -> problem map, run once at construction.
+
+        Everything upstream trusts that find_matching_prim_paths returns the
+        spawner's ordering. If that ever broke, every env would get someone
+        else's geometry AND waypoints, and training would look noisy-but-alive
+        rather than failing. These checks do not share that assumption.
+        """
+        # (1) Order-independent physical cross-check: PhysX mass is read back
+        # from the spawned bodies, so it cannot be fooled by a wrong ordering.
+        # Within a problem group it must be constant.
+        # A row-count mismatch here is NOT a limitation of the diagnostic -- it
+        # means the RigidObject's physics view does not cover every env, i.e.
+        # the multi-asset spawn is malformed. Observed at P=4 / 12288 envs:
+        # default_mass came back with num_envs/P rows, and the run then died in
+        # PhysX with "CUDA error: device-side assert triggered / Failed to
+        # submit rigid body transforms" a few minutes later. Treating it as a
+        # soft warning let that run burn 14.7 GPU-hours as a zombie, so it is a
+        # hard error: fail at construction, loudly, in seconds.
+        try:
+            # default_mass lives on CPU in Isaac Lab while pidx is on the sim
+            # device, so the mask has to be brought onto one of them.
+            mass = self.object.data.default_mass[:, 0].to(pidx.device)
+        except Exception as exc:  # pragma: no cover
+            print(
+                f"[PegInHoleEnv][warn] could not read default_mass ({exc}); "
+                "skipping the mass cross-check.",
+                flush=True,
+            )
+        else:
+            if mass.shape[0] != pidx.shape[0]:
+                raise RuntimeError(
+                    f"Object physics view covers {mass.shape[0]} bodies but the "
+                    f"scene has {pidx.shape[0]} envs. The multi-asset spawn is "
+                    "malformed -- PhysX will fail on the first physics step. "
+                    "Reduce scene.num_envs or the number of problems."
+                )
+            means, spreads = [], []
+            for p in range(num_problems):
+                g = mass[pidx == p]
+                if g.numel() == 0:
+                    raise RuntimeError(f"problem {p} was assigned no envs")
+                means.append(g.mean())
+                spreads.append(g.std() if g.numel() > 1 else torch.zeros((), device=g.device))
+            means_t, spreads_t = torch.stack(means), torch.stack(spreads)
+            tol = 1e-6 * float(means_t.abs().max().clamp_min(1e-9))
+            if float(spreads_t.max()) > max(tol, 1e-9):
+                raise RuntimeError(
+                    "env->problem map is wrong: object mass varies WITHIN a "
+                    f"problem group (per-group std {spreads_t.tolist()}, "
+                    f"means {means_t.tolist()})."
+                )
+            uniq = torch.unique(torch.round(means_t / max(tol, 1e-9)))
+            if uniq.numel() < num_problems:
+                print(
+                    "[PegInHoleEnv][warn] two problems share an object mass; the "
+                    "mass cross-check cannot distinguish them (inconclusive, not "
+                    "a failure).", flush=True,
+                )
+            else:
+                print(f"[PegInHoleEnv] mass cross-check OK: {means_t.tolist()}", flush=True)
+
+        # (2) SAPG blocks are contiguous env ranges and rl_games reports stats
+        # from the LAST block only, so a skewed block would make the headline
+        # number describe a subset of the mix.
+        block = int(getattr(self.cfg, "expl_coef_block_size", 0) or 0)
+        if block > 0 and self.num_envs % block == 0 and self.num_envs > block:
+            frac = torch.stack([
+                (pidx.view(-1, block) == p).float().mean(dim=1) for p in range(num_problems)
+            ])                                            # (P, n_blocks)
+            target = (torch.bincount(pidx, minlength=num_problems).float()
+                      / float(self.num_envs)).unsqueeze(1)
+            worst = float((frac - target).abs().max())
+            print(f"[PegInHoleEnv] SAPG block mix: worst deviation "
+                  f"{100 * worst:.2f}% over {frac.shape[1]} blocks", flush=True)
+            if worst > 0.10:
+                raise RuntimeError(
+                    f"problem mix is unbalanced across SAPG blocks (worst "
+                    f"deviation {100 * worst:.1f}%); reported metrics would "
+                    "describe a subset of the tasks."
+                )
 
     def _override_goal_counts(self, prelude: int, tail: int) -> None:
         """Reshape the goal budget after _configure_problem.
@@ -830,17 +1016,37 @@ class PegInHoleEnv(SimToolRealEnv):
         reward = compute_rewards(self)
         pih_cfg = self.cfg.peg_in_hole
 
+        # The lift bonus is a single training-wide curriculum stage, so the latch
+        # stays global. But the fade must be gated on the SLOWEST problem: a mean
+        # pooled over all random-goal envs lets the easiest problem drag the
+        # average past the threshold and switch off lift shaping (scale 20 /
+        # 300) for problems still in the lift phase -- silently, since nothing
+        # logs per-problem. Taking the min over per-problem means keeps one
+        # curriculum for the whole run while removing that failure. Reduces
+        # exactly to the pooled mean when P == 1.
         mean_rg_eps = 0.0
-        if self.is_random_goal_env.any():
-            mean_rg_eps = (
-                self._prev_episode_successes[self.is_random_goal_env]
-                .float()
-                .mean()
-                .item()
-            )
+        fade_stat = 0.0
+        rg = self.is_random_goal_env
+        if rg.any():
+            rg_succ = self._prev_episode_successes[rg].float()
+            mean_rg_eps = rg_succ.mean().item()
+            if getattr(self, "_num_problems", 1) > 1:
+                pidx_rg = self._problem_idx_per_env[rg]
+                per_problem = [
+                    rg_succ[pidx_rg == p].mean().item()
+                    for p in range(self._num_problems)
+                    if bool((pidx_rg == p).any())
+                ]
+                # A problem with no random-goal envs cannot report progress, so
+                # it is excluded rather than counted as 0 (which would freeze
+                # the curriculum forever).
+                fade_stat = min(per_problem) if per_problem else 0.0
+                self.extras["lift_fade_stat_min_over_problems"] = fade_stat
+            else:
+                fade_stat = mean_rg_eps
         if (
             self.lift_bonus_active
-            and mean_rg_eps >= float(pih_cfg.lift_bonus_fade_threshold)
+            and fade_stat >= float(pih_cfg.lift_bonus_fade_threshold)
         ):
             self.lift_bonus_active = False
 
@@ -917,6 +1123,26 @@ class PegInHoleEnv(SimToolRealEnv):
         self.extras["insertion_success_tolerance"] = float(
             self.cfg.peg_in_hole.insertion_success_tolerance
         )
+
+        # Per-problem breakdown. Without it a co-trained run reports one pooled
+        # number and you cannot tell whether co-training helped or whether the
+        # easiest task is carrying the mean -- which is the entire question the
+        # experiment exists to answer.
+        if getattr(self, "_num_problems", 1) > 1:
+            hit = (
+                self._prev_episode_successes >= self.prev_episode_env_max_goals
+            ).float()
+            ins_only = ~self.prev_episode_is_random_goal
+            for p, name in enumerate(self._pih_problem_names):
+                m = (self._problem_idx_per_env == p) & ins_only
+                if not bool(m.any()):
+                    continue
+                self.extras[f"problem/{name}/all_goals_hit_ratio"] = hit[m].mean()
+                self.extras[f"problem/{name}/success_ratio"] = prev_ratio[m].mean()
+                if self.cfg.peg_in_hole.enable_retract:
+                    self.extras[f"problem/{name}/retract_success"] = (
+                        self.retract_succeeded[m].float().mean()
+                    )
 
         if float(self.cfg.peg_in_hole.random_goal_fraction) > 0.0:
             prev_s = self._prev_episode_successes

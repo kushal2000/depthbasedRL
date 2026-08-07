@@ -222,7 +222,11 @@ def hole_urdf_for_env(env, env_id: int) -> tuple[str, Path] | tuple[None, None]:
     hole_paths = getattr(env, "_hole_urdf_paths", None)
     if not hole_paths:
         return None, None
-    urdf_path = Path(hole_paths[env_id % len(hole_paths)])
+    # _hole_urdf_paths is PROBLEM-indexed; env_id % len() only coincides with
+    # the real mapping at P == 1.
+    _pidx = getattr(env, "_problem_idx_per_env", None)
+    _i = int(_pidx[env_id].item()) if _pidx is not None else env_id % len(hole_paths)
+    urdf_path = Path(hole_paths[_i])
     return urdf_path.read_text(encoding="utf-8"), urdf_path
 
 
