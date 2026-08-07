@@ -1,0 +1,103 @@
+#!/bin/bash
+#SBATCH -N 1
+#SBATCH -n 1
+#SBATCH --cpus-per-task=12
+#SBATCH --get-user-env
+#SBATCH --mem=200000
+#SBATCH -t 0-02:00:00
+#SBATCH --partition=portal
+#SBATCH --exclude=portal-compute-01
+#SBATCH --gres=gpu:1
+#SBATCH -J eval_cotrained_beam
+#SBATCH -o /share/portal/kk837/depthbasedRL/plot_figures/rebuttal/experiments/logs/eval_cotrained_beam_%j.out
+#SBATCH -e /share/portal/kk837/depthbasedRL/plot_figures/rebuttal/experiments/logs/eval_cotrained_beam_%j.err
+
+# Evaluate the 2-way co-trained beam teacher on EACH beam step separately.
+#
+# The policy was trained with problems=[part_2, part_0]; to score one task at a
+# time we replay its own training config (--exact-train) and then override
+# `problems` down to a single entry, so P == 1 for the eval.
+#
+# Two deliberate deviations from the training config, both to make the number
+# mean "success on the insertion task":
+#   random_goal_fraction 0.1 -> 0   so every env runs insertion, not the
+#                                   random-goal co-training mix
+#   force/torque scale       -> 0   matching the solo baselines this is compared
+#                                   against (those teachers trained wrench-off)
+#
+# COMPARISON CAVEAT: the co-trained policy trained under the harmonized
+# envelope (rgf=0.1, hole_yaw=10 deg, goal_yaw_noise=1.0). The solo baselines
+# used each task's own .sub. Beam's solo subs already used hole_yaw=10 and
+# goal_yaw=1.0, so the only training-time difference is rgf -- but that is a
+# real difference, so treat solo-vs-cotrained as indicative, not controlled.
+#   solo baselines (P=1, wrench off, 512 envs): part_0 98.25%, part_2 97.76%
+
+set -uo pipefail
+
+REPO_ROOT="/share/portal/kk837/depthbasedRL"
+RUN_DIR="$REPO_ROOT/train_dir/multiproblem/cotrain/multiproblem_beam_2way_2026-08-06_18-36-11"
+# Snapshot, not last/model.pth: the training job is still running and rewrites
+# that file periodically.
+CHECKPOINT="$RUN_DIR/eval_snapshot_model.pth"
+TRAIN_OVERRIDES="$RUN_DIR/.hydra/overrides.yaml"
+OUT_DIR="$REPO_ROOT/plot_figures/rebuttal/experiments/outputs"
+
+B2="fabrica.beam_3x.part_2_matchedmass_sdf_hybrid"
+B0="fabrica.beam_3x.part_0_matchedmass_sdf_hybrid"
+NUM_ENVS=512
+SEED=42
+
+mkdir -p "$OUT_DIR" "$REPO_ROOT/plot_figures/rebuttal/experiments/logs"
+cd "$REPO_ROOT"
+source .venv_isaacsim/bin/activate
+export OMNI_KIT_ACCEPT_EULA=YES
+export OMNI_KIT_CACHE_PATH="/tmp/${USER}_ov_cache_evalcotrain"
+mkdir -p "$OMNI_KIT_CACHE_PATH"
+
+# Isaac Sim hangs in Kit teardown after the JSON is written; run detached and
+# stop on the marker rather than waiting for exit.
+run_eval () {  # $1=tag  $2=problem
+  local tag="$1" problem="$2"
+  local log="$OUT_DIR/cotrained_beam_${tag}.txt"
+  echo "############ $tag  ($problem)"
+  python -u peg_in_hole_dynamic/offline_eval_teacher_robustness.py \
+      --teacher-checkpoint "$CHECKPOINT" \
+      --train-overrides "$TRAIN_OVERRIDES" \
+      --exact-train --num-envs "$NUM_ENVS" --seed "$SEED" \
+      --override "env.peg_in_hole.problems=[$problem]" \
+      --override env.peg_in_hole.random_goal_fraction=0.0 \
+      --override env.domain_randomization.force_scale=0.0 \
+      --override env.domain_randomization.torque_scale=0.0 \
+      --output-json "$OUT_DIR/cotrained_beam_${tag}.json" > "$log" 2>&1 &
+  local pid=$!
+  local i
+  for i in $(seq 1 180); do
+    grep -q "=> wrote" "$log" 2>/dev/null && break
+    kill -0 $pid 2>/dev/null || break
+    sleep 10
+  done
+  grep -E "problem=|all envs|no early drop|terminations:|Traceback|Error" "$log" || true
+  kill -9 $pid 2>/dev/null
+  sleep 8
+}
+
+run_eval step1_part2 "$B2"
+run_eval step2_part0 "$B0"
+
+echo "############ SUMMARY (co-trained vs solo baseline)"
+python - <<'PY'
+import json
+OUT = "/share/portal/kk837/depthbasedRL/plot_figures/rebuttal/experiments/outputs"
+solo = {"step1_part2": 97.76, "step2_part0": 98.25}
+for tag, label in (("step1_part2", "Assemble-beam Step 1"),
+                   ("step2_part0", "Assemble-beam Step 2")):
+    try:
+        r = json.load(open(f"{OUT}/cotrained_beam_{tag}.json"))["results"][0]
+        e = r["early_drop_filtered"]
+        print(f"{label:24s} co-trained {100*e['retract_rate']:6.2f}%  "
+              f"(n={e['n']})   solo {solo[tag]:.2f}%   "
+              f"delta {100*e['retract_rate'] - solo[tag]:+.2f}")
+    except Exception as exc:
+        print(f"{label:24s} FAILED to load ({exc})")
+PY
+echo "############ DONE"

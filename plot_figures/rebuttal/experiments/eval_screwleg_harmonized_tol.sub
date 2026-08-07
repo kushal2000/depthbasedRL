@@ -1,0 +1,98 @@
+#!/bin/bash
+#SBATCH -N 1
+#SBATCH -n 1
+#SBATCH --cpus-per-task=12
+#SBATCH --get-user-env
+#SBATCH --mem=200000
+#SBATCH -t 0-04:00:00
+#SBATCH --partition=portal
+#SBATCH --exclude=portal-compute-01
+#SBATCH --gres=gpu:1
+#SBATCH -J eval_screwleg_harmtol
+#SBATCH -o /share/portal/kk837/depthbasedRL/plot_figures/rebuttal/experiments/logs/eval_screwleg_harmtol_%j.out
+#SBATCH -e /share/portal/kk837/depthbasedRL/plot_figures/rebuttal/experiments/logs/eval_screwleg_harmtol_%j.err
+
+# Screw-Leg bolted + unbolted, judged on the SAME success criterion as the other
+# three tasks in the bolted-vs-unbolted figure.
+#
+# Screw-Leg is the only task of the four trained on a stricter bar:
+#
+#   task                   insertion_success_tolerance   target_success_tolerance
+#   Tight Insertion              0.010                        0.01
+#   Assemble-beam Step 1         0.010                        0.01
+#   Assemble-beam Step 2         0.010                        0.01
+#   Screw-Leg                    0.005   (2x tighter)         0.002  (5x tighter)
+#
+# Comparing it against the others at its own tolerances puts a stricter bar in
+# the same figure as three looser ones. This job re-runs both arms at the shared
+# criterion. It is a CRITERION change, not a physics change -- the fixture, the
+# clamp, the mass and the policy are all unchanged.
+#
+# Reference at Screw-Leg's own (strict) tolerances:
+#   bolted    insertion 89.32%  retract 84.60%  (n=487)  fall 41   timeout  54
+#   unbolted  insertion  6.58%  retract  1.44%  (n=486)  fall 199  timeout 303
+#
+# Job 854161 separately isolates insertion 0.005 -> 0.010 on the unbolted arm
+# only, so that one attributes the criterion change to the insertion tolerance
+# alone; this job moves both knobs to the shared values.
+
+set -uo pipefail
+REPO_ROOT="/share/portal/kk837/depthbasedRL"
+RUN_DIR="$REPO_ROOT/train_dir/fig4/long_leg_screwing_teachers/furniture_bench_leg4_200mm_finetune_rgf10_dr_wrench_2026-05-25_22-16-15"
+CHECKPOINT="$(ls "$RUN_DIR"/*/last/model.pth | head -1)"
+OUT_DIR="$REPO_ROOT/plot_figures/rebuttal/experiments/outputs"
+
+mkdir -p "$OUT_DIR"
+cd "$REPO_ROOT"
+source .venv_isaacsim/bin/activate
+export OMNI_KIT_ACCEPT_EULA=YES
+export OMNI_KIT_CACHE_PATH="/tmp/${USER}_ov_cache_screwleg_harmtol"
+mkdir -p "$OMNI_KIT_CACHE_PATH"
+
+run_eval () {  # $1=tag $2=bolted
+  local tag="$1" bolted="$2"
+  local log="$OUT_DIR/screwleg_harmtol_${tag}.txt"
+  echo "############ $tag (bolted=$bolted, insertion_tol=0.010, target_tol=0.01)"
+  python -u peg_in_hole_dynamic/offline_eval_teacher_robustness.py \
+      --teacher-checkpoint "$CHECKPOINT" \
+      --train-overrides "$RUN_DIR/.hydra/overrides.yaml" \
+      --exact-train --num-envs 512 --seed 42 --max-steps-per-episode 3000 \
+      --override env.domain_randomization.force_scale=0.0 \
+      --override env.domain_randomization.torque_scale=0.0 \
+      --override env.peg_in_hole.random_goal_fraction=0.0 \
+      --override "env.peg_in_hole.hole_x_range=[-0.14,0.14]" \
+      --override "env.peg_in_hole.fixture_bolted=$bolted" \
+      --override env.peg_in_hole.insertion_success_tolerance=0.010 \
+      --override env.termination.target_success_tolerance=0.01 \
+      --output-json "$OUT_DIR/screwleg_harmtol_${tag}.json" > "$log" 2>&1 &
+  local pid=$!
+  local i
+  for i in $(seq 1 720); do
+    grep -q "=> wrote" "$log" 2>/dev/null && break
+    kill -0 $pid 2>/dev/null || break
+    sleep 10
+  done
+  grep -E "no early drop|terminations:|Traceback|Error" "$log" || true
+  kill -9 $pid 2>/dev/null
+  sleep 8
+}
+
+run_eval bolted   True
+run_eval unbolted False
+
+echo "############ SUMMARY (Screw-Leg at the shared criterion)"
+python - <<'PY'
+import json
+OUT="/share/portal/kk837/depthbasedRL/plot_figures/rebuttal/experiments/outputs"
+print("  strict (own tolerances):  bolted 84.60%   unbolted  1.44%")
+for tag in ("bolted","unbolted"):
+    try:
+        r=json.load(open(f"{OUT}/screwleg_harmtol_{tag}.json"))["results"][0]
+        e,t=r["early_drop_filtered"],r["termination_counts"]
+        print(f"  harmonized {tag:9s}: insertion {100*e['insertion_rate']:6.2f}%  "
+              f"retract {100*e['retract_rate']:6.2f}%  (n={e['n']}, cens={r['unfinished_envs']})  "
+              f"fall={t['fall']} timeout={t['timeout']}")
+    except Exception as exc:
+        print(f"  harmonized {tag:9s}: FAILED ({exc})")
+PY
+echo "############ DONE"

@@ -1,0 +1,113 @@
+#!/bin/bash
+#SBATCH -N 1
+#SBATCH -n 1
+#SBATCH --cpus-per-task=12
+#SBATCH --get-user-env
+#SBATCH --mem=200000
+#SBATCH -t 0-04:00:00
+#SBATCH --partition=portal
+#SBATCH --exclude=portal-compute-01
+#SBATCH --gres=gpu:1
+#SBATCH -J eval_screwleg_unbolted_only
+#SBATCH -o /share/portal/kk837/depthbasedRL/plot_figures/rebuttal/experiments/logs/eval_screwleg_unbolted_only_%j.out
+#SBATCH -e /share/portal/kk837/depthbasedRL/plot_figures/rebuttal/experiments/logs/eval_screwleg_unbolted_only_%j.err
+
+# Screw-Leg UNBOLTED only -- split out of the bolted/unbolted pair (job 853114),
+# whose bolted arm already completed and wrote its JSON:
+#
+#   bolted, hole_x_range=[-0.14,0.14], 512 envs, wrench off:
+#     insertion 89.32%  retract 84.60%  (n=487)
+#     fall 41 (25 early)  timeout 54
+#
+# So this run is the matching second arm; compare against those numbers. Every
+# setting below is identical to that arm except fixture_bolted.
+#
+# WHY THE CLAMP (carried over from the pair sub). hole_x_range defaults to
+# +/-0.1875, tuned for the 8 cm peg hole. The one_leg receptive is a 16.25 cm
+# square table top, so at the x extremes it reaches 0.1875 + 0.0813 = 0.2687 m
+# against table_narrow's 0.2375 m half-extent -- a 3.1 cm overhang. Bolted the
+# fixture is kinematic and floats there; unbolted it falls off immediately,
+# taking the leg with it. That is what the earlier 0.00% actually measured
+# (fall 244/512, episodes ending in 0.6 s). Clamped to +/-0.14 it reaches
+# 0.2213 m, clearing the table by ~1.6 cm, so every env starts supported.
+#
+# NOTE the clamp is expected to matter MORE here than it did for beam Step 2.
+# Step 2's clamped unbolted number came in at 49.78% vs 48.47% unclamped -- the
+# clamp bought only 1.3 pts there, because its failures are mid-episode tipping
+# (129 late falls, 83 timeouts), not bad initial placement. Screw-Leg's 0.00%
+# had its falls concentrated at RESET, which is the overhang signature Step 2
+# turned out not to have, so this arm is the real test of that distinction.
+#
+# 3000-step budget: one_leg has 10 subgoals and episode_length_buf resets on
+# every subgoal success, so episodes legitimately outrun the 600-step default
+# (measured: 104/512 envs censored at 600).
+
+set -uo pipefail
+
+REPO_ROOT="/share/portal/kk837/depthbasedRL"
+RUN_DIR="$REPO_ROOT/train_dir/fig4/long_leg_screwing_teachers/furniture_bench_leg4_200mm_finetune_rgf10_dr_wrench_2026-05-25_22-16-15"
+CHECKPOINT="$(ls "$RUN_DIR"/*/last/model.pth | head -1)"
+TRAIN_OVERRIDES="$RUN_DIR/.hydra/overrides.yaml"
+OUT_DIR="$REPO_ROOT/plot_figures/rebuttal/experiments/outputs"
+
+NUM_ENVS=512
+SEED=42
+HOLE_X="[-0.14,0.14]"
+LOG="$OUT_DIR/screwleg_unbolted.txt"
+
+mkdir -p "$OUT_DIR" "$REPO_ROOT/plot_figures/rebuttal/experiments/logs"
+cd "$REPO_ROOT"
+source .venv_isaacsim/bin/activate
+export OMNI_KIT_ACCEPT_EULA=YES
+export OMNI_KIT_CACHE_PATH="/tmp/${USER}_ov_cache_screwleg_unbolted_only"
+mkdir -p "$OMNI_KIT_CACHE_PATH"
+
+echo "############ unbolted (fixture_bolted=False, hole_x_range=$HOLE_X)"
+
+# Isaac Sim hangs in Kit teardown after the JSON is written; run detached and
+# stop on the "=> wrote" marker rather than waiting for the process to exit.
+python -u peg_in_hole_dynamic/offline_eval_teacher_robustness.py \
+    --teacher-checkpoint "$CHECKPOINT" \
+    --train-overrides "$TRAIN_OVERRIDES" \
+    --exact-train --num-envs "$NUM_ENVS" --seed "$SEED" \
+    --max-steps-per-episode 3000 \
+    --override env.domain_randomization.force_scale=0.0 \
+    --override env.domain_randomization.torque_scale=0.0 \
+    --override env.peg_in_hole.random_goal_fraction=0.0 \
+    --override "env.peg_in_hole.hole_x_range=$HOLE_X" \
+    --override env.peg_in_hole.fixture_bolted=False \
+    --output-json "$OUT_DIR/screwleg_unbolted.json" > "$LOG" 2>&1 &
+PID=$!
+for i in $(seq 1 1200); do
+  grep -q "=> wrote" "$LOG" 2>/dev/null && break
+  kill -0 $PID 2>/dev/null || break
+  sleep 10
+done
+grep -E "all envs|no early drop|terminations:|Traceback|Error" "$LOG" || true
+kill -9 $PID 2>/dev/null
+sleep 8
+
+echo "############ SUMMARY (Screw-Leg, hole_x_range clamped)"
+python - <<'PY'
+import json
+OUT = "/share/portal/kk837/depthbasedRL/plot_figures/rebuttal/experiments/outputs"
+# bolted arm from job 853114, same settings apart from fixture_bolted
+BOLTED = {"retract": 84.60, "insertion": 89.32, "n": 487}
+print(f"{'bolted':9s} retract {BOLTED['retract']:6.2f}%  insertion {BOLTED['insertion']:6.2f}%  "
+      f"(n={BOLTED['n']})   [from job 853114]")
+try:
+    r = json.load(open(f"{OUT}/screwleg_unbolted.json"))["results"][0]
+    e, t = r["early_drop_filtered"], r["termination_counts"]
+    print(f"{'unbolted':9s} retract {100*e['retract_rate']:6.2f}%  "
+          f"insertion {100*e['insertion_rate']:6.2f}%  (n={e['n']})  "
+          f"fall={t['fall']} timeout={t['timeout']} unfinished={r['unfinished_envs']}")
+    print(f"\ndelta (unbolted - bolted): retract {100*e['retract_rate'] - BOLTED['retract']:+.2f} pts")
+    print("\nFor reference, Assemble-beam Step 2 at the same clamp:")
+    print("  bolted 0.690 kg 98.37%   unbolted 0.690 kg 49.78%   unbolted 1.502 kg 64.57%")
+except Exception as exc:
+    print(f"{'unbolted':9s} FAILED to load ({exc})")
+print("\nNOTE: not comparable to the earlier 86.03% bolted / 0.00% unbolted pair "
+      "-- those used the unclamped hole_x_range where this fixture overhung the "
+      "table by 3.1 cm.")
+PY
+echo "############ DONE"

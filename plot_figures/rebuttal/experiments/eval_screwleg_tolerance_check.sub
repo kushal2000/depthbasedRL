@@ -1,0 +1,81 @@
+#!/bin/bash
+#SBATCH -N 1
+#SBATCH -n 1
+#SBATCH --cpus-per-task=12
+#SBATCH --get-user-env
+#SBATCH --mem=200000
+#SBATCH -t 0-02:00:00
+#SBATCH --partition=portal
+#SBATCH --exclude=portal-compute-01
+#SBATCH --gres=gpu:1
+#SBATCH -J eval_screwleg_tolcheck
+#SBATCH -o /share/portal/kk837/depthbasedRL/plot_figures/rebuttal/experiments/logs/eval_screwleg_tolcheck_%j.out
+#SBATCH -e /share/portal/kk837/depthbasedRL/plot_figures/rebuttal/experiments/logs/eval_screwleg_tolcheck_%j.err
+
+# Reconcile "the viser rollouts looked fine" against the offline 1.44%.
+#
+# The viser session ran --insertion-success-tolerance 0.010; training (and so
+# --exact-train) uses 0.005. This arm is the offline unbolted run with ONLY
+# that tolerance changed, so the delta against 1.44% is attributable to the
+# criterion rather than to anything else.
+#
+# Reference, identical except tolerance:
+#   unbolted, tol 0.005:  insertion 6.58%  retract 1.44%  (n=486)
+#                         fall 199 (26 early)  timeout 303
+#   bolted,   tol 0.005:  insertion 89.32% retract 84.60% (n=487)
+#
+# NOTE this does not test the other suspect: the viser launcher reports the
+# FRACTION of subgoals hit, while the offline metric needs all 10 plus a clean
+# retract. Partial progress reads as success on screen and as zero here. That
+# one needs a goal-progress histogram, not a tolerance change.
+
+set -uo pipefail
+REPO_ROOT="/share/portal/kk837/depthbasedRL"
+RUN_DIR="$REPO_ROOT/train_dir/fig4/long_leg_screwing_teachers/furniture_bench_leg4_200mm_finetune_rgf10_dr_wrench_2026-05-25_22-16-15"
+CHECKPOINT="$(ls "$RUN_DIR"/*/last/model.pth | head -1)"
+OUT_DIR="$REPO_ROOT/plot_figures/rebuttal/experiments/outputs"
+LOG="$OUT_DIR/screwleg_unbolted_tol010.txt"
+
+mkdir -p "$OUT_DIR"
+cd "$REPO_ROOT"
+source .venv_isaacsim/bin/activate
+export OMNI_KIT_ACCEPT_EULA=YES
+export OMNI_KIT_CACHE_PATH="/tmp/${USER}_ov_cache_screwleg_tolcheck"
+mkdir -p "$OMNI_KIT_CACHE_PATH"
+
+echo "############ unbolted, insertion_success_tolerance=0.010 (viser setting)"
+python -u peg_in_hole_dynamic/offline_eval_teacher_robustness.py \
+    --teacher-checkpoint "$CHECKPOINT" \
+    --train-overrides "$RUN_DIR/.hydra/overrides.yaml" \
+    --exact-train --num-envs 512 --seed 42 --max-steps-per-episode 3000 \
+    --override env.domain_randomization.force_scale=0.0 \
+    --override env.domain_randomization.torque_scale=0.0 \
+    --override env.peg_in_hole.random_goal_fraction=0.0 \
+    --override "env.peg_in_hole.hole_x_range=[-0.14,0.14]" \
+    --override env.peg_in_hole.fixture_bolted=False \
+    --override env.peg_in_hole.insertion_success_tolerance=0.010 \
+    --output-json "$OUT_DIR/screwleg_unbolted_tol010.json" > "$LOG" 2>&1 &
+PID=$!
+for i in $(seq 1 720); do
+  grep -q "=> wrote" "$LOG" 2>/dev/null && break
+  kill -0 $PID 2>/dev/null || break
+  sleep 10
+done
+grep -E "no early drop|terminations:|Traceback|Error" "$LOG" || true
+kill -9 $PID 2>/dev/null
+sleep 8
+
+echo "############ COMPARISON"
+echo "  tol 0.005 (exact-train) : insertion  6.58%  retract  1.44%"
+python - <<'PY'
+import json
+try:
+    r=json.load(open("/share/portal/kk837/depthbasedRL/plot_figures/rebuttal/experiments/outputs/screwleg_unbolted_tol010.json"))["results"][0]
+    e,t=r["early_drop_filtered"],r["termination_counts"]
+    print(f"  tol 0.010 (viser)       : insertion {100*e['insertion_rate']:6.2f}%  "
+          f"retract {100*e['retract_rate']:6.2f}%  (n={e['n']})")
+    print(f"     fall={t['fall']} timeout={t['timeout']} censored={r['unfinished_envs']}")
+except Exception as exc:
+    print("  tol 0.010 FAILED", exc)
+PY
+echo "############ DONE"

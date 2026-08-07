@@ -1,0 +1,108 @@
+#!/bin/bash
+#SBATCH -N 1
+#SBATCH -n 1
+#SBATCH --cpus-per-task=12
+#SBATCH --get-user-env
+#SBATCH --mem=200000
+#SBATCH -t 0-04:00:00
+#SBATCH --partition=portal
+#SBATCH --exclude=portal-compute-01
+#SBATCH --gres=gpu:1
+#SBATCH -J eval_screwleg_unbolted
+#SBATCH -o /share/portal/kk837/depthbasedRL/plot_figures/rebuttal/experiments/logs/eval_screwleg_unbolted_%j.out
+#SBATCH -e /share/portal/kk837/depthbasedRL/plot_figures/rebuttal/experiments/logs/eval_screwleg_unbolted_%j.err
+
+# Screw-Leg bolted vs unbolted, as a MATCHED PAIR.
+#
+# Why re-run bolted rather than reuse the existing 86.03%: the fixture placement
+# range has to change, and both arms must share it.
+#
+#   hole_x_range defaults to +/-0.1875 -- tuned for the 8 cm peg hole. The
+#   one_leg receptive is a 16.25 cm square table top, so at the x extremes it
+#   reaches 0.1875 + 0.0813 = 0.2687 m while table_narrow's half-extent is
+#   0.2375 m: it overhangs by 3.1 cm. Bolted, the fixture is kinematic and just
+#   floats there, so nothing looks wrong. UNBOLTED it falls off immediately,
+#   taking the leg with it -- which is what the earlier 0.00% actually measured
+#   (fall: 244/512, and viser showed episodes ending in 0.6 s).
+#
+#   Clamped to +/-0.14 the fixture reaches 0.2213 m, clearing the table with
+#   ~1.6 cm margin, so every env starts fully supported.
+#
+# The fixture also now carries mass 0.6001 kg (was 0.2798 kg, the shell-volume
+# value); both arms see the same fixture, so that cancels in the comparison.
+#
+# 3000-step budget: one_leg has 10 subgoals and episode_length_buf resets on
+# every subgoal success, so episodes legitimately outrun the 600-step default
+# (measured: 104/512 envs censored at 600).
+
+set -uo pipefail
+
+REPO_ROOT="/share/portal/kk837/depthbasedRL"
+RUN_DIR="$REPO_ROOT/train_dir/fig4/long_leg_screwing_teachers/furniture_bench_leg4_200mm_finetune_rgf10_dr_wrench_2026-05-25_22-16-15"
+CHECKPOINT="$(ls "$RUN_DIR"/*/last/model.pth | head -1)"
+TRAIN_OVERRIDES="$RUN_DIR/.hydra/overrides.yaml"
+OUT_DIR="$REPO_ROOT/plot_figures/rebuttal/experiments/outputs"
+
+NUM_ENVS=512
+SEED=42
+HOLE_X="[-0.14,0.14]"
+
+mkdir -p "$OUT_DIR" "$REPO_ROOT/plot_figures/rebuttal/experiments/logs"
+cd "$REPO_ROOT"
+source .venv_isaacsim/bin/activate
+export OMNI_KIT_ACCEPT_EULA=YES
+export OMNI_KIT_CACHE_PATH="/tmp/${USER}_ov_cache_screwleg_unbolted"
+mkdir -p "$OMNI_KIT_CACHE_PATH"
+
+run_eval () {  # $1=tag  $2=bolted(True|False)
+  local tag="$1" bolted="$2"
+  local log="$OUT_DIR/screwleg_${tag}.txt"
+  echo "############ $tag  (fixture_bolted=$bolted, hole_x_range=$HOLE_X)"
+  python -u peg_in_hole_dynamic/offline_eval_teacher_robustness.py \
+      --teacher-checkpoint "$CHECKPOINT" \
+      --train-overrides "$TRAIN_OVERRIDES" \
+      --exact-train --num-envs "$NUM_ENVS" --seed "$SEED" \
+      --max-steps-per-episode 3000 \
+      --override env.domain_randomization.force_scale=0.0 \
+      --override env.domain_randomization.torque_scale=0.0 \
+      --override env.peg_in_hole.random_goal_fraction=0.0 \
+      --override "env.peg_in_hole.hole_x_range=$HOLE_X" \
+      --override "env.peg_in_hole.fixture_bolted=$bolted" \
+      --output-json "$OUT_DIR/screwleg_${tag}.json" > "$log" 2>&1 &
+  local pid=$!
+  local i
+  for i in $(seq 1 720); do
+    grep -q "=> wrote" "$log" 2>/dev/null && break
+    kill -0 $pid 2>/dev/null || break
+    sleep 10
+  done
+  grep -E "all envs|no early drop|terminations:|Traceback|Error" "$log" || true
+  kill -9 $pid 2>/dev/null
+  sleep 8
+}
+
+run_eval bolted   True
+run_eval unbolted False
+
+echo "############ SUMMARY"
+python - <<'PY'
+import json
+OUT = "/share/portal/kk837/depthbasedRL/plot_figures/rebuttal/experiments/outputs"
+res = {}
+for tag in ("bolted", "unbolted"):
+    try:
+        r = json.load(open(f"{OUT}/screwleg_{tag}.json"))["results"][0]
+        e, t = r["early_drop_filtered"], r["termination_counts"]
+        res[tag] = (100 * e["retract_rate"], 100 * e["insertion_rate"], e["n"],
+                    t["fall"], t["timeout"], r["unfinished_envs"])
+        print(f"{tag:9s} retract {res[tag][0]:6.2f}%  insertion {res[tag][1]:6.2f}%  "
+              f"(n={e['n']})  fall={t['fall']} timeout={t['timeout']} "
+              f"unfinished={r['unfinished_envs']}")
+    except Exception as exc:
+        print(f"{tag:9s} FAILED ({exc})")
+if len(res) == 2:
+    print(f"\ndelta (unbolted - bolted): retract {res['unbolted'][0]-res['bolted'][0]:+.2f} pts")
+    print("NOTE: not comparable to the earlier 86.03% bolted number -- that used "
+          "the unclamped hole_x_range.")
+PY
+echo "############ DONE"

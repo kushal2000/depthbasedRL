@@ -1,0 +1,112 @@
+#!/bin/bash
+#SBATCH -N 1
+#SBATCH -n 1
+#SBATCH --cpus-per-task=12
+#SBATCH --get-user-env
+#SBATCH --mem=200000
+#SBATCH -t 0-02:00:00
+#SBATCH --partition=portal
+#SBATCH --exclude=portal-compute-01
+#SBATCH --gres=gpu:1
+#SBATCH -J eval_beam2_fixture_mass
+#SBATCH -o /share/portal/kk837/depthbasedRL/plot_figures/rebuttal/experiments/logs/eval_beam2_fixture_mass_%j.out
+#SBATCH -e /share/portal/kk837/depthbasedRL/plot_figures/rebuttal/experiments/logs/eval_beam2_fixture_mass_%j.err
+
+# Assemble-beam Step 2 (part_0): does a heavier fixture recover the unbolted
+# collapse (48.5% vs 98.3% bolted)?
+#
+# Three arms, ALL with hole_x_range clamped, so mass is the only variable:
+#   A bolted,   0.690 kg   -- baseline at the clamped range
+#   B unbolted, 0.690 kg   -- current (solid PLA)
+#   C unbolted, 1.502 kg   -- same geometry at aluminium density (2700 kg/m^3)
+#
+# WHY THE CLAMP. hole_x_range defaults to +/-0.1875, tuned for the 8 cm peg
+# hole. The part_0 fixture is 14.6 cm wide, so at the x extremes it reaches
+# 0.1875 + 0.0731 = 0.2606 m against table_narrow's 0.2375 m half-extent -- a
+# 2.3 cm overhang. Bolted the fixture is kinematic and floats, so nothing looks
+# wrong; unbolted it falls off, taking the part with it. The existing 48.5%
+# therefore mixes real tipping with fixtures that were never supported.
+# Clamped to +/-0.14 it reaches 0.2131 m and every env starts fully supported.
+#
+# WHY MASS SHOULD MATTER HERE. Tipping resists via the restoring moment
+# m*g*d (d = horizontal COM-to-pivot distance), so a heavier fixture resists a
+# given contact force proportionally better. part_0 is the tall one: COM at
+# z=0.059 with an ixz cross-term, versus part_2's squat z=0.019 -- which is why
+# Step 2 collapsed unbolted while Step 1 barely moved.
+#
+# Arm C rewrites the fixture URDF in place and restores it on exit; the USD is
+# baked per run, so the change only takes effect for the run that follows it.
+
+set -uo pipefail
+
+REPO_ROOT="/share/portal/kk837/depthbasedRL"
+URDF="$REPO_ROOT/assets/urdf/fabrica/beam_3x/insertion_fixtures/part_0_sdf_hybrid.urdf"
+RUN_DIR="$REPO_ROOT/train_dir/fig4/beam_3x_teachers/beam_3x_part_0_finetune_rgf0_dr_wrench_2026-05-25_05-40-24"
+CHECKPOINT="$(ls "$RUN_DIR"/*/last/model.pth | head -1)"
+TRAIN_OVERRIDES="$RUN_DIR/.hydra/overrides.yaml"
+OUT_DIR="$REPO_ROOT/plot_figures/rebuttal/experiments/outputs"
+
+NUM_ENVS=512
+SEED=42
+HOLE_X="[-0.14,0.14]"
+
+mkdir -p "$OUT_DIR" "$REPO_ROOT/plot_figures/rebuttal/experiments/logs"
+cd "$REPO_ROOT"
+source .venv_isaacsim/bin/activate
+export OMNI_KIT_ACCEPT_EULA=YES
+export OMNI_KIT_CACHE_PATH="/tmp/${USER}_ov_cache_beam2mass"
+mkdir -p "$OMNI_KIT_CACHE_PATH"
+
+BACKUP="$(mktemp)"; cp "$URDF" "$BACKUP"
+restore() { cp "$BACKUP" "$URDF"; echo "restored $URDF"; }
+trap restore EXIT
+
+run_eval () {  # $1=tag  $2=bolted
+  local tag="$1" bolted="$2"
+  local log="$OUT_DIR/beam2mass_${tag}.txt"
+  echo "############ $tag (bolted=$bolted, mass=$(grep -oE '<mass value="[0-9.]+"' "$URDF" | head -1))"
+  python -u peg_in_hole_dynamic/offline_eval_teacher_robustness.py \
+      --teacher-checkpoint "$CHECKPOINT" --train-overrides "$TRAIN_OVERRIDES" \
+      --exact-train --num-envs "$NUM_ENVS" --seed "$SEED" \
+      --override env.domain_randomization.force_scale=0.0 \
+      --override env.domain_randomization.torque_scale=0.0 \
+      --override "env.peg_in_hole.hole_x_range=$HOLE_X" \
+      --override "env.peg_in_hole.fixture_bolted=$bolted" \
+      --output-json "$OUT_DIR/beam2mass_${tag}.json" > "$log" 2>&1 &
+  local pid=$!
+  local i
+  for i in $(seq 1 240); do
+    grep -q "=> wrote" "$log" 2>/dev/null && break
+    kill -0 $pid 2>/dev/null || break
+    sleep 10
+  done
+  grep -E "no early drop|terminations:|Traceback|Error" "$log" || true
+  kill -9 $pid 2>/dev/null
+  sleep 8
+}
+
+run_eval bolted_690g   True
+run_eval unbolted_690g False
+
+echo "### switching fixture to aluminium density (2700 kg/m^3)"
+python scripts/compute_urdf_inertial.py "$URDF" --density 2700 --write | tail -2
+run_eval unbolted_1502g False
+
+echo "############ SUMMARY (Assemble-beam Step 2, hole_x_range clamped)"
+python - <<'PY'
+import json
+OUT = "/share/portal/kk837/depthbasedRL/plot_figures/rebuttal/experiments/outputs"
+for tag, label in (("bolted_690g",   "bolted            0.690 kg"),
+                   ("unbolted_690g", "unbolted          0.690 kg"),
+                   ("unbolted_1502g","unbolted (alu)    1.502 kg")):
+    try:
+        r = json.load(open(f"{OUT}/beam2mass_{tag}.json"))["results"][0]
+        e, t = r["early_drop_filtered"], r["termination_counts"]
+        print(f"{label:28s} {100*e['retract_rate']:6.2f}%  (n={e['n']})  "
+              f"fall={t['fall']} timeout={t['timeout']}")
+    except Exception as exc:
+        print(f"{label:28s} FAILED ({exc})")
+print("\nNOTE: not comparable to the earlier 98.25/48.47 pair -- those used the "
+      "unclamped hole_x_range where this fixture overhung the table by 2.3 cm.")
+PY
+echo "############ DONE"
