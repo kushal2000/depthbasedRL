@@ -1,0 +1,63 @@
+<?xml version="1.0"?>
+<!--
+  Power board receptacle, 0.3 mm clearance per side.
+
+  A power strip rather than a wall socket, because the receptacle has to
+  sit on a table: a wall outlet mounted on a table top is incoherent, and
+  earlier attempts to model one (with a wall panel, then a faceplate over
+  a body) imitated an installation that does not exist in this scene.
+
+  Blade slots at x = +/-6.35 mm, 1.6 mm wide, opening into the body so a
+  plug can seat its full 15.9 mm blade depth. Collision is exact boxes;
+  the visual carries the aluminium sleeve, plastic chassis, switch and
+  cable. Only the ACTIVE outlet is opened in collision - the companion
+  outlet is visual, so nothing can enter it.
+
+  Block 120 x 56 x 30 mm, origin at its
+  centroid, so the Problem uses hole_z_offset = 0.0150.
+-->
+<robot name="socket_tol0p3mm">
+  <link name="hole">
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry><mesh filename="socket_tol0p3mm_visual.glb"/></geometry>
+    </visual>
+    <collision>
+      <origin xyz="0.000000 0.000000 -0.002000" rpy="0 0 0"/>
+      <geometry><box size="0.120000 0.056000 0.026000"/></geometry>
+    </collision>
+    <collision>
+      <origin xyz="-0.033725 0.000000 0.013000" rpy="0 0 0"/>
+      <geometry><box size="0.052550 0.056000 0.004000"/></geometry>
+    </collision>
+    <collision>
+      <origin xyz="0.000000 0.000000 0.013000" rpy="0 0 0"/>
+      <geometry><box size="0.010500 0.056000 0.004000"/></geometry>
+    </collision>
+    <collision>
+      <origin xyz="0.033725 0.000000 0.013000" rpy="0 0 0"/>
+      <geometry><box size="0.052550 0.056000 0.004000"/></geometry>
+    </collision>
+    <collision>
+      <origin xyz="0.006350 0.015800 0.013000" rpy="0 0 0"/>
+      <geometry><box size="0.002200 0.024400 0.004000"/></geometry>
+    </collision>
+    <collision>
+      <origin xyz="0.006350 -0.015800 0.013000" rpy="0 0 0"/>
+      <geometry><box size="0.002200 0.024400 0.004000"/></geometry>
+    </collision>
+    <collision>
+      <origin xyz="-0.006350 0.016200 0.013000" rpy="0 0 0"/>
+      <geometry><box size="0.002200 0.023600 0.004000"/></geometry>
+    </collision>
+    <collision>
+      <origin xyz="-0.006350 -0.016200 0.013000" rpy="0 0 0"/>
+      <geometry><box size="0.002200 0.023600 0.004000"/></geometry>
+    </collision>
+    <inertial>
+      <mass value="0.302189"/>
+      <origin xyz="0.000000 -0.000000 -0.000009" rpy="0 0 0"/>
+      <inertia ixx="1.016700e-04" ixy="6.616975e-22" ixz="-1.744675e-09" iyy="3.855154e-04" iyz="3.318342e-22" izz="4.418974e-04"/>
+    </inertial>
+  </link>
+</robot>

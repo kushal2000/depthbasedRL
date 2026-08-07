@@ -131,3 +131,4 @@ from . import peg               # noqa: E402, F401
 from . import fabrica           # noqa: E402, F401
 from . import fmb               # noqa: E402, F401
 from . import furniture_bench   # noqa: E402, F401
+from . import plug_fork        # noqa: E402, F401
