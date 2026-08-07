@@ -114,9 +114,9 @@
       <geometry><cylinder radius="0.016" length="0.027"/></geometry>
     </collision>
       <inertial>
-      <mass value="0.2798"/>
+      <mass value="0.6001"/>
       <origin xyz="-0.002718 0.002718 -0.006647" rpy="0 0 0"/>
-      <inertia ixx="8.501496e-04" ixy="4.071367e-05" ixz="6.958884e-06" iyy="8.501371e-04" iyz="-6.899132e-06" izz="1.653383e-03"/>
+      <inertia ixx="1.823416e-03" ixy="8.732341e-05" ixz="1.492554e-05" iyy="1.823389e-03" iyz="-1.479738e-05" izz="3.546205e-03"/>
     </inertial>
 </link>
   <material name="bulk">
