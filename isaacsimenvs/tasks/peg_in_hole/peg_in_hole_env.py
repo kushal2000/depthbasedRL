@@ -400,6 +400,27 @@ class PegInHoleEnv(SimToolRealEnv):
         # scene builder, the fixtured subclass and pose_viewer keep working
         # unchanged. Phase C (after super().__init__()) turns these into padded
         # (P, ...) tables and (N,) per-env gathers.
+        # Objects must share link structure. RigidObject binds ONE PhysX view
+        # over all spawned instances, and a view needs a consistent body layout;
+        # mixing a 1-link object (lpeg) with 3-link ones (beam/furniture) makes
+        # it bind only num_envs/P bodies and PhysX dies on the first step.
+        # Measured: P=4@12288 -> 3072, P=4@3072 -> 768, P=3@12288 -> 4096, all
+        # exactly num_envs/P. Checked here, before the multi-minute scene build.
+        if len(p_names) > 1:
+            import xml.etree.ElementTree as _ET
+            layouts = {}
+            for nm, urdf in zip(p_names, p_obj_urdfs):
+                root = _ET.parse(urdf).getroot()
+                layouts[nm] = tuple(l.get("name") for l in root.iter("link"))
+            distinct = set(layouts.values())
+            if len(distinct) > 1:
+                detail = "; ".join(f"{n}: {list(v)}" for n, v in layouts.items())
+                raise ValueError(
+                    "multi-problem requires all insertion objects to share link "
+                    "structure (same body count and names), but they differ -- "
+                    f"{detail}. Group problems with matching object skeletons."
+                )
+
         self._pih_problem_names = p_names
         self._pih_problems = p_objs
         self._pih_object_urdfs = p_obj_urdfs
@@ -486,9 +507,13 @@ class PegInHoleEnv(SimToolRealEnv):
             if mass.shape[0] != pidx.shape[0]:
                 raise RuntimeError(
                     f"Object physics view covers {mass.shape[0]} bodies but the "
-                    f"scene has {pidx.shape[0]} envs. The multi-asset spawn is "
-                    "malformed -- PhysX will fail on the first physics step. "
-                    "Reduce scene.num_envs or the number of problems."
+                    f"scene has {pidx.shape[0]} envs "
+                    f"(= num_envs/{num_problems}). RigidObject binds a single "
+                    "PhysX view, which needs a consistent body layout across "
+                    "the spawned assets; with mixed layouts it binds only one "
+                    "asset's share and PhysX then fails on the first physics "
+                    "step. This is NOT a scale or problem-count limit -- the "
+                    "objects must share link structure. See the Phase A check."
                 )
             means, spreads = [], []
             for p in range(num_problems):
