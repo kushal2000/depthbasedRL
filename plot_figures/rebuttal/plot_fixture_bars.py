@@ -82,6 +82,12 @@ def main() -> None:
     ap.add_argument("--name", default="fixture_bolted_vs_unbolted")
     ap.add_argument("--title",
                     default="Fixture bolted vs unbolted (no retraining)")
+    # The two series are generic A/B; defaults keep the fixture wording so
+    # existing invocations are unchanged.
+    ap.add_argument("--label-a", default="Bolted (fixed fixture)")
+    ap.add_argument("--label-b", default="Unbolted (free fixture)")
+    ap.add_argument("--pending-note", default="unbolted\npending",
+                    help="drawn where series B is missing")
     ap.add_argument("--outdir", default=str(Path(__file__).resolve().parent / "outputs"))
     args = ap.parse_args()
 
@@ -110,7 +116,7 @@ def main() -> None:
             ax.annotate(f"{val:.1f}", (i + off, val), textcoords="offset points",
                         xytext=(0, 4), ha="center", fontsize=8.5, color=INK)
         if t["unbolted"] is None:
-            ax.annotate("unbolted\npending", (i + bw / 2 + gap / 2, 2),
+            ax.annotate(args.pending_note, (i + bw / 2 + gap / 2, 2),
                         ha="center", va="bottom", fontsize=8, color=MUTED,
                         multialignment="center")
 
@@ -118,8 +124,8 @@ def main() -> None:
     # bar() container does not carry its facecolor into the legend, which
     # silently renders both swatches the same colour.
     from matplotlib.patches import Patch
-    ax.legend(handles=[Patch(facecolor=C_BOLTED, label="Bolted (fixed fixture)"),
-                       Patch(facecolor=C_UNBOLTED, label="Unbolted (free fixture)")],
+    ax.legend(handles=[Patch(facecolor=C_BOLTED, label=args.label_a),
+                       Patch(facecolor=C_UNBOLTED, label=args.label_b)],
               loc="lower center", bbox_to_anchor=(0.5, 1.01), ncol=2,
               frameon=False, fontsize=9, handlelength=1.1, handletextpad=0.5,
               columnspacing=1.4)
