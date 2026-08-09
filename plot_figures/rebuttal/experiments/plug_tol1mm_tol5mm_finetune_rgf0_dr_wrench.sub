@@ -11,33 +11,52 @@
 #SBATCH -o /dev/null
 #SBATCH -e /dev/null
 
-# Rebuttal teacher: FORK into a flatware holder, at real-world scale.
+# Rebuttal teacher: ELECTRIC PLUG into a power board socket, at real scale.
 #
-# Reviewers noted the existing task suite uses ENLARGED geometry (beam_3x is
-# literally 3x) rather than everyday object sizes. This task is a real scanned
-# object at true scale: YCB 030_fork, 197.6 x 27.1 x 15.9 mm, inserted
-# HANDLE-FIRST into a moulded holder with 1.00 mm clearance per side.
+# This is the task the reviewers named: "There is no evidence that the policy
+# can learn to assemble challenging objects such as plugging a naturally sized
+# electric plug." It also answers their second point, that the existing objects
+# "are limited to thin and long pieces, essentially the same family" -- unlike
+# the peg, beams, screw leg and fork, the plug is COMPACT (41.5 x 42.5 x 27 mm,
+# aspect ~1:1:0.65) rather than elongated.
 #
-# Asset notes (see peg_in_hole_dynamic/plug_fork/create_assets.py):
-#   visual    the YCB scan with its own texture
-#   collision 9 CoACD hulls, +15% volume. Axis-aligned slab boxes were tried
-#             first and more than DOUBLED it (46.5 vs 19.6 cm^3) by filling the
-#             dished head solid -- unusable at 1 mm clearance.
-#   holder    procedural, so its 5 box collisions are exact, not approximate.
-#   frame     long axis on X with the handle at -X, per repo convention:
-#             reward.fixed_size and Object.scale both define keypoints along X,
-#             so a Z-long object gets a keypoint box rotated 90 deg to the mesh.
+# It is additionally the only TWO-FEATURE insertion in the suite: both blades
+# enter simultaneously, so contact itself constrains yaw. Every existing task is
+# a single-feature insertion, which is contact-topology diversity rather than
+# merely a different silhouette.
 #
-# The angular tolerance is the real difficulty here, not the linear one: with
-# ~78 mm of engagement and 2 mm of total diametral clearance, the fork binds at
-# about 1.5 deg of tilt (atan(2/78)).
+# Object: Apple 20 W USB-C adapter A2940, built to published dimensions
+# (41.5 x 42.5 x 27 mm, 58.5 g; chargerlab teardown), NEMA 1-15P blades 1.5 mm
+# thick, 6.3 / 7.9 mm wide, 12.7 mm pitch, fixed (this model does not fold).
+# The 1.5 mm blade is an order of magnitude below any feature in the existing
+# suite -- the peg's "tight insertion" is 0.5 mm CLEARANCE on a 20 mm-thick
+# tongue, which is a different claim from small FEATURES.
+#
+# Receptacle: 120 x 56 x 30 mm power board. A power strip rather than a wall
+# socket because the receptacle sits on a table, where a wall outlet would be
+# incoherent. Collision is exact boxes (procedural geometry, so the boxes ARE
+# the geometry); the visual carries an aluminium sleeve over a plastic chassis.
+#
+# STARTING AT 1 mm PER SIDE, deliberately. That opens the slot to 3.6 mm for a
+# 1.5 mm blade, which is generous, but it lets the policy learn the approach
+# before clearance is the binding constraint. Tighter variants exist and are the
+# intended follow-up:
+#   plug.tol0p5mm  0.5 mm/side
+#   plug.tol0p3mm  0.3 mm/side
+#   plug.tol0p1mm  0.1 mm/side  <- NEMA spec, 1.5 mm blade in a 1.6 mm slot
+#
+# PHYSICS CAVEAT worth watching in the first epochs: contact_offset is a GLOBAL
+# 2 mm (_CONTACT_OFFSET in simtoolreal/utils/scene_utils.py), so at 1 mm
+# clearance PhysX generates contacts before the blades are near the slot walls.
+# It cannot be tuned per-task without changing the committed fig1-fig4 results.
+# If the plug binds at the mouth rather than sliding in, that is the cause.
 #
 # Otherwise mirrors the fig-4 teachers: preInsertAndFinal goals, SAPG finetune
 # from the shared pretrained checkpoint, full DR, perturbation forces ON.
 
 TASK_ID="Isaacsimenvs-PegInHole-Direct-v0"
 AGENT_KEY="rl_games_sapg_cfg_entry_point"
-PROBLEM="fork.tol1mm"
+PROBLEM="plug.tol1mm"
 GOAL_MODE="preInsertAndFinal"
 CHECKPOINT="${CHECKPOINT:-/share/portal/kk837/depthbasedRL/pretrained_policy/model.pth}"
 
@@ -61,13 +80,25 @@ RANDOM_GOAL_MAX_SUCCESSES=5
 # 0.002/0.001 on exactly that reasoning and both tasks scored ZERO successes
 # across ~3000 epochs x 12288 envs while reward climbed normally -- the policy
 # was learning to approach and grasp but the goal was unreachable.
-INSERTION_SUCCESS_TOLERANCE=0.010
+# 0.005 for BOTH criteria -- a middle rung. The effective threshold is
+# tolerance * reward.keypoint_scale (1.5), so 0.005 -> 7.5 mm, against 15 mm at
+# the 0.010 every existing teacher uses.
+#
+# The ladder tried so far on this task:
+#   0.002 / 0.001   ZERO successes in 3000 epochs; unreachable
+#   0.010 / 0.005   inserts (67%) but retract gated off -- retract_rew was
+#                   exactly 0.0 across 6971 points, insertion qualifies at 15 mm
+#                   while retract demands 7.5 mm, so the plug sits in the dead
+#                   zone between them
+#   0.010 / 0.010   matched; retract_rew went nonzero within 1000 epochs
+#   0.005 / 0.005   THIS RUN -- matched, and tighter on both
+INSERTION_SUCCESS_TOLERANCE=0.005
 # The holder slot is rectangular and near-square in cross-section
 # (17.4 x 20.7 mm), so a large hole yaw would demand the policy resolve an
 # orientation the geometry barely distinguishes. Keep the fig-4 value.
 HOLE_YAW_RANGE_DEG=10.0
 SUCCESS_TOLERANCE=0.01
-TARGET_SUCCESS_TOLERANCE=0.01
+TARGET_SUCCESS_TOLERANCE=0.005
 SUCCESS_STEPS=1
 ENABLE_RETRACT=True
 RETRACT_REWARD_SCALE=1.0
@@ -107,7 +138,7 @@ FORCE_CONSECUTIVE_NEAR_GOAL=True
 # ── Weights & Biases ─────────────────────────────────────────
 WANDB_PROJECT="rebuttal"
 WANDB_GROUP="plug_fork_teachers"
-EXPERIMENT_TAG="fork_tol1mm_finetune_rgf0_dr_wrench"
+EXPERIMENT_TAG="plug_tol1mm_tol5mm_finetune_rgf0_dr_wrench"
 
 # ── Pose-only interactive viewer ─────────────────────────────
 CAPTURE_VIEWER_LEN=600

@@ -72,24 +72,26 @@ GOAL_XY_OBS_NOISE=0.002
 GOAL_YAW_OBS_NOISE_DEG=1.0
 RANDOM_GOAL_FRACTION=0.0
 RANDOM_GOAL_MAX_SUCCESSES=5
-# Tighter than the fork's 0.002, because the INSERTION DEPTH differs by 5x.
-# The metric threshold is insertion_success_tolerance * reward.keypoint_scale
-# (1.5). The fork travels 78 mm from touch to seated, so a 3 mm threshold is 4%
-# of the motion. The plug travels only 15.9 mm (its blade length), so the same
-# 3 mm would be 19% -- success would fire with the blades ~13 mm of 15.9 mm in,
-# i.e. visibly unseated. 0.001 gives a 1.5 mm threshold, ~9% of the travel.
-INSERTION_SUCCESS_TOLERANCE=0.001
+# 0.010, matching every working teacher (peg, both beams, screw-leg). Do NOT
+# tighten this to "match the clearance": the threshold is
+# insertion_success_tolerance * reward.keypoint_scale applied to the distance
+# between four FIXED-SIZE virtual keypoints (reward.fixed_size = 141 x 30 x 27
+# mm), so it is a pose-error metric, not a clearance. A first attempt used
+# 0.002/0.001 on exactly that reasoning and both tasks scored ZERO successes
+# across ~3000 epochs x 12288 envs while reward climbed normally -- the policy
+# was learning to approach and grasp but the goal was unreachable.
+INSERTION_SUCCESS_TOLERANCE=0.010
 # The holder slot is rectangular and near-square in cross-section
 # (17.4 x 20.7 mm), so a large hole yaw would demand the policy resolve an
 # orientation the geometry barely distinguishes. Keep the fig-4 value.
 HOLE_YAW_RANGE_DEG=10.0
 SUCCESS_TOLERANCE=0.01
-TARGET_SUCCESS_TOLERANCE=0.001
+TARGET_SUCCESS_TOLERANCE=0.01
 SUCCESS_STEPS=1
 ENABLE_RETRACT=True
 RETRACT_REWARD_SCALE=1.0
 RETRACT_DISTANCE_THRESHOLD=0.1
-RETRACT_SUCCESS_TOLERANCE=0.002
+RETRACT_SUCCESS_TOLERANCE=0.005
 
 # ── Domain randomization (FULL — the `_dr` variant) ──────────
 USE_OBS_DELAY=True
