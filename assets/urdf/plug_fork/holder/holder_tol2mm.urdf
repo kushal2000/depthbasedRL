@@ -21,7 +21,7 @@
   <link name="hole">
     <visual>
       <origin xyz="0 0 0" rpy="0 0 0"/>
-      <geometry><mesh filename="holder_tol2mm_visual.obj"/></geometry>
+      <geometry><mesh filename="holder_tol2mm_visual.glb"/></geometry>
       <material name="holder_steel"/>
     </visual>
     <collision>

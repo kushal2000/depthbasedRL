@@ -678,29 +678,64 @@ def build_blades():
                     (-BLADE_PITCH / 2, 0, -BODY[2] / 2 - BLADE_LEN / 2), 0.0003)])
 
 
-def build_socket(clearance_mm):
-    """Collision form of the power board: solid body plus a slotted top face
-    around the outlet. Exact boxes -- this is procedural geometry, so the boxes
-    are the ground truth, not an approximation."""
+def socket_collision_boxes(clearance_mm):
+    """Box list for the socket collision: floor, four cavity walls, slotted face.
+
+    THE SINGLE SOURCE OF TRUTH. create_assets.py used to carry its own copy of
+    this layout, so fixing one left the other stale -- the URDFs kept a solid
+    body long after this function grew a cavity, and the extents-only assert
+    that was supposed to catch drift passed because the OUTSIDE still matched.
+
+    The bug that motivated the cavity: the body was one solid 120 x 56 x 26 mm
+    box with slots cut only through the 4 mm top face, so blades entered 4 mm and
+    hit solid geometry. They are 15.9 mm long, so the plug could never seat -- and
+    it still scored as success, because a plug sitting 12 mm proud is inside the
+    15 mm keypoint threshold.
+    """
     c = clearance_mm / 1000.0
     bw, bh, bd = SOCKET_BLOCK
-    pt = 0.004                       # thickness of the slotted top face
-    parts = [box((bw, bh, bd - pt), (0, 0, -pt / 2))]
+    pt = 0.004
+    top = bd / 2
+    face_bot = top - pt
+
+    cav_w = 2 * (BLADE_PITCH / 2 + (SLOT_W + 2 * c) / 2) + 0.006
+    cav_h = max(SLOT_H_HOT, SLOT_H_NEU) + 2 * c + 0.010
+    cav_bot = face_bot - (BLADE_LEN + 0.004)
+    assert cav_bot > -bd / 2, "cavity deeper than the block"
+
+    boxes = []
+    floor_t = cav_bot - (-bd / 2)
+    boxes.append(((bw, bh, floor_t), (0.0, 0.0, -bd / 2 + floor_t / 2)))
+    wall_h = face_bot - cav_bot
+    zc = cav_bot + wall_h / 2
+    for x0, x1 in ((-bw / 2, -cav_w / 2), (cav_w / 2, bw / 2)):
+        boxes.append(((x1 - x0, bh, wall_h), ((x0 + x1) / 2, 0.0, zc)))
+    seg = bh / 2 - cav_h / 2
+    if seg > 1e-6:
+        for sgn in (+1, -1):
+            boxes.append(((cav_w, seg, wall_h),
+                          (0.0, sgn * (cav_h / 2 + seg / 2), zc)))
     slots = [(+BLADE_PITCH / 2, SLOT_W + 2 * c, SLOT_H_HOT + 2 * c),
              (-BLADE_PITCH / 2, SLOT_W + 2 * c, SLOT_H_NEU + 2 * c)]
     lo, hi = sorted(slots, key=lambda t: t[0])
-    zc = bd / 2 - pt / 2
+    fz = top - pt / 2
     for x0, x1 in ((-bw / 2, lo[0] - lo[1] / 2),
                    (lo[0] + lo[1] / 2, hi[0] - hi[1] / 2),
                    (hi[0] + hi[1] / 2, bw / 2)):
         if x1 - x0 > 1e-6:
-            parts.append(box((x1 - x0, bh, pt), ((x0 + x1) / 2, 0, zc)))
+            boxes.append(((x1 - x0, bh, pt), ((x0 + x1) / 2, 0.0, fz)))
     for x, sw, sh in slots:
-        seg = bh / 2 - sh / 2
-        if seg > 1e-6:
+        s2 = bh / 2 - sh / 2
+        if s2 > 1e-6:
             for sgn in (+1, -1):
-                parts.append(box((sw, seg, pt), (x, sgn * (sh / 2 + seg / 2), zc)))
-    return trimesh.util.concatenate(parts)
+                boxes.append(((sw, s2, pt), (x, sgn * (sh / 2 + s2 / 2), fz)))
+    return boxes
+
+
+def build_socket(clearance_mm):
+    """Collision mesh for the viewer; geometry comes from socket_collision_boxes."""
+    return trimesh.util.concatenate(
+        [box(e, c) for e, c in socket_collision_boxes(clearance_mm)])
 
 
 def _fork_orient_transform(m):

@@ -194,11 +194,21 @@ def write_plug_urdf() -> Path:
     d = ASSETS / "plug"
     d.mkdir(parents=True, exist_ok=True)
 
-    # tuner frame has prongs along -Z; rotate so they point -X
+    # Tuner frame has prongs along -Z; rotate so they point -X, matching the
+    # collision boxes.
+    #
+    # BAKE the rotation into each geometry's VERTICES. Scene.apply_transform only
+    # sets a node transform, and that did not survive the GLB round-trip -- the
+    # exported visual came back in the tuner frame (42.9 mm on Z) while the
+    # collision boxes were in the URDF frame (42.9 mm on X), leaving the plug's
+    # visual and collision 90 degrees apart.
     scene = G.build_plug_visual()
-    vis = scene.copy()
-    vis.apply_transform(_TUNER_TO_URDF)
-    vis.export(d / "plug_visual.glb")
+    baked = trimesh.Scene()
+    for name, geom in scene.geometry.items():
+        g = geom.copy()
+        g.apply_transform(_TUNER_TO_URDF)
+        baked.add_geometry(g, geom_name=name)
+    baked.export(d / "plug_visual.glb")
 
     # collision: body + two prongs, in the same frame
     boxes = [(G.BODY, (0.0, 0.0, 0.0))]
@@ -254,35 +264,6 @@ def write_plug_urdf() -> Path:
     return out
 
 
-def _socket_collision_boxes(tol_mm: float):
-    """Exact box list for the socket, mirroring G.build_socket().
-
-    Duplicated here rather than imported because build_socket() returns a
-    concatenated mesh and the URDF needs the individual boxes. Any change to the
-    layout there must be mirrored here; the assertion in write_socket_urdf
-    catches divergence.
-    """
-    c = tol_mm / 1000.0
-    bw, bh, bd = G.SOCKET_BLOCK
-    pt = 0.004
-    boxes = [((bw, bh, bd - pt), (0.0, 0.0, -pt / 2))]
-    slots = [(+G.BLADE_PITCH / 2, G.SLOT_W + 2 * c, G.SLOT_H_HOT + 2 * c),
-             (-G.BLADE_PITCH / 2, G.SLOT_W + 2 * c, G.SLOT_H_NEU + 2 * c)]
-    lo, hi = sorted(slots, key=lambda t: t[0])
-    zc = bd / 2 - pt / 2
-    for x0, x1 in ((-bw / 2, lo[0] - lo[1] / 2),
-                   (lo[0] + lo[1] / 2, hi[0] - hi[1] / 2),
-                   (hi[0] + hi[1] / 2, bw / 2)):
-        if x1 - x0 > 1e-6:
-            boxes.append(((x1 - x0, bh, pt), ((x0 + x1) / 2, 0.0, zc)))
-    for x, sw, sh in slots:
-        seg = bh / 2 - sh / 2
-        if seg > 1e-6:
-            for sgn in (+1, -1):
-                boxes.append(((sw, seg, pt), (x, sgn * (sh / 2 + seg / 2), zc)))
-    return boxes
-
-
 def write_socket_urdf(tol_mm: float) -> Path:
     """Power board receptacle at a given per-side clearance."""
     d = ASSETS / "socket"
@@ -291,7 +272,7 @@ def write_socket_urdf(tol_mm: float) -> Path:
 
     G.build_socket_visual(tol_mm).export(d / f"{tag}_visual.glb")
 
-    boxes = _socket_collision_boxes(tol_mm)
+    boxes = G.socket_collision_boxes(tol_mm)
     ref = G.build_socket(tol_mm)
     solid = trimesh.util.concatenate([G.box(e, c) for e, c in boxes])
     assert np.allclose(solid.extents, ref.extents, atol=1e-6), (
@@ -348,8 +329,12 @@ def write_holder_urdf(tol_mm: float, sw: tuple[float, float]) -> Path:
     d.mkdir(parents=True, exist_ok=True)
     tag = f"holder_tol{fmt_tol(tol_mm)}mm"
 
-    vis = G.build_slot_visual_perforated(open_w, open_t)
-    vis.export(d / f"{tag}_visual.obj")
+    # Export GLB, not OBJ, and attach a material first. A bare OBJ carries no
+    # material, so the viewer had no colour to read and drew the holder solid
+    # black -- while the plug/socket, which already exported GLB, looked right.
+    vis = G.pbr(G.build_slot_visual_perforated(open_w, open_t),
+                (188, 192, 198), metallic=0.9, roughness=0.35)
+    vis.export(d / f"{tag}_visual.glb")
 
     pw, ph, h = G.SLOT_BLOCK
     floor = 0.005
@@ -393,7 +378,7 @@ def write_holder_urdf(tol_mm: float, sw: tuple[float, float]) -> Path:
         '  <link name="hole">\n'
         '    <visual>\n'
         '      <origin xyz="0 0 0" rpy="0 0 0"/>\n'
-        f'      <geometry><mesh filename="{tag}_visual.obj"/></geometry>\n'
+        f'      <geometry><mesh filename="{tag}_visual.glb"/></geometry>\n'
         '      <material name="holder_steel"/>\n'
         '    </visual>\n'
         f'{col}'

@@ -23,8 +23,24 @@
       <geometry><mesh filename="socket_tol0p3mm_visual.glb"/></geometry>
     </visual>
     <collision>
-      <origin xyz="0.000000 0.000000 -0.002000" rpy="0 0 0"/>
-      <geometry><box size="0.120000 0.056000 0.026000"/></geometry>
+      <origin xyz="0.000000 0.000000 -0.011950" rpy="0 0 0"/>
+      <geometry><box size="0.120000 0.056000 0.006100"/></geometry>
+    </collision>
+    <collision>
+      <origin xyz="-0.035225 0.000000 0.001050" rpy="0 0 0"/>
+      <geometry><box size="0.049550 0.056000 0.019900"/></geometry>
+    </collision>
+    <collision>
+      <origin xyz="0.035225 0.000000 0.001050" rpy="0 0 0"/>
+      <geometry><box size="0.049550 0.056000 0.019900"/></geometry>
+    </collision>
+    <collision>
+      <origin xyz="0.000000 0.018700 0.001050" rpy="0 0 0"/>
+      <geometry><box size="0.020900 0.018600 0.019900"/></geometry>
+    </collision>
+    <collision>
+      <origin xyz="0.000000 -0.018700 0.001050" rpy="0 0 0"/>
+      <geometry><box size="0.020900 0.018600 0.019900"/></geometry>
     </collision>
     <collision>
       <origin xyz="-0.033725 0.000000 0.013000" rpy="0 0 0"/>
@@ -55,9 +71,9 @@
       <geometry><box size="0.002200 0.023600 0.004000"/></geometry>
     </collision>
     <inertial>
-      <mass value="0.302189"/>
-      <origin xyz="0.000000 -0.000000 -0.000009" rpy="0 0 0"/>
-      <inertia ixx="1.016700e-04" ixy="6.616975e-22" ixz="-1.744675e-09" iyy="3.855154e-04" iyz="3.318342e-22" izz="4.418974e-04"/>
+      <mass value="0.290460"/>
+      <origin xyz="0.000000 0.000000 -0.000052" rpy="0 0 0"/>
+      <inertia ixx="1.009238e-04" ixy="-1.295053e-21" ixz="-1.750410e-09" iyy="3.846877e-04" iyz="-2.483257e-22" izz="4.411251e-04"/>
     </inertial>
   </link>
 </robot>
