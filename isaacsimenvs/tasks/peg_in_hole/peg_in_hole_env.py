@@ -400,25 +400,42 @@ class PegInHoleEnv(SimToolRealEnv):
         # scene builder, the fixtured subclass and pose_viewer keep working
         # unchanged. Phase C (after super().__init__()) turns these into padded
         # (P, ...) tables and (N,) per-env gathers.
-        # Objects must share link structure. RigidObject binds ONE PhysX view
-        # over all spawned instances, and a view needs a consistent body layout;
-        # mixing a 1-link object (lpeg) with 3-link ones (beam/furniture) makes
-        # it bind only num_envs/P bodies and PhysX dies on the first step.
-        # Measured: P=4@12288 -> 3072, P=4@3072 -> 768, P=3@12288 -> 4096, all
-        # exactly num_envs/P. Checked here, before the multi-minute scene build.
+        # RigidObject binds ONE PhysX view over all spawned instances, and
+        # Isaac Lab derives that view's prim-path glob from env_0's root body
+        # alone (rigid_object.py: "all others are assumed to be a copy of
+        # this"). Two things therefore have to hold across a mix.
+        #
+        # 1. Each asset must collapse to a SINGLE rigid body. The URDF->USD
+        #    conversion runs with merge_fixed_joints=True, so any URDF whose
+        #    joints are all `fixed` becomes one body regardless of how many
+        #    links it declares -- which is why a 1-link lpeg and a 3-link beam
+        #    part are compatible. A non-fixed joint would survive as a second
+        #    body and break the view.
+        # 2. The single root body must share ONE name across the mix, or the
+        #    glob matches only env_0's problem. That is not required of the
+        #    source assets: setup_scene rewrites the root link to
+        #    CANONICAL_ROOT_LINK before conversion.
+        #
+        # Symptom when this was violated: the view covered exactly num_envs/P
+        # bodies (P=4@12288 -> 3072, P=4@3072 -> 768, P=3@12288 -> 4096) and
+        # PhysX died on the first step. Checked here, before the multi-minute
+        # scene build.
         if len(p_names) > 1:
             import xml.etree.ElementTree as _ET
-            layouts = {}
-            for nm, urdf in zip(p_names, p_obj_urdfs):
-                root = _ET.parse(urdf).getroot()
-                layouts[nm] = tuple(l.get("name") for l in root.iter("link"))
-            distinct = set(layouts.values())
-            if len(distinct) > 1:
-                detail = "; ".join(f"{n}: {list(v)}" for n, v in layouts.items())
+            bad = []
+            for nm, urdf, rec in zip(p_names, p_obj_urdfs, p_rec_urdfs):
+                for role, path in (("object", urdf), ("receptive", rec)):
+                    root = _ET.parse(path).getroot()
+                    moving = [j.get("name") for j in root.iter("joint")
+                              if (j.get("type") or "fixed") != "fixed"]
+                    if moving:
+                        bad.append(f"{nm} {role}: non-fixed joints {moving}")
+            if bad:
                 raise ValueError(
-                    "multi-problem requires all insertion objects to share link "
-                    "structure (same body count and names), but they differ -- "
-                    f"{detail}. Group problems with matching object skeletons."
+                    "multi-problem requires every asset to collapse to a single "
+                    "rigid body under merge_fixed_joints=True, but these have "
+                    "joints that survive the merge -- " + "; ".join(bad) + ". "
+                    "A multi-body asset cannot share the mix's PhysX view."
                 )
 
         self._pih_problem_names = p_names
@@ -493,6 +510,22 @@ class PegInHoleEnv(SimToolRealEnv):
         # submit rigid body transforms" a few minutes later. Treating it as a
         # soft warning let that run burn 14.7 GPU-hours as a zombie, so it is a
         # hard error: fail at construction, loudly, in seconds.
+        # The Hole binds its own RigidObject view with the same env_0-derived
+        # glob, so it fails the same way and independently -- a mix can have
+        # matching object roots and mismatched receptive roots. Checked first
+        # because it is cheap and was previously unguarded.
+        try:
+            hole_rows = int(self.hole.data.default_mass.shape[0])
+        except Exception:
+            hole_rows = pidx.shape[0]
+        if hole_rows != pidx.shape[0]:
+            raise RuntimeError(
+                f"Hole physics view covers {hole_rows} bodies but the scene has "
+                f"{pidx.shape[0]} envs. The receptive USDs disagree on their "
+                "root-link name; canonicalization should have prevented this "
+                "(see peg_in_hole/scene_utils._canonicalize_root_link)."
+            )
+
         try:
             # default_mass lives on CPU in Isaac Lab while pidx is on the sim
             # device, so the mask has to be brought onto one of them.

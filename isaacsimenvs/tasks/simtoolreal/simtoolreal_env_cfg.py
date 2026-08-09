@@ -231,7 +231,12 @@ class StudentObsCfg:
     # world pose independently, so articulation joints update per step.
     raycast_dynamic_prim_exprs: tuple[str, ...] = (
         "/World/envs/env_.*/Table/box/visuals",
-        "/World/envs/env_.*/Hole/hole/visuals",
+        # Wildcard the link-name subpath for the same reason as the Object
+        # below: receptives root at `hole` (peg), `plate` (fabrica beam) or
+        # `receptive` (furniture), and a multi-problem mix renames all of them
+        # to a canonical root (see peg_in_hole/scene_utils.CANONICAL_ROOT_LINK).
+        # The literal `hole` matched only the peg task.
+        "/World/envs/env_.*/Hole/.*/visuals",
         # Wildcard the Object's link-name subpath so this works for any
         # task / problem URDF (peg, lpeg, fmb_peg_board_*, fabrica beam
         # parts, furniture parts, ...). The single-link case matches one

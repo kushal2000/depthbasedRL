@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import tempfile
 import time
+import xml.etree.ElementTree as ET
 from pathlib import Path
 
 import torch
@@ -16,6 +17,7 @@ from isaacsimenvs.tasks.simtoolreal.utils.scene_utils import (
     _bake_usd,
     _convert_urdf_to_usd,
     _log_scene_step,
+    _resolve_urdf_mesh_path,
     _materialize_env_prims,
     _robot_joint_drive_cfg,
     build_rigid_object_cfg,
@@ -34,6 +36,79 @@ def _asset_path(path: str | Path) -> str:
     if not asset_path.is_absolute():
         asset_path = REPO_ROOT / asset_path
     return str(asset_path)
+
+
+#: Root-link name every asset in a multi-problem mix is renamed to. The value is
+#: arbitrary; only agreement across the mix matters.
+CANONICAL_ROOT_LINK = "base_link"
+
+
+def _urdf_root_link(root: ET.Element) -> str | None:
+    """The link that is no joint's child."""
+    links = [l.get("name") for l in root.iter("link")]
+    children = {j.find("child").get("link") for j in root.iter("joint")
+                if j.find("child") is not None}
+    roots = [l for l in links if l not in children]
+    return roots[0] if len(roots) == 1 else None
+
+
+def _canonicalize_root_link(urdf_path: str, work_dir: Path, canonical: str) -> str:
+    """Rename a URDF's root link so every asset in a mix shares one name.
+
+    Isaac Lab's `RigidObject._initialize_impl` resolves the root body's
+    prim-path suffix from **env_0 only** and globs it across every env --
+    "all others are assumed to be a copy of this" (rigid_object.py). A single
+    `UsdFileCfg` satisfies that; `MultiUsdFileCfg` does not. When the per-problem
+    USDs name their root links differently the glob
+    `/World/envs/env_*/Object/<env_0's root name>` matches only the envs sharing
+    that name, so the PhysX view silently covers num_envs/P bodies and the run
+    dies on the first physics step.
+
+    That is exactly what killed every mix containing Lpeg: its single link is
+    `lpeg_matchedmass` while the beam and furniture parts root at `base_link`.
+    The beam-only 2-way run worked purely because both parts already agreed.
+    Receptives disagree three ways (`hole` / `plate` / `receptive`).
+
+    Renaming here rather than at authoring time keeps the source assets and the
+    P == 1 path untouched: an asset already named `canonical`, or any
+    single-problem run, returns its original path unchanged.
+    """
+    src = Path(urdf_path)
+    tree = ET.parse(src)
+    root = tree.getroot()
+
+    current = _urdf_root_link(root)
+    if current is None:
+        raise RuntimeError(
+            f"{src.name}: could not identify a unique root link "
+            f"(links={[l.get('name') for l in root.iter('link')]}); cannot "
+            "canonicalize for a multi-problem mix."
+        )
+    if current == canonical:
+        return urdf_path
+
+    for link in root.iter("link"):
+        if link.get("name") == current:
+            link.set("name", canonical)
+    for joint in root.iter("joint"):
+        for end in ("parent", "child"):
+            tag = joint.find(end)
+            if tag is not None and tag.get("link") == current:
+                tag.set("link", canonical)
+
+    # The rewritten copy lives elsewhere, so relative mesh references would
+    # dangle. Absolutize them exactly as _prepare_urdf_for_isaacsim does.
+    for mesh in root.findall(".//mesh"):
+        fn = mesh.get("filename")
+        if fn:
+            mesh.set("filename", str(_resolve_urdf_mesh_path(src, fn)))
+
+    out_dir = work_dir / "_canonical_root"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    out_path = out_dir / src.name
+    tree.write(out_path, encoding="utf-8", xml_declaration=True)
+    print(f"[PegInHole] {src.name}: root link {current!r} -> {canonical!r}", flush=True)
+    return str(out_path)
 
 
 def _pih_rigid_object_cfg(prim_path: str, usd_path: str) -> RigidObjectCfg:
@@ -96,6 +171,19 @@ def setup_scene(env) -> None:
         rb_solver_position_iterations=4,
         rb_solver_velocity_iterations=0,
     )
+    # Give every asset in a mix the same root-link name before conversion, or
+    # the RigidObject view binds only env_0's share (see _canonicalize_root_link).
+    # No-op at P == 1, so the single-problem bake is unchanged.
+    if n_problems > 1:
+        object_urdfs = [
+            _canonicalize_root_link(u, _work(i), CANONICAL_ROOT_LINK)
+            for i, u in enumerate(object_urdfs)
+        ]
+        receptive_urdfs = [
+            _canonicalize_root_link(u, _work(i) / "hole", CANONICAL_ROOT_LINK)
+            for i, u in enumerate(receptive_urdfs)
+        ]
+
     object_raw_usds = [
         _convert_urdf_to_usd(u, _work(i), fix_base=False)
         for i, u in enumerate(object_urdfs)
