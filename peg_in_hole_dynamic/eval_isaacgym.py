@@ -116,6 +116,34 @@ def quat_xyzw_to_wxyz(q):
     return (q[3], q[0], q[1], q[2])
 
 
+_VIZ_PART_CACHE: dict = {}
+
+
+def _load_scene_for_viz(asset_path: Path):
+    """Like _load_mesh_for_viz but returns a Scene, preserving PER-PART materials.
+
+    trimesh.util.concatenate can only carry ONE material, so a multi-material
+    receptacle (aluminium sleeve + dark chassis + receptacle face + switch +
+    cable) collapsed to default grey the moment it was merged -- while the fork
+    and plug looked right, because they are single-material. Keeping a Scene and
+    exporting THAT to GLB is what viz_insertion_spec.py does, and it is the only
+    way the distinct materials reach the browser.
+
+    Returns None when there is nothing usable, so callers fall back to the
+    flat-coloured add_mesh_simple path.
+    """
+    try:
+        parts = _collect_viz_parts(asset_path)
+    except Exception:
+        return None
+    if not parts:
+        return None
+    scene = trimesh.Scene()
+    for i, m in enumerate(parts):
+        scene.add_geometry(m, geom_name=f"part_{i:02d}")
+    return scene
+
+
 def _load_mesh_for_viz(asset_path: Path) -> trimesh.Trimesh:
     """Load a mesh for viser visualization. Handles URDFs by composing
     each link's parent-joint origin with each collision/visual ``<origin>``,
@@ -180,22 +208,48 @@ def _load_mesh_for_viz(asset_path: Path) -> trimesh.Trimesh:
                 mesh_file = asset_path.parent / mesh_elem.get("filename")
                 if not mesh_file.exists():
                     continue
-                m = trimesh.load(str(mesh_file), force="mesh")
+                # NOT force="mesh", and do NOT concatenate a Scene's parts:
+                # both throw away per-part materials. One <visual> element can
+                # reference a GLB holding several materials (the power board has
+                # five: sleeve, chassis, receptacle, switch, cable), and merging
+                # them collapses all five to default grey.
+                loaded = trimesh.load(str(mesh_file))
+                sub = ([g for g in loaded.geometry.values()
+                        if isinstance(g, trimesh.Trimesh)]
+                       if isinstance(loaded, trimesh.Scene) else [loaded])
+                for g in sub:
+                    g = g.copy()
+                    g.apply_transform(link_T @ local_T)
+                    out.append(g)
+                continue
             else:
                 continue
             m.apply_transform(link_T @ local_T)
             out.append(m)
         return out
 
+    # VISUAL first, collision only as a fallback. This is a viewer, so it should
+    # show what the object looks like, not what PhysX collides. The order used to
+    # be reversed, which was invisible while every URDF here carried collision
+    # geometry alone -- but plug_fork's assets have both, so the fork rendered as
+    # its 9 CoACD hulls and the receptacles as bare boxes.
     meshes = []
     for link in root.findall("link"):
-        meshes.extend(_collect_geom(link, "collision"))
+        meshes.extend(_collect_geom(link, "visual"))
     if not meshes:
         for link in root.findall("link"):
-            meshes.extend(_collect_geom(link, "visual"))
+            meshes.extend(_collect_geom(link, "collision"))
     if not meshes:
         return trimesh.creation.box(extents=(0.08, 0.08, 0.01))
+    _VIZ_PART_CACHE[str(asset_path)] = meshes
     return trimesh.util.concatenate(meshes)
+
+
+def _collect_viz_parts(asset_path: Path):
+    """Per-part meshes for `asset_path`, materials intact."""
+    if str(asset_path) not in _VIZ_PART_CACHE:
+        _load_mesh_for_viz(asset_path)          # populates the cache
+    return _VIZ_PART_CACHE.get(str(asset_path), [])
 
 
 def _asset_abs(path_like: str) -> Path:
@@ -701,6 +755,20 @@ class PegDynamicDemo:
         eval overlay and lets the goal ghost opacity update live.
         """
         rgb = color[:3] if len(color) >= 3 else color
+        # Opaque -> ship the mesh with its OWN materials via GLB, so the YCB
+        # fork keeps its scan texture and the procedural parts keep theirs.
+        # add_mesh_simple takes a single flat colour, which is why every object
+        # used to render as one tint regardless of what its URDF specified.
+        # The goal ghost still goes through add_mesh_simple: it needs opacity,
+        # which add_glb does not support.
+        if opacity >= 0.999:
+            try:
+                scene = _load_scene_for_viz(self._object_urdf_abs)
+                if scene is not None:
+                    return self.server.scene.add_glb(
+                        f"{node_name}/mesh", glb_data=scene.export(file_type="glb"))
+            except Exception:
+                pass
         verts = np.array(self._object_mesh.vertices, dtype=np.float32)
         faces = np.array(self._object_mesh.faces, dtype=np.uint32)
         return self.server.scene.add_mesh_simple(
@@ -756,13 +824,27 @@ class PegDynamicDemo:
             wxyz=(1, 0, 0, 0), show_axes=False,
         )
         self._dyn.append(self._hole_frame)
-        self._hole_viz = self.server.scene.add_mesh_simple(
-            "/hole/mesh",
-            vertices=np.array(self._hole_mesh.vertices, dtype=np.float32),
-            faces=np.array(self._hole_mesh.faces, dtype=np.uint32),
-            color=(120, 120, 120),
-            opacity=float(self._sl_fixture_opacity.value),
-        )
+        # The fixture is the multi-material part -- concatenating it collapsed
+        # five materials into one grey. Ship the Scene as GLB when it is fully
+        # opaque; add_glb has no opacity, so a translucent fixture still falls
+        # back to the flat-coloured mesh.
+        self._hole_viz = None
+        if float(self._sl_fixture_opacity.value) >= 0.999:
+            try:
+                hole_scene = _load_scene_for_viz(self._hole_urdf_abs)
+                if hole_scene is not None:
+                    self._hole_viz = self.server.scene.add_glb(
+                        "/hole/mesh", glb_data=hole_scene.export(file_type="glb"))
+            except Exception:
+                self._hole_viz = None
+        if self._hole_viz is None:
+            self._hole_viz = self.server.scene.add_mesh_simple(
+                "/hole/mesh",
+                vertices=np.array(self._hole_mesh.vertices, dtype=np.float32),
+                faces=np.array(self._hole_mesh.faces, dtype=np.uint32),
+                color=(120, 120, 120),
+                opacity=float(self._sl_fixture_opacity.value),
+            )
         self._dyn.append(self._hole_viz)
         self._apply_goal_visibility()
         self._apply_fixture_opacity()
