@@ -46,6 +46,17 @@ EXPERIMENT_TAG="${EXPERIMENT_TAG:-multiproblem}"
 # SAPG blocks (see peg_in_hole_env_cfg.py). Totals are exact either way.
 PROBLEM_SHUFFLE="${PROBLEM_SHUFFLE:-False}"
 
+# Fixture regime. Bolted (default) keeps the receptive kinematic, matching every
+# committed teacher. FIXTURE_BOLTED=False makes it a dynamic body resting on the
+# table, so contact can push it -- the setting fig4 evaluates zero-shot.
+#
+# HOLE_X_RANGE must be clamped whenever the fixture is free: the default
+# +/-0.1875 was tuned for the 8 cm peg hole and leaves the beam and furniture
+# fixtures overhanging the table by ~2.3 cm. That is invisible while bolted
+# (kinematic bodies ignore gravity) but dominates the moment they are free.
+FIXTURE_BOLTED="${FIXTURE_BOLTED:-True}"
+HOLE_X_RANGE="${HOLE_X_RANGE:-}"
+
 NUM_ENVS="${NUM_ENVS:-12288}"
 MINIBATCH_SIZE="${MINIBATCH_SIZE:-98304}"
 MAX_ITERATIONS=1000000
@@ -114,6 +125,8 @@ echo "Run dir    : $HYDRA_RUN_DIR"
 echo "Problems   : $PROBLEMS"
 echo "Mix        : ${PROBLEM_MIX:-<uniform>}"
 echo "num_envs   : $NUM_ENVS"
+echo "bolted     : $FIXTURE_BOLTED"
+echo "hole_x     : ${HOLE_X_RANGE:-<default>}"
 
 GPU_LOG="${HYDRA_RUN_DIR}/gpu_usage.log"
 ( while true; do
@@ -132,6 +145,8 @@ mkdir -p "$OMNI_KIT_CACHE_PATH"
 
 MIX_ARG=()
 [ -n "$PROBLEM_MIX" ] && MIX_ARG=(env.peg_in_hole.problem_mix="[$PROBLEM_MIX]")
+HOLE_X_ARG=()
+[ -n "$HOLE_X_RANGE" ] && HOLE_X_ARG=(env.peg_in_hole.hole_x_range="[$HOLE_X_RANGE]")
 
 python -u isaacsimenvs/train.py \
     --task "$TASK_ID" \
@@ -153,6 +168,8 @@ python -u isaacsimenvs/train.py \
     "env.peg_in_hole.problems=[$PROBLEMS]" \
     "${MIX_ARG[@]}" \
     env.peg_in_hole.problem_assignment_shuffle=$PROBLEM_SHUFFLE \
+    env.peg_in_hole.fixture_bolted=$FIXTURE_BOLTED \
+    "${HOLE_X_ARG[@]}" \
     env.peg_in_hole.goal_mode="$GOAL_MODE" \
     env.peg_in_hole.goal_xy_obs_noise=$GOAL_XY_OBS_NOISE \
     env.peg_in_hole.goal_yaw_obs_noise_deg=$GOAL_YAW_OBS_NOISE_DEG \
