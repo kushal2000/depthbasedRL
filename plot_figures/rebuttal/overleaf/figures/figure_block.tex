@@ -1,0 +1,18 @@
+% The whole figure block: two rows across the full width, at the top of the
+% rebuttal. Plots first, images second -- the plot row is shorter, so leading
+% with it puts the densest quantitative content directly under the opening text.
+%
+% Widths are chosen so each panel is legible at final size; see
+% plot_figures/rebuttal/outputs/final/README.md for the arithmetic.
+\begin{figure*}[t]
+  \centering
+  \input{figures/fig1_noise_and_failures}\hfill
+  \input{figures/fig4_unbolted_fixture}\hfill
+  \input{figures/fig5_unified_policy}
+
+  \vspace{2pt}
+
+  \input{figures/fig3_novel_geometries}\hfill
+  \input{figures/fig2_end_to_end}
+  \vspace{-6pt}
+\end{figure*}
