@@ -1,0 +1,61 @@
+#!/bin/bash
+#SBATCH -N 1
+#SBATCH -n 1
+#SBATCH --cpus-per-task=12
+#SBATCH --get-user-env
+#SBATCH --mem=200000
+#SBATCH -t 0-04:00:00
+#SBATCH --partition=portal
+#SBATCH --exclude=portal-compute-01
+#SBATCH --gres=gpu:1
+#SBATCH -J sanity_old_furniture
+#SBATCH -o /share/portal/kk837/depthbasedRL/plot_figures/rebuttal/experiments/logs/sanity_old_furniture_%j.out
+#SBATCH -e /share/portal/kk837/depthbasedRL/plot_figures/rebuttal/experiments/logs/sanity_old_furniture_%j.err
+
+# Reproduce the legacy single-task, fixed-fixture Furniture/Screw-Leg eval.
+# This keeps its original strict tolerances, disables wrench, and evaluates
+# insertion-only episodes. The prior filtered retract result was about 86%.
+
+set -uo pipefail
+
+REPO_ROOT=/share/portal/kk837/depthbasedRL
+RUN_DIR="$REPO_ROOT/train_dir/fig4/long_leg_screwing_teachers/furniture_bench_leg4_200mm_finetune_rgf10_dr_wrench_2026-05-25_22-16-15"
+CHECKPOINT="$RUN_DIR/0_furniture_bench_leg4_200mm_finetune_rgf10_dr_wrench_2026-05-25_22-16-15/last/model.pth"
+TRAIN_OVERRIDES="$RUN_DIR/.hydra/overrides.yaml"
+OUT_DIR="$REPO_ROOT/plot_figures/rebuttal/experiments/outputs/sanity_old_checkpoints"
+OUTPUT_JSON="$OUT_DIR/furniture_fixed_job${SLURM_JOB_ID}.json"
+DETAIL_LOG="$OUT_DIR/furniture_fixed_job${SLURM_JOB_ID}.log"
+
+mkdir -p "$OUT_DIR" "$REPO_ROOT/plot_figures/rebuttal/experiments/logs"
+cd "$REPO_ROOT"
+source .venv_isaacsim/bin/activate
+export OMNI_KIT_ACCEPT_EULA=YES
+export OMNI_KIT_CACHE_PATH="/tmp/${USER}_ov_cache_sanity_furniture_${SLURM_JOB_ID}"
+mkdir -p "$OMNI_KIT_CACHE_PATH"
+
+python -u peg_in_hole_dynamic/offline_eval_teacher_robustness.py \
+  --teacher-checkpoint "$CHECKPOINT" \
+  --train-overrides "$TRAIN_OVERRIDES" \
+  --exact-train --num-envs 512 --seed 42 --max-steps-per-episode 3000 \
+  --override env.peg_in_hole.random_goal_fraction=0.0 \
+  --override env.domain_randomization.force_scale=0.0 \
+  --override env.domain_randomization.torque_scale=0.0 \
+  --output-json "$OUTPUT_JSON" > "$DETAIL_LOG" 2>&1 &
+EVAL_PID=$!
+
+COMPLETED=0
+for _ in $(seq 1 360); do
+  if grep -q "=> wrote" "$DETAIL_LOG" 2>/dev/null; then COMPLETED=1; break; fi
+  kill -0 "$EVAL_PID" 2>/dev/null || break
+  sleep 10
+done
+kill -9 "$EVAL_PID" 2>/dev/null || true
+wait "$EVAL_PID" 2>/dev/null || true
+
+grep -E "all envs|no early drop|terminations:|Traceback|Error|=> wrote" "$DETAIL_LOG" || true
+if [ "$COMPLETED" -ne 1 ] || [ ! -s "$OUTPUT_JSON" ]; then
+  echo "FAILED: evaluation did not produce $OUTPUT_JSON" >&2
+  exit 1
+fi
+jq -r '.results[0] | "RESULT all_envs insertion=\(.all_envs.insertion_rate) retract=\(.all_envs.retract_rate); filtered insertion=\(.early_drop_filtered.insertion_rate) retract=\(.early_drop_filtered.retract_rate); n=\(.early_drop_filtered.n); unfinished=\(.unfinished_envs)"' "$OUTPUT_JSON"
+

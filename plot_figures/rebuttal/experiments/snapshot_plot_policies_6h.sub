@@ -1,0 +1,52 @@
+#!/bin/bash
+#SBATCH -N 1
+#SBATCH -n 1
+#SBATCH --cpus-per-task=2
+#SBATCH --get-user-env
+#SBATCH --mem=8000
+#SBATCH -t 0-00:20:00
+#SBATCH --partition=portal
+#SBATCH -J snapshot_plot_policies
+#SBATCH -o /share/portal/kk837/depthbasedRL/plot_figures/rebuttal/experiments/logs/snapshot_plot_policies_%j.out
+#SBATCH -e /share/portal/kk837/depthbasedRL/plot_figures/rebuttal/experiments/logs/snapshot_plot_policies_%j.err
+
+# Snapshot all live policies at one wall-clock instant. GPU eval jobs depend on
+# this job, so queueing delays cannot make different tasks use different model
+# versions.
+
+set -euo pipefail
+
+REPO_ROOT=/share/portal/kk837/depthbasedRL
+OUT_DIR="$REPO_ROOT/train_dir/eval_snapshots/rebuttal_refresh_20260810"
+mkdir -p "$OUT_DIR" "$REPO_ROOT/plot_figures/rebuttal/experiments/logs"
+
+copy_checkpoint () {
+  local label="$1" source="$2" target="$3"
+  if [ ! -s "$source" ]; then
+    echo "missing checkpoint for $label: $source" >&2
+    exit 1
+  fi
+  cp --reflink=auto "$source" "$target"
+  cmp -s "$source" "$target"
+  echo "$label"
+  stat -c 'source mtime=%y bytes=%s path=%n' "$source"
+  sha256sum "$target"
+}
+
+copy_checkpoint unified_fixed1mm \
+  "$REPO_ROOT/train_dir/multiproblem/cotrain/multiproblem_4way_peg1mm_2026-08-09_16-22-10/0_multiproblem_4way_peg1mm_2026-08-09_16-22-10/last/model.pth" \
+  "$OUT_DIR/unified_fixed1mm.pth"
+copy_checkpoint solo_unbolted_lpeg1mm \
+  "$REPO_ROOT/train_dir/multiproblem/cotrain/solo_unbolted_peg1mm_2026-08-09_16-25-22/0_solo_unbolted_peg1mm_2026-08-09_16-25-22/last/model.pth" \
+  "$OUT_DIR/solo_unbolted_lpeg1mm.pth"
+copy_checkpoint solo_unbolted_beam_step1 \
+  "$REPO_ROOT/train_dir/multiproblem/cotrain/solo_unbolted_beam1_2026-08-09_22-17-27/0_solo_unbolted_beam1_2026-08-09_22-17-27/last/model.pth" \
+  "$OUT_DIR/solo_unbolted_beam_step1.pth"
+copy_checkpoint solo_unbolted_beam_step2 \
+  "$REPO_ROOT/train_dir/multiproblem/cotrain/solo_unbolted_beam2_2026-08-09_22-17-27/0_solo_unbolted_beam2_2026-08-09_22-17-27/last/model.pth" \
+  "$OUT_DIR/solo_unbolted_beam_step2.pth"
+copy_checkpoint solo_unbolted_furniture \
+  "$REPO_ROOT/train_dir/multiproblem/cotrain/solo_unbolted_screwleg_2026-08-09_22-17-57/0_solo_unbolted_screwleg_2026-08-09_22-17-57/last/model.pth" \
+  "$OUT_DIR/solo_unbolted_furniture.pth"
+
+echo "snapshot complete: $OUT_DIR"

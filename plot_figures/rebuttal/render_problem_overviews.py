@@ -18,8 +18,6 @@ ASSET_ROOT = REPO_ROOT / "assets" / "urdf" / "plug_fork"
 
 TASKS = {
     "fork": {
-        "task_name": "YCB Fork\nin Rack",
-        "title_font_size": 70,
         "object": ASSET_ROOT / "fork" / "fork_visual_oriented.obj",
         "receptacle": ASSET_ROOT / "holder" / "holder_tol1mm_visual.glb",
         "dimensions_mm": (197.6, 27.1, 15.9),
@@ -35,8 +33,6 @@ TASKS = {
         "yfov_deg": 37.0,
     },
     "plug": {
-        "task_name": "iPhone Plug\nin Socket",
-        "title_font_size": 70,
         "object": ASSET_ROOT / "plug" / "plug_visual.glb",
         "receptacle": ASSET_ROOT / "socket" / "socket_tol0p5mm_visual.glb",
         # Overall mesh dimensions, including the 15.9 mm blades.
@@ -307,26 +303,6 @@ def _annotate_dimensions(
     return Image.alpha_composite(image.convert("RGBA"), overlay).convert("RGB")
 
 
-def _draw_task_name(
-    image: Image.Image, task_name: str, font_size: int
-) -> Image.Image:
-    overlay = Image.new("RGBA", image.size, (0, 0, 0, 0))
-    draw = ImageDraw.Draw(overlay)
-    font_path = "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"
-    font = ImageFont.truetype(font_path, int(font_size))
-    bounds = draw.multiline_textbbox((0, 0), task_name, font=font, spacing=0, align="center")
-    text_width = bounds[2] - bounds[0]
-    draw.multiline_text(
-        ((image.width - text_width) / 2.0, 24),
-        task_name,
-        font=font,
-        fill=(26, 36, 42, 255),
-        spacing=0,
-        align="center",
-    )
-    return Image.alpha_composite(image.convert("RGBA"), overlay).convert("RGB")
-
-
 def _render_task(task: str, cfg: dict, output: Path, width: int, height: int) -> None:
     os.environ.setdefault("PYOPENGL_PLATFORM", "egl")
     import pyrender
@@ -386,7 +362,6 @@ def _render_task(task: str, cfg: dict, output: Path, width: int, height: int) ->
         camera_pose,
         yfov,
     )
-    image = _draw_task_name(image, cfg["task_name"], cfg["title_font_size"])
     image.save(output, quality=95)
     print(f"wrote {task}: {output} ({width}x{height})")
 

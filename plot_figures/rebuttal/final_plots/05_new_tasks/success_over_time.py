@@ -12,7 +12,8 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
-from PIL import Image
+from matplotlib.patches import Patch
+from PIL import Image, ImageDraw, ImageFont
 from tensorboard.backend.event_processing.event_file_loader import RawEventFileLoader
 from tensorboard.compat.proto.event_pb2 import Event
 
@@ -22,6 +23,25 @@ OUT = Path(__file__).resolve().parent
 CACHE = OUT / "success_over_time_curves.json"
 METRIC = "all_goals_hit_ratio"
 MAX_HOURS = 24.0
+FINAL_HEIGHT = 620
+ROW_HEADER_HEIGHT = 52
+ROW_GAP = 4
+IMAGE_GAP = 4
+OVERVIEW_TOP_CROP = 150
+PANEL_BOTTOM_CROP = 60
+
+ROWS = (
+    (
+        "iPhone Plug in Socket",
+        "plug_problem_overview.png",
+        ("plug_1_setup.png", "plug_2_align.png", "plug_3_complete.png"),
+    ),
+    (
+        "YCB Fork in Rack",
+        "fork_problem_overview.png",
+        ("fork_1_setup.png", "fork_2_align.png", "fork_3_complete.png"),
+    ),
+)
 
 RUNS = {
     "iPhone Plug in Socket": REPO
@@ -49,8 +69,8 @@ LEGEND_LABELS = {
 # Normalize over feasible initializations. The raw metric includes physically
 # impossible sampled problems in its denominator.
 NORMALIZED_FINAL = {
-    "iPhone Plug in Socket": 0.90,
-    "YCB Fork in Rack": 0.98,
+    "iPhone Plug in Socket": 0.9861932938856016,
+    "YCB Fork in Rack": 0.9840319361277445,
 }
 
 
@@ -133,10 +153,15 @@ def _plot(curves: dict) -> None:
     ax.set_ylabel("success rate", fontsize=9)
     ax.spines[["top", "right"]].set_visible(False)
     ax.legend(
+        handles=[
+            Patch(facecolor=COLORS[name], edgecolor="none", label=LEGEND_LABELS[name])
+            for name in RUNS
+        ],
         loc="lower right",
         frameon=False,
-        fontsize=7.2,
-        handlelength=1.6,
+        fontsize=8.5,
+        handlelength=0.8,
+        handleheight=0.8,
         handletextpad=0.5,
         borderaxespad=0.4,
     )
@@ -146,14 +171,77 @@ def _plot(curves: dict) -> None:
     plt.close(fig)
 
 
+def _resize_height(image: Image.Image, height: int) -> Image.Image:
+    width = round(image.width * height / image.height)
+    return image.resize((width, height), Image.Resampling.LANCZOS)
+
+
+def _crop_bottom(image: Image.Image) -> Image.Image:
+    return image.crop((0, 0, image.width, image.height - PANEL_BOTTOM_CROP))
+
+
+def _make_montage(height: int) -> Image.Image:
+    image_height = (height - 2 * ROW_HEADER_HEIGHT - ROW_GAP) // 2
+    row_panels = []
+    for title, overview_name, snapshot_names in ROWS:
+        overview = Image.open(OUT / overview_name).convert("RGB")
+        overview = overview.crop(
+            (0, OVERVIEW_TOP_CROP, overview.width, overview.height - PANEL_BOTTOM_CROP)
+        )
+        panels = [_resize_height(overview, image_height)]
+        panels.extend(
+            _resize_height(
+                _crop_bottom(Image.open(OUT / name).convert("RGB")),
+                image_height,
+            )
+            for name in snapshot_names
+        )
+        row_panels.append((title, panels))
+
+    width = max(
+        sum(panel.width for panel in panels) + IMAGE_GAP * (len(panels) - 1)
+        for _, panels in row_panels
+    )
+    montage = Image.new("RGB", (width, height), "white")
+    draw = ImageDraw.Draw(montage)
+    font = ImageFont.truetype(
+        "/usr/share/fonts/truetype/dejavu/DejaVuSerif-Bold.ttf", 38
+    )
+
+    y = 0
+    for row_index, (title, panels) in enumerate(row_panels):
+        bounds = draw.textbbox((0, 0), title, font=font)
+        text_width = bounds[2] - bounds[0]
+        text_height = bounds[3] - bounds[1]
+        draw.text(
+            ((width - text_width) / 2, (y + ROW_HEADER_HEIGHT / 2) - text_height / 2 - bounds[1]),
+            title,
+            font=font,
+            fill=(35, 47, 55),
+        )
+        y += ROW_HEADER_HEIGHT
+
+        content_width = sum(panel.width for panel in panels) + IMAGE_GAP * (len(panels) - 1)
+        x = (width - content_width) // 2
+        for panel in panels:
+            montage.paste(panel, (x, y))
+            x += panel.width + IMAGE_GAP
+
+        y += image_height
+        if row_index == 0:
+            y += ROW_GAP
+
+    montage.save(OUT / "overview_plus_rollouts_preview.png")
+    return montage
+
+
 def _assemble() -> None:
-    montage = Image.open(OUT / "overview_plus_rollouts_preview.png").convert("RGB")
     plot = Image.open(OUT / "success_over_time.png").convert("RGB")
-    plot = plot.resize((round(plot.width * montage.height / plot.height), montage.height))
-    gap = 8
-    combined = Image.new("RGB", (montage.width + gap + plot.width, montage.height), "white")
+    plot = _resize_height(plot, FINAL_HEIGHT)
+    montage = _make_montage(FINAL_HEIGHT)
+    combined = Image.new("RGB", (montage.width + plot.width, FINAL_HEIGHT), "white")
     combined.paste(montage, (0, 0))
-    combined.paste(plot, (montage.width + gap, 0))
+    combined.paste(plot, (montage.width, 0))
     combined.save(OUT / "new_tasks_with_training_curve.png")
     combined.save(OUT / "new_tasks_with_training_curve.pdf", resolution=240.0)
 
