@@ -1,0 +1,66 @@
+defaults:
+  - SimToolReal
+  - _self_
+
+name: PegInHoleDynamicEnv
+
+env:
+  # Required: name of a problem in peg_in_hole_dynamic.PROBLEM_REGISTRY.
+  # The Problem fully defines the insertion asset, the receptive (hole)
+  # asset, and the insert pose; the env never reads any of those keys
+  # directly — they're populated from the Problem at __init__ time.
+  problem: "peg.tol0p5mm"
+
+  useFixedGoalStates: True
+  useFixedInitObjectPose: True
+  asset:
+    table: "urdf/table_narrow.urdf"
+
+  # Hole position sampling range (relative to table center XY).
+  # The receptive object's position is randomized within this range each
+  # reset; this is task-level placement, independent of the problem.
+  holeXRange: [-0.1875, 0.1875]
+  holeYRange: [-0.1, 0.2]
+  # Z offset is supplied by the selected Problem in PROBLEM_REGISTRY. This
+  # legacy cfg key is intentionally ignored by PegInHoleDynamicEnv.
+  holeZOffset: 0.0
+
+  # Goal mode: "preInsertAndFinal" uses every problem-defined insertion
+  # subgoal; "finalGoalOnly" uses only the final assembled subgoal.
+  # "dense" is NOT supported as a separate mode.
+  goalMode: "preInsertAndFinal"
+
+  # Co-training: random goal fraction
+  randomGoalFraction: 0.0
+  randomGoalMaxSuccesses: 5
+
+  # Retract phase
+  enableRetract: True
+  retractRewardScale: 1.0
+  retractDistanceThreshold: 0.1
+  # NOTE: retractSuccessBonus is derived in code as
+  # random_goal_max_successes * reach_goal_bonus, so do not set it here.
+  retractSuccessTolerance: 0.005
+
+  # Insertion always evaluates against this fixed tolerance (curriculum
+  # only applies to reaching envs).
+  insertionSuccessTolerance: 0.01
+
+  # One-way fade gate for the lift bonus on reaching envs. Lift bonus is
+  # never applied to insertion envs. On reaching envs, the bonus turns
+  # off the first time mean(prev_episode_successes[is_random_goal_env])
+  # crosses this threshold, and never reactivates.
+  liftBonusFadeThreshold: 2.0
+
+  # Reaching-side tolerance curriculum gate. Curriculum advances when the
+  # mean episode successes among reaching envs exceeds this value.
+  randomGoalCurriculumSuccessThreshold: 2.0
+
+  # Random-goal workspace (tightened: 50 x 30 x 25 cm centered above the
+  # hole sampling region, replacing the prior 70 x 30 x 35 cm volume that
+  # extended above the working zone).
+  targetVolumeMins: [-0.25, -0.1, 0.60]
+  targetVolumeMaxs: [ 0.25,  0.2, 0.85]
+
+  # Goal observation noise (per-episode XY offset on actor obs only)
+  goalXyObsNoise: 0.002

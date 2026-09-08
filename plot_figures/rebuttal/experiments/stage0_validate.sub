@@ -1,0 +1,117 @@
+#!/bin/bash
+#SBATCH -N 1
+#SBATCH -n 1
+#SBATCH --cpus-per-task=12
+#SBATCH --get-user-env
+#SBATCH --mem=200000
+#SBATCH -t 0-02:00:00
+#SBATCH --partition=portal
+#SBATCH --exclude=portal-compute-01
+#SBATCH --gres=gpu:1
+#SBATCH -J stage0_validate
+#SBATCH -o /share/portal/kk837/depthbasedRL/plot_figures/rebuttal/experiments/logs/stage0_validate_%j.out
+#SBATCH -e /share/portal/kk837/depthbasedRL/plot_figures/rebuttal/experiments/logs/stage0_validate_%j.err
+
+# The two Stage 0 paths the peg bolted eval does not reach. Both would fail
+# SILENTLY, which is why they gate Stage 1.
+#
+#  (1) transportPreInsertFinal -- bit-exactness pre vs post refactor. Exercises
+#      the prelude mask, _prelude_lift_off_env, _prelude_pose_world sizing, the
+#      tail gather's prelude offset and the coarse-tolerance branch. Run via a
+#      detached git worktree at the pre-refactor commit so the working tree is
+#      untouched.
+#  (2) PegInHoleFixturedEnv -- asserts its goal budget reached the Phase C
+#      tables through _override_goal_counts. Before that hook, the subclass
+#      wrote the scalars directly and Phase C would have ignored them.
+
+set -uo pipefail
+
+REPO_ROOT="/share/portal/kk837/depthbasedRL"
+OUT_DIR="$REPO_ROOT/plot_figures/rebuttal/experiments/outputs"
+WT="/tmp/${USER}_stage0_pre_worktree"
+# Parent of the Stage 0 commit = the last pre-refactor state.
+PRE_REF="$(cd "$REPO_ROOT" && git rev-parse HEAD~1)"
+
+PROBLEM="Lpeg_dense_traj.tol0p5mm"
+GOAL_MODE="transportPreInsertFinal"
+NUM_ENVS=128
+STEPS=60
+SEED=0
+
+mkdir -p "$OUT_DIR" "$REPO_ROOT/plot_figures/rebuttal/experiments/logs"
+
+export OMNI_KIT_ACCEPT_EULA=YES
+export OMNI_KIT_CACHE_PATH="/tmp/${USER}_ov_cache_stage0"
+mkdir -p "$OMNI_KIT_CACHE_PATH"
+
+# Isaac Sim can hang in Kit teardown after the work is done, which would block
+# the rest of this script indefinitely. Run detached and stop on the harness's
+# own completion marker rather than on process exit (OFFLINE_EVAL.md).
+watch_kill () {  # $1=log  $2=pid  $3=marker  $4=max_polls
+  local log="$1" pid="$2" marker="$3" n="${4:-180}" i
+  for i in $(seq 1 "$n"); do
+    grep -q "$marker" "$log" 2>/dev/null && break
+    kill -0 "$pid" 2>/dev/null || break
+    sleep 10
+  done
+  kill -9 "$pid" 2>/dev/null
+  sleep 8
+}
+
+run_dump () {  # $1=tree  $2=out.pt
+  cd "$1"
+  source "$REPO_ROOT/.venv_isaacsim/bin/activate"
+  local log="$2.log"
+  python -u isaacsimenvs/tests/validate_multiproblem_stage0.py \
+      --mode dump --problem "$PROBLEM" --goal-mode "$GOAL_MODE" \
+      --num-envs "$NUM_ENVS" --steps "$STEPS" --seed "$SEED" --out "$2" \
+      > "$log" 2>&1 &
+  watch_kill "$log" $! "=> wrote" 180
+  # Surface the tree-provenance line: a pre/post comparison is only meaningful
+  # if the two runs imported from different trees.
+  grep -E "\[validate\] isaacsimenvs|Traceback|Error|SystemExit" "$log" || true
+}
+
+echo "############ (1) transportPreInsertFinal: pre vs post"
+echo "pre-refactor ref: $PRE_REF"
+rm -rf "$WT"
+cd "$REPO_ROOT" && git worktree prune && git worktree add --detach "$WT" "$PRE_REF"
+# The venv lives in the main tree; the worktree only needs the repo source.
+ln -sfn "$REPO_ROOT/.venv_isaacsim" "$WT/.venv_isaacsim"
+ln -sfn "$REPO_ROOT/assets"          "$WT/assets"
+ln -sfn "$REPO_ROOT/train_dir"       "$WT/train_dir"
+# The harness postdates PRE_REF, so the worktree has no copy of it. Copy the
+# HEAD version in: we want the same measurement code on both trees, differing
+# only in the env implementation under test.
+mkdir -p "$WT/isaacsimenvs/tests"
+cp "$REPO_ROOT/isaacsimenvs/tests/validate_multiproblem_stage0.py" \
+   "$WT/isaacsimenvs/tests/validate_multiproblem_stage0.py"
+
+run_dump "$WT"        "$OUT_DIR/stage0_pre.pt"
+run_dump "$REPO_ROOT" "$OUT_DIR/stage0_post.pt"
+
+cd "$REPO_ROOT"
+source .venv_isaacsim/bin/activate
+CMP_OUT="$OUT_DIR/stage0_compare.txt"
+python -u isaacsimenvs/tests/validate_multiproblem_stage0.py \
+    --mode compare --a "$OUT_DIR/stage0_pre.pt" --b "$OUT_DIR/stage0_post.pt" \
+    2>&1 | tee "$CMP_OUT"
+# NOT $?: Isaac Sim's SimulationApp overrides the process exit code at shutdown,
+# so a failing run exits 0 and the gate would report a false green.
+grep -q "^==> IDENTICAL" "$CMP_OUT" && CMP_RC=0 || CMP_RC=1
+
+echo "############ (2) PegInHoleFixturedEnv goal budget"
+FIX_OUT="$OUT_DIR/stage0_fixtured.txt"
+# preInsertAndFinal: one of the modes whose trajectory comes from scenes.npz,
+# i.e. the modes for which _override_goal_counts actually fires.
+python -u isaacsimenvs/tests/validate_multiproblem_stage0.py \
+    --mode fixtured --goal-mode preInsertAndFinal > "$FIX_OUT" 2>&1 &
+watch_kill "$FIX_OUT" $! "^==> " 120
+cat "$FIX_OUT" | grep -E "scenes_max_traj_len|_num_total|env_max_goals|^==> " || true
+grep -q "^==> PASS" "$FIX_OUT" && FIX_RC=0 || FIX_RC=1
+
+cd "$REPO_ROOT" && git worktree remove --force "$WT" 2>/dev/null || true
+
+echo "############ RESULT  prelude_compare=$CMP_RC  fixtured=$FIX_RC"
+[ "$CMP_RC" -eq 0 ] && [ "$FIX_RC" -eq 0 ] && echo "STAGE 0 VALIDATION PASSED" \
+  || echo "STAGE 0 VALIDATION FAILED"

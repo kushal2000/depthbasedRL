@@ -1,0 +1,18 @@
+#!/bin/bash
+#SBATCH -N 1
+#SBATCH -n 1
+#SBATCH --cpus-per-task=12
+#SBATCH --get-user-env
+#SBATCH --mem=200000
+#SBATCH -t 0-04:00:00
+#SBATCH --partition=portal
+#SBATCH --exclude=portal-compute-01
+#SBATCH --gres=gpu:1
+#SBATCH -J eval_uni1_furniture
+#SBATCH -o /share/portal/kk837/depthbasedRL/plot_figures/rebuttal/experiments/logs/eval_uni1_furniture_%j.out
+#SBATCH -e /share/portal/kk837/depthbasedRL/plot_figures/rebuttal/experiments/logs/eval_uni1_furniture_%j.err
+
+export EVAL_TAG=furniture
+export EVAL_PROBLEM=furniture_bench.one_leg_leg4_200mm_matchedmass_sdf_hybrid_super_dense
+export EVAL_MAX_STEPS=3000
+exec bash /share/portal/kk837/depthbasedRL/plot_figures/rebuttal/experiments/eval_unified_fixed1mm_common.sh

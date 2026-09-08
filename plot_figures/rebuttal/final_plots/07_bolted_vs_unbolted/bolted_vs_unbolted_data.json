@@ -1,0 +1,26 @@
+{
+  "metric": "early_drop_filtered.insertion_rate",
+  "comparison": "matched training and evaluation fixture regime",
+  "tasks": [
+    {
+      "label": "Tight\nInsertion",
+      "bolted": "../../experiments/outputs/sanity_old_checkpoints/lpeg_fixed_job870892.json",
+      "unbolted_glob": "../../experiments/outputs/solo_unbolted1mm_checkpoints/lpeg_unbolted_job*.json"
+    },
+    {
+      "label": "Beam\nStep 1",
+      "bolted": "../../experiments/outputs/sanity_old_checkpoints/beam_step1_fixed_job870893.json",
+      "unbolted_glob": "../../experiments/outputs/solo_unbolted1mm_checkpoints/beam_step1_unbolted_job*.json"
+    },
+    {
+      "label": "Beam\nStep 2",
+      "bolted": "../../experiments/outputs/sanity_old_checkpoints/beam_step2_fixed_job870894.json",
+      "unbolted_glob": "../../experiments/outputs/solo_unbolted1mm_checkpoints/beam_step2_unbolted_job*.json"
+    },
+    {
+      "label": "Screw-Leg",
+      "bolted": "../../experiments/outputs/sanity_old_checkpoints/furniture_fixed_job870895.json",
+      "unbolted_glob": "../../experiments/outputs/solo_unbolted1mm_checkpoints/furniture_unbolted_job*.json"
+    }
+  ]
+}

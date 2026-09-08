@@ -1,0 +1,25 @@
+{
+  "metric": "early_drop_filtered.insertion_rate",
+  "tasks": [
+    {
+      "label": "Tight\nInsertion",
+      "single_task": "../../experiments/outputs/sanity_old_checkpoints/lpeg_fixed_job870892.json",
+      "unified": "../../experiments/outputs/unified_fixed1mm_checkpoints/lpeg_now_091911_job886423.json"
+    },
+    {
+      "label": "Beam\nStep 1",
+      "single_task": "../../experiments/outputs/sanity_old_checkpoints/beam_step1_fixed_job870893.json",
+      "unified": "../../experiments/outputs/unified_fixed1mm_checkpoints/beam_step1_now_091911_job886424.json"
+    },
+    {
+      "label": "Beam\nStep 2",
+      "single_task": "../../experiments/outputs/sanity_old_checkpoints/beam_step2_fixed_job870894.json",
+      "unified": "../../experiments/outputs/unified_fixed1mm_checkpoints/beam_step2_now_091911_job886425.json"
+    },
+    {
+      "label": "Screw-Leg",
+      "single_task": "../../experiments/outputs/sanity_old_checkpoints/furniture_fixed_job870895.json",
+      "unified": "../../experiments/outputs/unified_fixed1mm_checkpoints/furniture_now_091911_job886426.json"
+    }
+  ]
+}

@@ -1,0 +1,60 @@
+#!/bin/bash
+#SBATCH -N 1
+#SBATCH -n 1
+#SBATCH --cpus-per-task=12
+#SBATCH --get-user-env
+#SBATCH --mem=200000
+#SBATCH -t 0-02:00:00
+#SBATCH --partition=portal
+#SBATCH --exclude=portal-compute-01
+#SBATCH --gres=gpu:1
+#SBATCH -J sanity_old_beam2
+#SBATCH -o /share/portal/kk837/depthbasedRL/plot_figures/rebuttal/experiments/logs/sanity_old_beam2_%j.out
+#SBATCH -e /share/portal/kk837/depthbasedRL/plot_figures/rebuttal/experiments/logs/sanity_old_beam2_%j.err
+
+# Reproduce the legacy single-task, fixed-fixture Beam Step 2 (part_0) eval.
+# The comparison eval disables wrench DR; prior result was approximately 98%.
+
+set -uo pipefail
+
+REPO_ROOT=/share/portal/kk837/depthbasedRL
+RUN_DIR="$REPO_ROOT/train_dir/fig4/beam_3x_teachers/beam_3x_part_0_finetune_rgf0_dr_wrench_2026-05-25_05-40-24"
+CHECKPOINT="$RUN_DIR/0_beam_3x_part_0_finetune_rgf0_dr_wrench_2026-05-25_05-40-24/last/model.pth"
+TRAIN_OVERRIDES="$RUN_DIR/.hydra/overrides.yaml"
+OUT_DIR="$REPO_ROOT/plot_figures/rebuttal/experiments/outputs/sanity_old_checkpoints"
+OUTPUT_JSON="$OUT_DIR/beam_step2_fixed_job${SLURM_JOB_ID}.json"
+DETAIL_LOG="$OUT_DIR/beam_step2_fixed_job${SLURM_JOB_ID}.log"
+
+mkdir -p "$OUT_DIR" "$REPO_ROOT/plot_figures/rebuttal/experiments/logs"
+cd "$REPO_ROOT"
+source .venv_isaacsim/bin/activate
+export OMNI_KIT_ACCEPT_EULA=YES
+export OMNI_KIT_CACHE_PATH="/tmp/${USER}_ov_cache_sanity_beam2_${SLURM_JOB_ID}"
+mkdir -p "$OMNI_KIT_CACHE_PATH"
+
+python -u peg_in_hole_dynamic/offline_eval_teacher_robustness.py \
+  --teacher-checkpoint "$CHECKPOINT" \
+  --train-overrides "$TRAIN_OVERRIDES" \
+  --exact-train --num-envs 512 --seed 42 --max-steps-per-episode 600 \
+  --override env.peg_in_hole.random_goal_fraction=0.0 \
+  --override env.domain_randomization.force_scale=0.0 \
+  --override env.domain_randomization.torque_scale=0.0 \
+  --output-json "$OUTPUT_JSON" > "$DETAIL_LOG" 2>&1 &
+EVAL_PID=$!
+
+COMPLETED=0
+for _ in $(seq 1 180); do
+  if grep -q "=> wrote" "$DETAIL_LOG" 2>/dev/null; then COMPLETED=1; break; fi
+  kill -0 "$EVAL_PID" 2>/dev/null || break
+  sleep 10
+done
+kill -9 "$EVAL_PID" 2>/dev/null || true
+wait "$EVAL_PID" 2>/dev/null || true
+
+grep -E "all envs|no early drop|terminations:|Traceback|Error|=> wrote" "$DETAIL_LOG" || true
+if [ "$COMPLETED" -ne 1 ] || [ ! -s "$OUTPUT_JSON" ]; then
+  echo "FAILED: evaluation did not produce $OUTPUT_JSON" >&2
+  exit 1
+fi
+jq -r '.results[0] | "RESULT all_envs insertion=\(.all_envs.insertion_rate) retract=\(.all_envs.retract_rate); filtered insertion=\(.early_drop_filtered.insertion_rate) retract=\(.early_drop_filtered.retract_rate); n=\(.early_drop_filtered.n); unfinished=\(.unfinished_envs)"' "$OUTPUT_JSON"
+

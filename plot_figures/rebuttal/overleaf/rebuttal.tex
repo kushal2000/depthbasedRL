@@ -1,0 +1,41 @@
+\documentclass[conference]{IEEEtran}
+\usepackage{times}
+
+% numbers option provides compact numerical references in the text.
+\usepackage[numbers]{natbib}
+\usepackage{multicol}
+\usepackage{graphicx}
+\usepackage{subcaption}          % <-- added: the figure block uses subfigure
+\usepackage[bookmarks=true]{hyperref}
+
+\newcommand{\newparagraph}[1]{{\bf #1.}}
+\usepackage{xcolor}
+\definecolor{metaGray}{RGB}{120, 120, 120}
+\definecolor{revBlue}{RGB}{0, 114, 178}       % Reviewer A
+\definecolor{revOrange}{RGB}{230, 159, 0}     % Reviewer B
+\definecolor{revPurple}{RGB}{204, 121, 167}   % Reviewer C
+\definecolor{revGreen}{RGB}{0, 158, 115}      % Reviewer D
+
+\newcommand{\AC}{\textcolor{revGreen}{\textbf{AC}}}
+\newcommand{\revA}{\textcolor{revBlue}{\textbf{EWFH}}}
+\newcommand{\revB}{\textcolor{revOrange}{\textbf{U9qr}}}
+\newcommand{\revC}{\textcolor{revPurple}{\textbf{G57g}}}
+
+\begin{document}
+
+\title{Rebuttal  for CoRL Submission \#1342\vspace{-1cm}}
+\maketitle
+\thispagestyle{empty}
+
+% ---- new-experiment figures, two rows at the top of the page ----
+\input{figures/figure_block}
+
+We thank the reviewers and AC for their thoughtful and \textit{unanimously} positive feedback. They recognize that \textit{Play2Perfect} tackles an ``important and challenging robot-learning problem'' (\revB, \revC) with a ``well-motivated and intuitive solution" (\AC, \revA, \revB), presents ``rigorous and systematic ablations" yielding ``clear, actionable, and useful insights" (\AC, \revA, \revB, \revC), achieves ``large efficiency gains" over RL training from scratch (\AC, \revA, \revB), and demonstrates ``impressive zero-shot real-world results" (\AC, \revA, \revB, \revC). We now address their questions:
+
+% ------------------------------------------------------------------
+% Answers go here. Figure references available:
+%   \ref{fig:noise_failures}   \ref{fig:end_to_end}
+%   \ref{fig:novel_geometries} \ref{fig:unbolted}  \ref{fig:unified}
+% ------------------------------------------------------------------
+
+\end{document}

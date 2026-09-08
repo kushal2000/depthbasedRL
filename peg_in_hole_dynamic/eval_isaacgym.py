@@ -1,0 +1,1348 @@
+#!/usr/bin/env python3
+"""Dynamic peg-in-hole evaluation with pretrained policy (viser).
+
+Main-process viser GUI + IsaacGym subprocess, for ``PegInHoleDynamicEnv``:
+no scenes.npz, hole position randomized each episode.
+
+UI controls:
+  - Policy      — pick from --policies-dir / --config-path subfolders
+  - Problem     — pick a PROBLEM_REGISTRY entry, then click Load / reload env
+  - Goal mode   — preInsertAndFinal / finalGoalOnly
+  - Success tolerances — insertion/retract env tolerances applied at load
+  - Random goal fraction — slider [0, 1] for co-training mix
+
+Usage:
+    python peg_in_hole_dynamic/eval_isaacgym.py \\
+        --config-path pretrained_policy/config.yaml \\
+        --checkpoint-path pretrained_policy/model.pth \\
+        --port 8043
+"""
+
+from __future__ import annotations
+
+import argparse
+import multiprocessing
+import sys
+import time
+import traceback
+from pathlib import Path
+from typing import Dict, Optional, Tuple
+
+import numpy as np
+import trimesh
+import viser
+from viser.extras import ViserUrdf
+
+sys.setrecursionlimit(max(sys.getrecursionlimit(), 10000))
+
+REPO_ROOT = Path(__file__).resolve().parent.parent
+ASSETS_DIR = REPO_ROOT / "assets" / "urdf" / "peg_in_hole"
+
+TABLE_Z = 0.38
+N_ACT = 29
+OBS_DIM = 140
+CONTROL_DT = 1.0 / 60.0
+
+_ARM_DEFAULT = np.array([-1.571, 1.571, 0.0, 1.376, 0.0, 1.485, 1.308])
+_ARM_DEFAULT[1] -= np.deg2rad(10)
+_ARM_DEFAULT[3] += np.deg2rad(10)
+DEFAULT_DOF_POS = np.zeros(N_ACT)
+DEFAULT_DOF_POS[:7] = _ARM_DEFAULT
+
+GOAL_MODES = ["preInsertAndFinal", "finalGoalOnly"]
+DEFAULT_PROBLEM = "peg.tol0p5mm"
+
+HOLE_SCENE_Z = 0.15  # hole base Z in scene-local frame (= table top)
+
+# Target volume for random-goal sampling (matches PegInHoleDynamicEnv.yaml)
+TARGET_VOLUME_MINS = [-0.35, -0.1, 0.6]
+TARGET_VOLUME_MAXS = [0.35, 0.2, 0.95]
+DEFAULT_INSERTION_SUCCESS_TOLERANCE = 0.01
+DEFAULT_RETRACT_SUCCESS_TOLERANCE = 0.005
+
+BASE_OVERRIDES = {
+    "task.env.resetPositionNoiseX": 0.0,
+    "task.env.resetPositionNoiseY": 0.0,
+    "task.env.resetPositionNoiseZ": 0.0,
+    "task.env.randomizeObjectRotation": False,
+    "task.env.resetDofPosRandomIntervalFingers": 0.0,
+    "task.env.resetDofPosRandomIntervalArm": 0.0,
+    "task.env.resetDofVelRandomInterval": 0.0,
+    "task.env.tableResetZRange": 0.0,
+    "task.env.numEnvs": 1,
+    "task.env.envSpacing": 0.4,
+    "task.env.capture_video": False,
+    "task.env.useActionDelay": False,
+    "task.env.useObsDelay": False,
+    "task.env.useObjectStateDelayNoise": False,
+    "task.env.objectScaleNoiseMultiplierRange": [1.0, 1.0],
+    "task.env.resetWhenDropped": False,
+    "task.env.armMovingAverage": 0.1,
+    "task.env.evalSuccessTolerance": 0.01,
+    "task.env.forceConsecutiveNearGoalSteps": True,
+    "task.env.fixedSizeKeypointReward": True,
+    "task.env.useFixedInitObjectPose": True,
+    "task.env.startArmHigher": True,
+    "task.env.forceScale": 0.0,
+    "task.env.torqueScale": 0.0,
+    "task.env.linVelImpulseScale": 0.0,
+    "task.env.angVelImpulseScale": 0.0,
+    "task.env.forceOnlyWhenLifted": True,
+    "task.env.torqueOnlyWhenLifted": True,
+    "task.env.linVelImpulseOnlyWhenLifted": True,
+    "task.env.angVelImpulseOnlyWhenLifted": True,
+    "task.env.forceProbRange": [0.0001, 0.0001],
+    "task.env.torqueProbRange": [0.0001, 0.0001],
+    "task.env.linVelImpulseProbRange": [0.0001, 0.0001],
+    "task.env.angVelImpulseProbRange": [0.0001, 0.0001],
+    "task.env.viserViz": False,
+    "task.env.withTableForceSensor": True,
+    "task.env.tableForceResetThreshold": 1.0e6,
+    "task.env.retractDistanceThreshold": 0.5,
+}
+
+SDF_PHYSX_OVERRIDES = {
+    "task.sim.physx.max_gpu_contact_pairs": 16777216,
+    "task.sim.physx.num_position_iterations": 32,
+    "task.sim.physx.num_velocity_iterations": 1,
+    "task.sim.physx.bounce_threshold_velocity": 0.05,
+    "task.sim.physx.max_depenetration_velocity": 10.0,
+    "task.sim.physx.friction_offset_threshold": 0.01,
+    "task.sim.physx.friction_correlation_distance": 0.0005,
+}
+
+
+def quat_xyzw_to_wxyz(q):
+    return (q[3], q[0], q[1], q[2])
+
+
+_VIZ_PART_CACHE: dict = {}
+
+
+def _load_scene_for_viz(asset_path: Path):
+    """Like _load_mesh_for_viz but returns a Scene, preserving PER-PART materials.
+
+    trimesh.util.concatenate can only carry ONE material, so a multi-material
+    receptacle (aluminium sleeve + dark chassis + receptacle face + switch +
+    cable) collapsed to default grey the moment it was merged -- while the fork
+    and plug looked right, because they are single-material. Keeping a Scene and
+    exporting THAT to GLB is what viz_insertion_spec.py does, and it is the only
+    way the distinct materials reach the browser.
+
+    Returns None when there is nothing usable, so callers fall back to the
+    flat-coloured add_mesh_simple path.
+    """
+    try:
+        parts = _collect_viz_parts(asset_path)
+    except Exception:
+        return None
+    if not parts:
+        return None
+    scene = trimesh.Scene()
+    for i, m in enumerate(parts):
+        scene.add_geometry(m, geom_name=f"part_{i:02d}")
+    return scene
+
+
+def _load_mesh_for_viz(asset_path: Path) -> trimesh.Trimesh:
+    """Load a mesh for viser visualization. Handles URDFs by composing
+    each link's parent-joint origin with each collision/visual ``<origin>``,
+    so multi-link fixture URDFs (joint-origin-driven layouts like our
+    fabrica/fmb insertion_fixtures) render at the correct assembled pose."""
+    if asset_path.suffix in (".obj", ".stl", ".ply"):
+        return trimesh.load(str(asset_path), force="mesh")
+
+    import xml.etree.ElementTree as ET
+    from scipy.spatial.transform import Rotation
+    tree = ET.parse(str(asset_path))
+    root = tree.getroot()
+
+    def _origin_T(elem):
+        T = np.eye(4)
+        if elem is None:
+            return T
+        xyz = [float(v) for v in elem.get("xyz", "0 0 0").split()]
+        rpy = [float(v) for v in elem.get("rpy", "0 0 0").split()]
+        T[:3, 3] = xyz
+        if any(v != 0 for v in rpy):
+            T[:3, :3] = Rotation.from_euler("xyz", rpy).as_matrix()
+        return T
+
+    # Build child_link -> (parent_T, parent_link). Most of our fixture
+    # URDFs are flat (parent = "root"), so a single chain is sufficient.
+    parent_T_of: dict = {}
+    parent_link_of: dict = {}
+    for joint in root.findall("joint"):
+        child = joint.find("child")
+        parent = joint.find("parent")
+        if child is None or parent is None:
+            continue
+        parent_T_of[child.get("link")] = _origin_T(joint.find("origin"))
+        parent_link_of[child.get("link")] = parent.get("link")
+
+    def _link_world_T(link_name):
+        T = np.eye(4)
+        cur = link_name
+        guard = 0
+        while cur in parent_T_of and guard < 32:
+            T = parent_T_of[cur] @ T
+            cur = parent_link_of.get(cur, "")
+            guard += 1
+        return T
+
+    def _collect_geom(link_elem, prefer_tag):
+        out = []
+        link_T = _link_world_T(link_elem.get("name", ""))
+        for elem in link_elem.findall(prefer_tag):
+            geom = elem.find("geometry")
+            if geom is None:
+                continue
+            local_T = _origin_T(elem.find("origin"))
+            box = geom.find("box")
+            mesh_elem = geom.find("mesh")
+            if box is not None:
+                m = trimesh.creation.box(
+                    extents=[float(v) for v in box.get("size").split()]
+                )
+            elif mesh_elem is not None:
+                mesh_file = asset_path.parent / mesh_elem.get("filename")
+                if not mesh_file.exists():
+                    continue
+                # NOT force="mesh", and do NOT concatenate a Scene's parts:
+                # both throw away per-part materials. One <visual> element can
+                # reference a GLB holding several materials (the power board has
+                # five: sleeve, chassis, receptacle, switch, cable), and merging
+                # them collapses all five to default grey.
+                loaded = trimesh.load(str(mesh_file))
+                sub = ([g for g in loaded.geometry.values()
+                        if isinstance(g, trimesh.Trimesh)]
+                       if isinstance(loaded, trimesh.Scene) else [loaded])
+                for g in sub:
+                    g = g.copy()
+                    g.apply_transform(link_T @ local_T)
+                    out.append(g)
+                continue
+            else:
+                continue
+            m.apply_transform(link_T @ local_T)
+            out.append(m)
+        return out
+
+    # VISUAL first, collision only as a fallback. This is a viewer, so it should
+    # show what the object looks like, not what PhysX collides. The order used to
+    # be reversed, which was invisible while every URDF here carried collision
+    # geometry alone -- but plug_fork's assets have both, so the fork rendered as
+    # its 9 CoACD hulls and the receptacles as bare boxes.
+    meshes = []
+    for link in root.findall("link"):
+        meshes.extend(_collect_geom(link, "visual"))
+    if not meshes:
+        for link in root.findall("link"):
+            meshes.extend(_collect_geom(link, "collision"))
+    if not meshes:
+        return trimesh.creation.box(extents=(0.08, 0.08, 0.01))
+    _VIZ_PART_CACHE[str(asset_path)] = meshes
+    return trimesh.util.concatenate(meshes)
+
+
+def _collect_viz_parts(asset_path: Path):
+    """Per-part meshes for `asset_path`, materials intact."""
+    if str(asset_path) not in _VIZ_PART_CACHE:
+        _load_mesh_for_viz(asset_path)          # populates the cache
+    return _VIZ_PART_CACHE.get(str(asset_path), [])
+
+
+def _asset_abs(path_like: str) -> Path:
+    path = Path(path_like)
+    if path.is_absolute():
+        return path
+    return REPO_ROOT / "assets" / path
+
+
+def _asset_rel(path_like) -> str:
+    path = Path(path_like)
+    if path.is_absolute():
+        try:
+            return path.relative_to(REPO_ROOT / "assets").as_posix()
+        except ValueError:
+            return path.as_posix()
+    return path.as_posix()
+
+
+def _registered_problem_names():
+    from peg_in_hole_dynamic import PROBLEM_REGISTRY
+
+    return sorted(PROBLEM_REGISTRY)
+
+
+def _resolve_problem_assets(problem_name: str) -> Tuple[str, str]:
+    from dextoolbench.objects import NAME_TO_OBJECT
+    from peg_in_hole_dynamic import PROBLEM_REGISTRY
+
+    if problem_name not in PROBLEM_REGISTRY:
+        raise KeyError(
+            f"Unknown problem {problem_name!r}; known: {sorted(PROBLEM_REGISTRY)}"
+        )
+    problem = PROBLEM_REGISTRY[problem_name]
+    obj = NAME_TO_OBJECT.get(problem.insertion_object_name)
+    if obj is None:
+        raise KeyError(
+            f"insertion_object_name {problem.insertion_object_name!r} not in NAME_TO_OBJECT"
+        )
+    return _asset_rel(obj.urdf_path), _asset_rel(problem.receptive_urdf)
+
+
+# ===================================================================
+# SUBPROCESS -- IsaacGym simulation
+# ===================================================================
+
+def _create_env(config_path, headless, device, overrides):
+    from deployment.rl_player_utils import read_cfg_omegaconf
+    from deployment.isaac.isaac_env import merge_cfg_with_default_config, create_env_from_cfg
+    from omegaconf import OmegaConf
+
+    cfg = read_cfg_omegaconf(config_path=config_path, device=device)
+    cfg = merge_cfg_with_default_config(cfg)
+    OmegaConf.set_struct(cfg, False)
+    cfg.task.name = "PegInHoleDynamicEnv"
+    cfg.task_name = "PegInHoleDynamicEnv"
+    pih_defaults = {
+        "problem": "peg.tol0p5mm",
+        "objectName": "peg",
+        "useFixedGoalStates": True,
+        "useFixedInitObjectPose": True,
+        "enableRetract": True,
+        "retractRewardScale": 1.0,
+        "retractDistanceThreshold": 0.1,
+        "retractSuccessBonus": 1000.0,
+        "retractSuccessTolerance": 0.005,
+        "insertionSuccessTolerance": 0.01,
+        "goalXyObsNoise": 0.0,
+        "tableForceResetThreshold": 100.0,
+        "holeUrdf": "urdf/peg_in_hole/holes/hole_tol0p5mm/hole_tol0p5mm.urdf",
+        "holeXRange": [-0.1875, 0.1875],
+        "holeYRange": [-0.1, 0.2],
+        "holeZOffset": 0.0,
+        "insertPoseRelHole": [0.0, 0.0, 0.136, 0.0, -0.70710678, 0.0, 0.70710678],
+        "insertionDirection": [0.0, 0.0, -1.0],
+        "preInsertOffset": 0.05,
+        "goalMode": "preInsertAndFinal",
+        "randomGoalFraction": 0.0,
+        "randomGoalMaxSuccesses": 50,
+    }
+    for k, v in pih_defaults.items():
+        OmegaConf.update(cfg, f"task.env.{k}", v, force_add=True)
+    return create_env_from_cfg(cfg=cfg, headless=headless, overrides=overrides)
+
+
+def _sim_get_state(env, obs, joint_lower, joint_upper):
+    obs_np = obs[0].cpu().numpy()
+    joint_pos = 0.5 * (obs_np[:N_ACT] + 1.0) * (joint_upper - joint_lower) + joint_lower
+    if hasattr(env, "hole_pos"):
+        hp = env.hole_pos[0].cpu().numpy()
+        hole_pose = np.concatenate([hp, np.array([0, 0, 0, 1], dtype=hp.dtype)])
+    else:
+        hole_pose = np.array([0, 0, 0, 0, 0, 0, 1], dtype=np.float32)
+    is_rg = bool(env.is_random_goal_env[0].item()) if hasattr(env, "is_random_goal_env") else False
+    retract_phase = bool(env.retract_phase[0].item())
+    fixed_size_keypoints = bool(env.cfg["env"].get("fixedSizeKeypointReward", False))
+    if retract_phase:
+        keypoint_dist = env.keypoints_max_dist[0]
+        success_tolerance = env.retract_success_tolerance
+    else:
+        keypoint_dist = (
+            env.keypoints_max_dist_fixed_size[0]
+            if fixed_size_keypoints and hasattr(env, "keypoints_max_dist_fixed_size")
+            else env.keypoints_max_dist[0]
+        )
+        success_tolerance = (
+            env.success_tolerance
+            if is_rg
+            else getattr(env, "insertion_success_tolerance", env.success_tolerance)
+        )
+
+    return (
+        joint_pos,                                           # 0
+        env.object_state[0, :7].cpu().numpy(),               # 1
+        env.goal_pose[0].cpu().numpy(),                      # 2
+        env.obj_keypoint_pos[0].cpu().numpy(),               # 3
+        env.goal_keypoint_pos[0].cpu().numpy(),              # 4
+        retract_phase,                                       # 5
+        bool(env.retract_succeeded[0].item()),               # 6
+        float(env.curr_fingertip_distances[0].mean().item()),# 7
+        float(keypoint_dist.item()),                         # 8
+        float(success_tolerance * env.keypoint_scale),        # 9
+        int(env.near_goal_steps[0].item()),                  # 10
+        int(env.progress_buf[0].item()),                     # 11
+        int(env.max_episode_length),                         # 12
+        bool(env.reset_buf[0].item()),                       # 13
+        env.table_sensor_forces_smoothed[0, :3].cpu().numpy()
+        if hasattr(env, "table_sensor_forces_smoothed")
+        else np.zeros(3, dtype=np.float32),                  # 14
+        hole_pose,                                           # 15 (x,y,z,qx,qy,qz,qw)
+        is_rg,                                               # 16
+    )
+
+
+def _sim_reset(env, device):
+    import torch
+    obs, _, _, _ = env.step(torch.zeros((env.num_envs, N_ACT), device=device))
+    return obs["obs"]
+
+
+def _sim_episode(conn, env, policy, joint_lower, joint_upper, device):
+    import time as _time
+    import torch  # noqa: F401
+    policy.reset()
+    obs = _sim_reset(env, device)
+
+    retract_ok = False
+    peak_successes = 0
+    max_goals_seen = max(1, int(
+        env.env_max_goals[0].item() if hasattr(env, "env_max_goals")
+        else env.max_consecutive_successes
+    ))
+
+    step, done, paused = 0, False, False
+    while not done:
+        while conn.poll(0):
+            cmd = conn.recv()
+            if cmd == "pause":
+                paused = True
+            elif cmd == "resume":
+                paused = False
+            elif cmd == "stop":
+                conn.send(("stopped",))
+                return obs
+
+        if paused:
+            _time.sleep(0.05)
+            continue
+
+        t0 = _time.time()
+        state = _sim_get_state(env, obs, joint_lower, joint_upper)
+        action = policy.get_normalized_action(obs, deterministic_actions=True)
+        obs_dict, _, done_tensor, _ = env.step(action)
+        obs = obs_dict["obs"]
+        done = done_tensor[0].item()
+        step += 1
+
+        cur_succ = int(env.successes[0].item())
+        cur_max = int(env.env_max_goals[0].item())
+        if cur_succ > peak_successes:
+            peak_successes = cur_succ
+        if cur_max > max_goals_seen:
+            max_goals_seen = cur_max
+        if env.extras.get("retract_success_ratio", 0.0) > 0.5:
+            retract_ok = True
+
+        conn.send(("state", state, cur_succ, cur_max, step, retract_ok))
+
+        elapsed = _time.time() - t0
+        if (sleep := CONTROL_DT - elapsed) > 0:
+            _time.sleep(sleep)
+
+    goal_pct = 100 * peak_successes / max(1, max_goals_seen)
+    conn.send(("done", goal_pct, step, retract_ok))
+    return obs
+
+
+def sim_worker(conn, config_path, checkpoint_path, goal_mode,
+               random_goal_fraction, extra_overrides=None, headless=True):
+    try:
+        from isaacgym import gymapi  # noqa: F401 isort:skip
+        import torch
+        from deployment.rl_player import RlPlayer
+        import peg_in_hole_dynamic.peg.objects  # noqa: F401  (registers peg)
+
+        device = "cuda" if torch.cuda.is_available() else "cpu"
+        overrides = {
+            **BASE_OVERRIDES,
+            "task.env.goalMode": goal_mode,
+            "task.env.randomGoalFraction": float(random_goal_fraction),
+            **(extra_overrides or {}),
+        }
+        env = _create_env(config_path=str(config_path), headless=headless,
+                          device=device, overrides=overrides)
+
+        # Debug: print keypoint offsets
+        print(f"[diag] object_scales[0]: {env.object_scales[0].cpu().tolist()}", flush=True)
+        print(f"[diag] object_keypoint_offsets[0]: {env.object_keypoint_offsets[0].cpu().tolist()}", flush=True)
+        print(f"[diag] object_keypoint_offsets_fixed_size[0]: {env.object_keypoint_offsets_fixed_size[0].cpu().tolist()}", flush=True)
+        print(f"[diag] fixedSize config: {env.cfg['env'].get('fixedSize')}", flush=True)
+        print(f"[diag] keypointScale: {env.keypoint_scale}", flush=True)
+        print(f"[diag] objectBaseSize: {env.object_base_size}", flush=True)
+
+        joint_lower = env.arm_hand_dof_lower_limits[:N_ACT].cpu().numpy()
+        joint_upper = env.arm_hand_dof_upper_limits[:N_ACT].cpu().numpy()
+        env.set_env_state(torch.load(checkpoint_path, map_location=device)[0]["env_state"])
+        policy = RlPlayer(OBS_DIM, N_ACT, config_path, checkpoint_path, device, env.num_envs)
+
+        obs = _sim_reset(env, device)
+        init_state = _sim_get_state(env, obs, joint_lower, joint_upper)
+        conn.send(("ready", init_state))
+
+        while True:
+            cmd = conn.recv()
+            if cmd == "run":
+                obs = _sim_episode(conn, env, policy, joint_lower, joint_upper, device)
+            elif cmd == "quit":
+                break
+    except Exception as exc:
+        conn.send(("error", f"{exc}\n{traceback.format_exc()}"))
+    conn.close()
+
+
+# ===================================================================
+# MAIN PROCESS -- viser GUI
+# ===================================================================
+
+class PegDynamicDemo:
+    def __init__(self, policies: Dict[str, Tuple[str, str]],
+                 port: int = 8043, headless: bool = True,
+                 goal_mode: str = "preInsertAndFinal",
+                 random_goal_fraction: float = 0.0,
+                 initial_policy: Optional[str] = None,
+                 extra_overrides: Optional[dict] = None,
+                 initial_problem: Optional[str] = None,
+                 object_urdf: Optional[str] = None,
+                 hole_urdf: Optional[str] = None):
+        if goal_mode not in GOAL_MODES:
+            raise ValueError(f"goal_mode must be one of {GOAL_MODES}")
+        if not policies:
+            raise ValueError("policies dict must be non-empty")
+        self.problem_names = _registered_problem_names()
+        if not self.problem_names:
+            raise ValueError("PROBLEM_REGISTRY is empty")
+        self.policies = policies
+        self.initial_policy = initial_policy if initial_policy in policies else next(iter(policies))
+        if initial_problem in self.problem_names:
+            self.problem_name = initial_problem
+        elif DEFAULT_PROBLEM in self.problem_names:
+            self.problem_name = DEFAULT_PROBLEM
+        else:
+            self.problem_name = self.problem_names[0]
+        self.port = port
+        self.headless = headless
+        self.goal_mode = goal_mode
+        self.random_goal_fraction = random_goal_fraction
+        self.extra_overrides = extra_overrides or {}
+        self.server = viser.ViserServer(host="0.0.0.0", port=port)
+
+        # Asset paths are relative to assets/ root unless absolute. CLI asset
+        # overrides only affect the initial render; choosing a problem from the
+        # dropdown re-derives both meshes from PROBLEM_REGISTRY.
+        self._object_urdf_rel = ""
+        self._hole_urdf_rel = ""
+        self._object_urdf_abs = REPO_ROOT / "assets"
+        self._hole_urdf_abs = REPO_ROOT / "assets"
+        if object_urdf is not None or hole_urdf is not None:
+            problem_object, problem_hole = _resolve_problem_assets(self.problem_name)
+            self._set_asset_paths(object_urdf or problem_object, hole_urdf or problem_hole)
+        else:
+            self._set_problem_assets(self.problem_name)
+
+        self._proc = None
+        self._conn = None
+        self._env_ready = False
+        self._episode_running = False
+        self._is_paused = False
+
+        self.ep_count = 0
+        self._peak_force = 0.0
+
+        self.robot = None
+        self._dyn = []
+        self._obj_frame = None
+        self._goal_frame = None
+        self._hole_frame = None
+        self._object_viz = None
+        self._goal_viz = None
+        self._hole_viz = None
+        self._obj_keypoints = []
+        self._goal_keypoints = []
+
+        self._hole_mesh = _load_mesh_for_viz(self._hole_urdf_abs)
+        self._object_mesh = _load_mesh_for_viz(self._object_urdf_abs)
+        self._target_vol_box = None
+
+        self._build_gui()
+        self._setup_static_scene()
+
+    def _set_asset_paths(self, object_urdf: str, hole_urdf: str) -> None:
+        self._object_urdf_rel = _asset_rel(object_urdf)
+        self._hole_urdf_rel = _asset_rel(hole_urdf)
+        self._object_urdf_abs = _asset_abs(self._object_urdf_rel)
+        self._hole_urdf_abs = _asset_abs(self._hole_urdf_rel)
+
+    def _set_problem_assets(self, problem_name: str) -> None:
+        object_urdf, hole_urdf = _resolve_problem_assets(problem_name)
+        self.problem_name = problem_name
+        self._set_asset_paths(object_urdf, hole_urdf)
+
+    def _reload_problem_meshes(self) -> None:
+        self._hole_mesh = _load_mesh_for_viz(self._hole_urdf_abs)
+        self._object_mesh = _load_mesh_for_viz(self._object_urdf_abs)
+
+    def _build_gui(self):
+        self.server.gui.add_markdown(
+            "# Peg-in-Hole Dynamic Eval\n"
+            "### Pretrained policy with dynamic hole placement"
+        )
+
+        with self.server.gui.add_folder("Task Selection", expand_by_default=True):
+            self._dd_problem = self.server.gui.add_dropdown(
+                "Problem", options=self.problem_names, initial_value=self.problem_name,
+            )
+            self._dd_policy = self.server.gui.add_dropdown(
+                "Policy", options=list(self.policies.keys()),
+                initial_value=self.initial_policy,
+            )
+            self._dd_goal_mode = self.server.gui.add_dropdown(
+                "Goal mode", options=GOAL_MODES, initial_value=self.goal_mode,
+            )
+            self._sl_rgf = self.server.gui.add_slider(
+                "Random goal frac", min=0.0, max=1.0, step=0.1,
+                initial_value=self.random_goal_fraction,
+            )
+            self._sl_insertion_tol = self.server.gui.add_slider(
+                "Insertion tol (m)", min=0.001, max=0.02, step=0.001,
+                initial_value=DEFAULT_INSERTION_SUCCESS_TOLERANCE,
+            )
+            self._sl_retract_tol = self.server.gui.add_slider(
+                "Retract tol (m)", min=0.001, max=0.01, step=0.001,
+                initial_value=DEFAULT_RETRACT_SUCCESS_TOLERANCE,
+            )
+            self._btn_load = self.server.gui.add_button("Load / reload env")
+            self._btn_load.on_click(lambda _: self._load_env())
+            self._md_status = self.server.gui.add_markdown("**Status:** Ready")
+
+        with self.server.gui.add_folder("Episode Controls", expand_by_default=True):
+            self._btn_run = self.server.gui.add_button("Run Episode")
+            self._btn_run.on_click(lambda _: self._cmd_run())
+            self._btn_pause = self.server.gui.add_button("Pause")
+            self._btn_pause.on_click(lambda _: self._cmd_pause())
+            self._btn_stop = self.server.gui.add_button("Stop")
+            self._btn_stop.on_click(lambda _: self._cmd_stop())
+
+        with self.server.gui.add_folder("Display", expand_by_default=True):
+            self._cb_keypoints = self.server.gui.add_checkbox("Show keypoints", initial_value=True)
+            self._cb_keypoints.on_update(lambda _: self._apply_keypoint_visibility())
+            self._cb_goal = self.server.gui.add_checkbox("Show goal", initial_value=True)
+            self._cb_goal.on_update(lambda _: self._apply_goal_visibility())
+            self._sl_goal_opacity = self.server.gui.add_slider(
+                "Goal opacity", min=0.0, max=1.0, step=0.05, initial_value=0.5,
+            )
+            self._sl_goal_opacity.on_update(lambda _: self._apply_goal_visibility())
+            self._sl_fixture_opacity = self.server.gui.add_slider(
+                "Fixture opacity", min=0.0, max=1.0, step=0.05, initial_value=1.0,
+            )
+            self._sl_fixture_opacity.on_update(lambda _: self._apply_fixture_opacity())
+            self._sl_object_opacity = self.server.gui.add_slider(
+                "Object opacity", min=0.0, max=1.0, step=0.05, initial_value=1.0,
+            )
+            self._sl_object_opacity.on_update(lambda _: self._apply_object_opacity())
+            self._cb_target_vol = self.server.gui.add_checkbox("Show target volume", initial_value=False)
+            self._cb_target_vol.on_update(lambda _: self._toggle_target_volume())
+
+        with self.server.gui.add_folder("Status", expand_by_default=True):
+            self._md_task = self.server.gui.add_markdown("**Task:** --")
+            self._md_hole = self.server.gui.add_markdown("**Hole pos:** --")
+            self._md_object_pose = self.server.gui.add_markdown("**Object pose:** --")
+            self._md_goal_pose = self.server.gui.add_markdown("**Goal pose:** --")
+            self._md_pose_delta = self.server.gui.add_markdown("**Object-goal z dist:** --")
+            self._md_prog = self.server.gui.add_markdown("**Progress:** --")
+            self._md_diag = self.server.gui.add_markdown("**Goal dist:** --")
+            self._md_retract = self.server.gui.add_markdown("**Retract:** --")
+            self._md_force = self.server.gui.add_markdown("**Table force:** --")
+            self._md_stats = self.server.gui.add_markdown("**Stats:** No episodes yet")
+
+    def _setup_static_scene(self):
+        @self.server.on_client_connect
+        def _(client: viser.ClientHandle):
+            client.camera.position = (0.0, -1.0, 1.0)
+            client.camera.look_at = (0.0, 0.0, 0.5)
+
+        self.server.scene.add_grid("/ground", width=2, height=2, cell_size=0.1)
+        self.server.scene.add_frame(
+            "/robot", position=(0, 0.8, 0), wxyz=(1, 0, 0, 0), show_axes=False,
+        )
+        self.robot = ViserUrdf(
+            self.server,
+            REPO_ROOT / "assets" / "urdf" / "kuka_sharpa_description"
+            / "iiwa14_left_sharpa_adjusted_restricted.urdf",
+            root_node_name="/robot",
+        )
+        self.robot.update_cfg(DEFAULT_DOF_POS)
+
+        self._table_frame_default_pos = (0.0, 0.0, TABLE_Z)
+        self._table_frame_default_wxyz = (1.0, 0.0, 0.0, 0.0)
+        self._table_frame = self.server.scene.add_frame(
+            "/table",
+            position=self._table_frame_default_pos,
+            wxyz=self._table_frame_default_wxyz,
+            show_axes=False,
+        )
+        # Base table dims = the URDF box (X, Y, Z) before any scale variants.
+        # Stored so subclasses can re-issue the box with scaled dimensions.
+        self._table_base_dims: tuple[float, float, float] = (0.475, 0.4, 0.3)
+        self._table_wood = self.server.scene.add_box(
+            "/table/wood", color=(180, 130, 70),
+            dimensions=self._table_base_dims, position=(0, 0, 0),
+            side="double", opacity=0.9,
+        )
+
+    def _update_table_viz(
+        self,
+        scale_x_range: tuple[float, float] = (1.0, 1.0),
+        scale_y_range: tuple[float, float] = (1.0, 1.0),
+    ) -> None:
+        """Re-issue ``/table/wood`` sized to the max-extent of the scale range.
+
+        Per-env scale variants are baked at scene-init in the sim worker; viser
+        can only show one mesh, so we draw the largest box the scale dropdown
+        permits as an envelope. Identity scale (default) reproduces the
+        original mesh exactly.
+        """
+        sx = max(scale_x_range)
+        sy = max(scale_y_range)
+        bx, by, bz = self._table_base_dims
+        try:
+            self._table_wood.remove()
+        except Exception:
+            pass
+        self._table_wood = self.server.scene.add_box(
+            "/table/wood", color=(180, 130, 70),
+            dimensions=(bx * sx, by * sy, bz), position=(0, 0, 0),
+            side="double", opacity=0.9,
+        )
+
+    def _update_table_pose(
+        self,
+        pos_local: tuple[float, float, float],
+        quat_wxyz: tuple[float, float, float, float],
+    ) -> None:
+        """Move the ``/table`` frame to the displayed env's actual table pose.
+
+        ``pos_local`` is the env-local position (world - env_origin). The
+        TABLE_Z offset is already baked into the URDF box visual position
+        (z=0.15), so the frame z should be the table's actual world z minus
+        the box-half-height inherent in ``_table_base_dims[2] / 2``; in
+        practice the sim publishes ``root_pos_w`` at the center of the box,
+        and viser's frame is the box parent — we use the published z as-is.
+        """
+        self._table_frame.position = tuple(float(v) for v in pos_local)
+        self._table_frame.wxyz = tuple(float(v) for v in quat_wxyz)
+
+    def _clear_dynamic(self):
+        for h in reversed(self._dyn):
+            try:
+                h.remove()
+            except Exception:
+                pass
+        self._dyn.clear()
+        self._obj_frame = self._goal_frame = self._hole_frame = None
+        self._object_viz = self._goal_viz = None
+        self._hole_viz = None
+        self._obj_keypoints.clear()
+        self._goal_keypoints.clear()
+
+    def _add_object_viz(self, node_name: str, color, opacity=1.0):
+        """Add object mesh to scene from the preloaded trimesh.
+
+        Reconstructing ViserUrdf objects inside the GUI load callback can block
+        reloads for detailed URDFs. A single composed mesh is enough for this
+        eval overlay and lets the goal ghost opacity update live.
+        """
+        rgb = color[:3] if len(color) >= 3 else color
+        # Opaque -> ship the mesh with its OWN materials via GLB, so the YCB
+        # fork keeps its scan texture and the procedural parts keep theirs.
+        # add_mesh_simple takes a single flat colour, which is why every object
+        # used to render as one tint regardless of what its URDF specified.
+        # The goal ghost still goes through add_mesh_simple: it needs opacity,
+        # which add_glb does not support.
+        if opacity >= 0.999:
+            try:
+                scene = _load_scene_for_viz(self._object_urdf_abs)
+                if scene is not None:
+                    return self.server.scene.add_glb(
+                        f"{node_name}/mesh", glb_data=scene.export(file_type="glb"))
+            except Exception:
+                pass
+        verts = np.array(self._object_mesh.vertices, dtype=np.float32)
+        faces = np.array(self._object_mesh.faces, dtype=np.uint32)
+        return self.server.scene.add_mesh_simple(
+            f"{node_name}/mesh", vertices=verts, faces=faces,
+            color=rgb, opacity=opacity, side="double",
+            cast_shadow=False, receive_shadow=False,
+        )
+
+    def _set_viz_visible(self, viz, visible):
+        if viz is None:
+            return
+        if hasattr(viz, "show_visual"):
+            viz.show_visual(visible)
+            return
+        try:
+            viz.visible = visible
+        except AttributeError:
+            pass
+
+    def _set_viz_opacity(self, viz, opacity):
+        if viz is None:
+            return
+        handles = getattr(viz, "_meshes", [viz])
+        for handle in handles:
+            try:
+                handle.opacity = opacity
+            except AttributeError:
+                pass
+
+    def _setup_scene_objects(self):
+        self._clear_dynamic()
+
+        self._obj_frame = self.server.scene.add_frame(
+            "/object", show_axes=True, axes_length=0.05, axes_radius=0.001,
+        )
+        self._dyn.append(self._obj_frame)
+        self._object_viz = self._add_object_viz(
+            "/object", (204, 40, 40), opacity=self._sl_object_opacity.value,
+        )
+        self._dyn.append(self._object_viz)
+
+        self._goal_frame = self.server.scene.add_frame(
+            "/goal", show_axes=True, axes_length=0.05, axes_radius=0.001,
+        )
+        self._dyn.append(self._goal_frame)
+        self._goal_viz = self._add_object_viz(
+            "/goal", (0, 255, 0), opacity=self._sl_goal_opacity.value,
+        )
+        self._dyn.append(self._goal_viz)
+
+        self._hole_frame = self.server.scene.add_frame(
+            "/hole", position=(0, 0, TABLE_Z + HOLE_SCENE_Z),
+            wxyz=(1, 0, 0, 0), show_axes=False,
+        )
+        self._dyn.append(self._hole_frame)
+        # The fixture is the multi-material part -- concatenating it collapsed
+        # five materials into one grey. Ship the Scene as GLB when it is fully
+        # opaque; add_glb has no opacity, so a translucent fixture still falls
+        # back to the flat-coloured mesh.
+        self._hole_viz = None
+        if float(self._sl_fixture_opacity.value) >= 0.999:
+            try:
+                hole_scene = _load_scene_for_viz(self._hole_urdf_abs)
+                if hole_scene is not None:
+                    self._hole_viz = self.server.scene.add_glb(
+                        "/hole/mesh", glb_data=hole_scene.export(file_type="glb"))
+            except Exception:
+                self._hole_viz = None
+        if self._hole_viz is None:
+            self._hole_viz = self.server.scene.add_mesh_simple(
+                "/hole/mesh",
+                vertices=np.array(self._hole_mesh.vertices, dtype=np.float32),
+                faces=np.array(self._hole_mesh.faces, dtype=np.uint32),
+                color=(120, 120, 120),
+                opacity=float(self._sl_fixture_opacity.value),
+            )
+        self._dyn.append(self._hole_viz)
+        self._apply_goal_visibility()
+        self._apply_fixture_opacity()
+        self._apply_object_opacity()
+
+    def _update_hole_viz(self, hole_pose):
+        # Accept either legacy 3-vec position-only or 7-vec pose (x,y,z,qx,qy,qz,qw).
+        if self._hole_frame is None:
+            return
+        hp = np.asarray(hole_pose, dtype=np.float32).reshape(-1)
+        if hp[2] < 0:
+            self._hole_frame.visible = False
+            return
+        self._hole_frame.visible = True
+        self._hole_frame.position = (float(hp[0]), float(hp[1]), float(hp[2]))
+        if hp.shape[0] >= 7:
+            qx, qy, qz, qw = hp[3], hp[4], hp[5], hp[6]
+            self._hole_frame.wxyz = (float(qw), float(qx), float(qy), float(qz))
+
+    def _setup_keypoints(self, num_keypoints):
+        for kp in self._obj_keypoints + self._goal_keypoints:
+            try:
+                kp.remove()
+            except Exception:
+                pass
+        self._obj_keypoints.clear()
+        self._goal_keypoints.clear()
+        for i in range(num_keypoints):
+            self._obj_keypoints.append(
+                self.server.scene.add_icosphere(f"/obj_kp/{i}", radius=0.005, color=(255, 0, 0))
+            )
+            self._goal_keypoints.append(
+                self.server.scene.add_icosphere(f"/goal_kp/{i}", radius=0.005, color=(0, 255, 0), opacity=0.5)
+            )
+        self._apply_keypoint_visibility()
+
+    def _apply_keypoint_visibility(self):
+        visible = self._cb_keypoints.value
+        for kp in self._obj_keypoints:
+            kp.visible = visible
+        self._apply_goal_visibility()
+
+    def _apply_goal_visibility(self):
+        goal_visible = self._cb_goal.value and self._sl_goal_opacity.value > 0.0
+        opacity = float(self._sl_goal_opacity.value)
+        if self._goal_frame is not None:
+            self._goal_frame.visible = goal_visible
+        self._set_viz_visible(self._goal_viz, goal_visible)
+        self._set_viz_opacity(self._goal_viz, opacity)
+        for kp in self._goal_keypoints:
+            kp.visible = goal_visible and self._cb_keypoints.value
+            try:
+                kp.opacity = opacity
+            except AttributeError:
+                pass
+
+    def _apply_fixture_opacity(self):
+        if self._hole_viz is not None:
+            self._set_viz_opacity(
+                self._hole_viz, float(self._sl_fixture_opacity.value)
+            )
+
+    def _apply_object_opacity(self):
+        if self._object_viz is not None:
+            try:
+                self._object_viz.remove()
+            except Exception:
+                pass
+            try:
+                self._dyn.remove(self._object_viz)
+            except ValueError:
+                pass
+            self._object_viz = self._add_object_viz(
+                "/object", (204, 40, 40),
+                opacity=float(self._sl_object_opacity.value),
+            )
+            self._dyn.append(self._object_viz)
+
+    def _toggle_target_volume(self):
+        show = self._cb_target_vol.value
+        if show and self._target_vol_box is None:
+            tv_min = np.array(TARGET_VOLUME_MINS)
+            tv_max = np.array(TARGET_VOLUME_MAXS)
+            center = (tv_min + tv_max) / 2
+            dims = tv_max - tv_min
+            self._target_vol_box = self.server.scene.add_box(
+                "/target_volume",
+                color=(100, 255, 100),
+                dimensions=tuple(dims.tolist()),
+                position=tuple(center.tolist()),
+                side="double",
+                opacity=0.08,
+            )
+        if self._target_vol_box is not None:
+            self._target_vol_box.visible = show
+
+    # ── Subprocess management ────────────────────────────────────
+
+    def _kill_subprocess(self):
+        if self._conn is not None:
+            try:
+                self._conn.send("quit")
+            except (BrokenPipeError, OSError):
+                pass
+            self._conn.close()
+            self._conn = None
+        if self._proc is not None:
+            self._proc.join(timeout=5)
+            if self._proc.is_alive():
+                self._proc.kill()
+                self._proc.join()
+            self._proc = None
+        self._env_ready = False
+        self._episode_running = False
+        self._is_paused = False
+
+    def _load_env(self):
+        problem_name = self._dd_problem.value
+        goal_mode = self._dd_goal_mode.value
+        rgf = self._sl_rgf.value
+        insertion_tol = float(self._sl_insertion_tol.value)
+        retract_tol = float(self._sl_retract_tol.value)
+        policy_name = self._dd_policy.value
+        config_path, checkpoint_path = self.policies[policy_name]
+
+        try:
+            self._set_problem_assets(problem_name)
+            self._reload_problem_meshes()
+        except Exception as exc:
+            self._md_status.content = f"**Status:** Problem load error -- {str(exc)[:200]}"
+            print(f"[launcher] Problem load error for {problem_name!r}:\n{traceback.format_exc()}")
+            return
+
+        self._kill_subprocess()
+
+        label = (
+            f"{problem_name} | {policy_name} | goals: {goal_mode} | rgf: {rgf:.1f} | "
+            f"ins: {insertion_tol * 1000:.1f}mm | ret: {retract_tol * 1000:.1f}mm"
+        )
+        self._md_status.content = f"**Status:** Loading *{label}* ..."
+        self._md_task.content = f"**Task:** {label}"
+        self._md_retract.content = "**Retract:** --"
+        self._md_hole.content = "**Hole pos:** --"
+        self._md_object_pose.content = "**Object pose:** --"
+        self._md_goal_pose.content = "**Goal pose:** --"
+        self._md_pose_delta.content = "**Object-goal z dist:** --"
+        self.ep_count = 0
+        self._peak_force = 0.0
+        self._md_stats.content = "**Stats:** No episodes yet"
+
+        self.robot.update_cfg(DEFAULT_DOF_POS)
+        self._setup_scene_objects()
+
+        # Merge asset overrides into extra_overrides for the subprocess
+        sim_overrides = dict(self.extra_overrides)
+        sim_overrides["task.env.problem"] = problem_name
+        sim_overrides["task.env.holeUrdf"] = self._hole_urdf_rel
+        sim_overrides["task.env.targetVolumeMins"] = TARGET_VOLUME_MINS
+        sim_overrides["task.env.targetVolumeMaxs"] = TARGET_VOLUME_MAXS
+        sim_overrides["task.env.insertionSuccessTolerance"] = insertion_tol
+        sim_overrides["task.env.retractSuccessTolerance"] = retract_tol
+
+        ctx = multiprocessing.get_context("spawn")
+        parent_conn, child_conn = ctx.Pipe()
+        self._conn = parent_conn
+        self._proc = ctx.Process(
+            target=sim_worker,
+            args=(child_conn, config_path, checkpoint_path,
+                  goal_mode, rgf, sim_overrides, self.headless),
+            daemon=True,
+        )
+        self._proc.start()
+        child_conn.close()
+        print(f"[launcher] Spawned pid={self._proc.pid} problem={problem_name} "
+              f"goal_mode={goal_mode} rgf={rgf} hole={self._hole_urdf_rel}")
+
+    def _send(self, msg):
+        if self._conn is not None:
+            try:
+                self._conn.send(msg)
+            except (BrokenPipeError, OSError):
+                pass
+
+    def _cmd_run(self):
+        if not self._env_ready:
+            self._md_status.content = "**Status:** Load an environment first."
+            return
+        if self._episode_running:
+            return
+        self._episode_running = True
+        self._is_paused = False
+        self._btn_pause.name = "Pause"
+        self._md_status.content = "**Status:** Running episode..."
+        self._md_retract.content = "**Retract:** --"
+        self._peak_force = 0.0
+        self._send("run")
+
+    def _cmd_pause(self):
+        if not self._episode_running:
+            return
+        self._is_paused = not self._is_paused
+        self._send("pause" if self._is_paused else "resume")
+        self._btn_pause.name = "Resume" if self._is_paused else "Pause"
+
+    def _cmd_stop(self):
+        if self._episode_running:
+            self._send("stop")
+
+    @staticmethod
+    def _pose_status(label, pose):
+        pose = np.asarray(pose, dtype=np.float32)
+        xyz = ", ".join(f"{v:+.4f}" for v in pose[:3])
+        quat = ", ".join(f"{v:+.4f}" for v in pose[3:7])
+        return f"**{label}:** xyz [{xyz}]  \nquat_xyzw [{quat}]"
+
+    def _update_viz(self, state_tuple):
+        joint_pos, obj_pose, goal_pose = state_tuple[0], state_tuple[1], state_tuple[2]
+        self.robot.update_cfg(joint_pos)
+
+        if self._obj_frame is not None:
+            self._obj_frame.position = tuple(obj_pose[:3])
+            self._obj_frame.wxyz = quat_xyzw_to_wxyz(obj_pose[3:7])
+        if self._goal_frame is not None:
+            self._goal_frame.position = tuple(goal_pose[:3])
+            self._goal_frame.wxyz = quat_xyzw_to_wxyz(goal_pose[3:7])
+        self._md_object_pose.content = self._pose_status("Object pose", obj_pose)
+        self._md_goal_pose.content = self._pose_status("Goal pose", goal_pose)
+        z_delta = float(obj_pose[2] - goal_pose[2])
+        self._md_pose_delta.content = (
+            f"**Object-goal z dist:** {z_delta * 1000:+.2f} mm "
+            f"(abs {abs(z_delta) * 1000:.2f} mm)"
+        )
+
+        if len(state_tuple) > 3:
+            obj_kps, goal_kps = state_tuple[3], state_tuple[4]
+            for handle, pos in zip(self._obj_keypoints, obj_kps):
+                handle.position = tuple(pos)
+            for handle, pos in zip(self._goal_keypoints, goal_kps):
+                handle.position = tuple(pos)
+
+        if len(state_tuple) > 15:
+            hole_pos = state_tuple[15]
+            self._update_hole_viz(hole_pos)
+            is_rg = state_tuple[16] if len(state_tuple) > 16 else False
+            mode_str = "RANDOM GOAL" if is_rg else "INSERTION"
+            if hole_pos[2] < 0:
+                self._md_hole.content = f"**Hole pos:** hidden (random-goal mode) | **Mode:** {mode_str}"
+            else:
+                self._md_hole.content = (
+                    f"**Hole pos:** ({hole_pos[0]:.3f}, {hole_pos[1]:.3f}, {hole_pos[2]:.3f})"
+                    f" | **Mode:** {mode_str}"
+                )
+
+    def _handle(self, msg):
+        tag = msg[0]
+        if tag == "ready":
+            init_state = msg[1]
+            if len(init_state) > 3:
+                self._setup_keypoints(init_state[3].shape[0])
+            self._update_viz(init_state)
+            self._env_ready = True
+            self._md_status.content = "**Status:** Ready -- click **Run Episode**"
+            print("[launcher] Environment ready")
+
+        elif tag == "table_scale":
+            # Worker reports the actual (sx, sy) of the displayed env's table.
+            sx, sy = float(msg[1]), float(msg[2])
+            self._update_table_viz(
+                scale_x_range=(sx, sx), scale_y_range=(sy, sy),
+            )
+            print(f"[launcher] table_scale received: sx={sx:.3f} sy={sy:.3f}")
+
+        elif tag == "table_pose":
+            # Worker reports env_id's env-local table pose (after reset).
+            px, py, pz = float(msg[1]), float(msg[2]), float(msg[3])
+            qw, qx, qy, qz = (float(msg[4]), float(msg[5]),
+                              float(msg[6]), float(msg[7]))
+            self._update_table_pose((px, py, pz), (qw, qx, qy, qz))
+            print(f"[launcher] table_pose received: "
+                  f"pos=({px:.3f},{py:.3f},{pz:.3f}) "
+                  f"quat=({qw:.3f},{qx:.3f},{qy:.3f},{qz:.3f})")
+
+        elif tag == "state":
+            state, successes, max_succ, step = msg[1], msg[2], msg[3], msg[4]
+            latched_retract = msg[5] if len(msg) > 5 else False
+            self._update_viz(state)
+            pct = 100 * successes / max_succ if max_succ > 0 else 0
+            self._md_prog.content = (
+                f"**Time:** {step / 60.0:.1f}s &nbsp;|&nbsp; "
+                f"**Goal:** {successes}/{max_succ} ({pct:.0f}%)"
+            )
+            if len(state) >= 8:
+                retract_phase, retract_ok, mean_ft_dist = state[5], state[6], state[7]
+                retract_ok = retract_ok or latched_retract
+                if retract_ok:
+                    self._md_retract.content = f"**Retract:** SUCCESS (hand dist {mean_ft_dist:.3f}m)"
+                elif retract_phase:
+                    self._md_retract.content = f"**Retract:** IN PROGRESS (hand dist {mean_ft_dist:.3f}m)"
+                else:
+                    self._md_retract.content = f"**Retract:** not yet (hand dist {mean_ft_dist:.3f}m)"
+            if len(state) >= 14:
+                kp_max_dist = state[8]
+                tol_m = state[9]
+                near_steps = state[10]
+                progress = state[11]
+                max_ep_len = state[12]
+                reset_pending = state[13]
+                in_tol = "Y" if kp_max_dist <= tol_m else "N"
+                self._md_diag.content = (
+                    f"**Goal dist:** {kp_max_dist*1000:.1f} mm {in_tol}  "
+                    f"&nbsp;(tol {tol_m*1000:.1f} mm)  "
+                    f"&nbsp;near-goal-steps: **{near_steps}**  \n"
+                    f"**progress_buf:** {progress}/{max_ep_len}  "
+                    f"&nbsp;reset_buf: **{reset_pending}**"
+                )
+            if len(state) >= 15:
+                force_vec = np.asarray(state[14], dtype=np.float32)
+                force_mag = float(np.linalg.norm(force_vec))
+                if force_mag > self._peak_force:
+                    self._peak_force = force_mag
+                self._md_force.content = (
+                    f"**Table force:** {force_mag:.2f} N  "
+                    f"&nbsp;(peak: **{self._peak_force:.2f} N**)  \n"
+                    f"&nbsp;[fx, fy, fz] = "
+                    f"[{force_vec[0]:+.2f}, {force_vec[1]:+.2f}, {force_vec[2]:+.2f}] N"
+                )
+
+        elif tag == "done":
+            goal_pct, steps, retract_ok = msg[1], msg[2], msg[3]
+            self._episode_running = False
+            self.ep_count += 1
+            self._md_stats.content = (
+                f"**Episodes:** {self.ep_count} &nbsp;|&nbsp; "
+                f"**Last goal:** {goal_pct:.0f}% &nbsp;|&nbsp; "
+                f"**Last time:** {steps / 60.0:.1f}s"
+            )
+            self._md_status.content = (
+                f"**Status:** Done -- {steps / 60.0:.1f}s, {goal_pct:.0f}% goals"
+                f" | Retract {'OK' if retract_ok else 'FAIL'}"
+            )
+            self._md_retract.content = f"**Retract:** {'SUCCESS' if retract_ok else 'FAILED'}"
+            print(f"[launcher] Episode done: {goal_pct:.0f}% goals, {steps / 60.0:.1f}s")
+
+        elif tag == "stopped":
+            self._episode_running = False
+            self._md_status.content = "**Status:** Episode stopped."
+
+        elif tag == "error":
+            self._env_ready = False
+            self._episode_running = False
+            self._md_status.content = f"**Status:** Error -- {msg[1][:200]}"
+            print(f"[launcher] Subprocess error:\n{msg[1]}")
+
+    def _poll(self):
+        if self._conn is None:
+            return
+        try:
+            while self._conn.poll(0):
+                self._handle(self._conn.recv())
+        except (EOFError, ConnectionResetError, OSError):
+            self._conn = None
+            if self._proc is not None and not self._proc.is_alive():
+                self._md_status.content = "**Status:** Subprocess exited unexpectedly."
+                self._proc = None
+                self._env_ready = False
+                self._episode_running = False
+
+    def run(self):
+        print()
+        print(f"  Peg-in-Hole Dynamic Eval   http://localhost:{self.port}")
+        print()
+        try:
+            while True:
+                self._poll()
+                time.sleep(1.0 / 120.0)
+        except KeyboardInterrupt:
+            print("\n[launcher] Shutting down...")
+            self._kill_subprocess()
+
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description=__doc__,
+                                     formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument("--port", type=int, default=8043)
+    parser.add_argument("--config-path", type=str, default=None)
+    parser.add_argument("--checkpoint-path", type=str, default=None)
+    parser.add_argument("--policies-dir", type=str, default=None,
+                        help="Directory of policy subfolders (each with config.yaml + model.pth).")
+    parser.add_argument("--policies", nargs="+", default=None,
+                        help="Policy names (filters --policies-dir).")
+    parser.add_argument("--initial-policy", type=str, default=None)
+    parser.add_argument("--no-headless", action="store_true")
+    parser.add_argument("--goal-mode", choices=GOAL_MODES, default="preInsertAndFinal")
+    parser.add_argument("--random-goal-fraction", type=float, default=0.0)
+    parser.add_argument("--object-urdf", type=str, default=None,
+                        help="Object URDF path relative to assets/ (default: urdf/peg_in_hole/peg/peg.urdf, or derived from --problem)")
+    parser.add_argument("--hole-urdf", type=str, default=None,
+                        help="Hole URDF path relative to assets/ (default: urdf/peg_in_hole/holes/hole_tol0p5mm/hole_tol0p5mm.urdf, or derived from --problem)")
+    parser.add_argument("--problem", type=str, default=None,
+                        help="Problem name from PROBLEM_REGISTRY. When set, derives "
+                             "the initial object_urdf + hole_urdf from the registry "
+                             "and selects the initial GUI Problem dropdown value.")
+    parser.add_argument("--sdf", action="store_true",
+                        help="Apply the SDF-hybrid PhysX preset used by the better-physics runs.")
+    parser.add_argument("--override", nargs=2, action="append", default=[],
+                        metavar=("KEY", "VALUE"),
+                        help="Extra task-env overrides (repeated).")
+    args = parser.parse_args()
+
+    def _resolve(p):
+        path = Path(p)
+        if path.exists():
+            return str(path)
+        path = REPO_ROOT / p
+        if path.exists():
+            return str(path)
+        raise FileNotFoundError(p)
+
+    extra_overrides = dict(SDF_PHYSX_OVERRIDES) if args.sdf else {}
+    object_urdf_arg = args.object_urdf
+    hole_urdf_arg = args.hole_urdf
+    if args.problem is not None:
+        from peg_in_hole_dynamic import PROBLEM_REGISTRY
+        from dextoolbench.objects import NAME_TO_OBJECT
+        if args.problem not in PROBLEM_REGISTRY:
+            raise KeyError(
+                f"Unknown problem {args.problem!r}; "
+                f"known: {sorted(PROBLEM_REGISTRY)}"
+            )
+        _p = PROBLEM_REGISTRY[args.problem]
+        _obj = NAME_TO_OBJECT.get(_p.insertion_object_name)
+        if _obj is None:
+            raise KeyError(
+                f"insertion_object_name {_p.insertion_object_name!r} not in NAME_TO_OBJECT"
+            )
+        if hole_urdf_arg is None:
+            hole_urdf_arg = _p.receptive_urdf
+        if object_urdf_arg is None:
+            obj_path = Path(_obj.urdf_path)
+            try:
+                object_urdf_arg = str(obj_path.relative_to(REPO_ROOT / "assets"))
+            except ValueError:
+                object_urdf_arg = str(obj_path)
+        # Push into the IsaacGym subprocess so the env's registry resolver picks it up.
+        extra_overrides["task.env.problem"] = args.problem
+
+    for key, val in args.override:
+        # Try parsing as JSON first (handles lists like [-0.005,0.1,0.2])
+        import json
+        try:
+            val = json.loads(val)
+        except (json.JSONDecodeError, ValueError):
+            for cast in (int, float):
+                try:
+                    val = cast(val)
+                    break
+                except ValueError:
+                    continue
+            if val == "True":
+                val = True
+            elif val == "False":
+                val = False
+        extra_overrides[key] = val
+
+    policies: Dict[str, Tuple[str, str]] = {}
+    if args.policies_dir is not None:
+        pdir = Path(args.policies_dir)
+        if not pdir.is_absolute():
+            pdir = REPO_ROOT / pdir
+        if not pdir.exists():
+            raise FileNotFoundError(f"--policies-dir not found: {pdir}")
+        name_filter = set(args.policies) if args.policies else None
+        for sub in sorted(pdir.iterdir()):
+            if name_filter is not None and sub.name not in name_filter:
+                continue
+            cfg = sub / "config.yaml"
+            ckpt = sub / "model.pth"
+            if cfg.exists() and ckpt.exists():
+                policies[sub.name] = (str(cfg), str(ckpt))
+        if not policies:
+            raise FileNotFoundError(f"No policy subfolders in {pdir}")
+    else:
+        if args.config_path is None or args.checkpoint_path is None:
+            raise ValueError(
+                "Provide either --policies-dir or both --config-path and --checkpoint-path"
+            )
+        name = Path(args.config_path).parent.name or "policy"
+        policies[name] = (_resolve(args.config_path), _resolve(args.checkpoint_path))
+
+    PegDynamicDemo(
+        policies=policies,
+        port=args.port,
+        headless=not args.no_headless,
+        goal_mode=args.goal_mode,
+        random_goal_fraction=args.random_goal_fraction,
+        initial_policy=args.initial_policy,
+        extra_overrides=extra_overrides,
+        initial_problem=args.problem,
+        object_urdf=object_urdf_arg,
+        hole_urdf=hole_urdf_arg,
+    ).run()

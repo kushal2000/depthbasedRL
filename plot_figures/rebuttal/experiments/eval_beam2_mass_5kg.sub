@@ -1,0 +1,128 @@
+#!/bin/bash
+#SBATCH -N 1
+#SBATCH -n 1
+#SBATCH --cpus-per-task=12
+#SBATCH --get-user-env
+#SBATCH --mem=200000
+#SBATCH -t 0-02:00:00
+#SBATCH --partition=portal
+#SBATCH --exclude=portal-compute-01
+#SBATCH --gres=gpu:1
+#SBATCH -J eval_beam2_mass_5kg
+#SBATCH -o /share/portal/kk837/depthbasedRL/plot_figures/rebuttal/experiments/logs/eval_beam2_mass_5kg_%j.out
+#SBATCH -e /share/portal/kk837/depthbasedRL/plot_figures/rebuttal/experiments/logs/eval_beam2_mass_5kg_%j.err
+
+# Assemble-beam Step 2 (part_0), unbolted, fixture mass 5 kg. Third point on the
+# mass sweep from job 853133, which established (hole_x_range clamped, 512 envs,
+# wrench off, seed 42 -- all identical here):
+#
+#   bolted   0.690 kg   98.37%  (n=430)   late falls   3   timeout  1
+#   unbolted 0.690 kg   49.78%  (n=458)   late falls 129   timeout 83
+#   unbolted 1.502 kg   64.57%  (n=460)   late falls  77   timeout 64
+#
+# 2.18x mass bought +14.8 pts and ate specifically the tipping failure modes.
+# TIPPING IS CONFIRMED VISUALLY (viser, unbolted): the plate goes over on
+# contact -- previously only inferred from COM height (z=0.059, with an ixz
+# cross-term) and the fall/timeout split.
+#
+# This arm asks whether the remaining 33.8-pt gap to bolted is the same
+# mechanism continued, or a floor that mass cannot reach. Tipping resists via
+# m*g*d, i.e. linear in mass, so 5 kg is 7.25x the PLA baseline and 3.33x the
+# aluminium arm. If the trend continues we should land near bolted; if it
+# plateaus, the residual failures are something other than tipping (the fixture
+# being pushed/slid, or the goal-pose observation going stale as the fixture
+# moves) and more mass will not help.
+#
+# 5 kg on 556.3 cm^3 back-solves to 8988 kg/m^3 -- denser than steel. This is a
+# MECHANISM PROBE, not a manufacturable fixture. Report it as such.
+#
+# Mass and inertia scale together here (the whole inertial block is recomputed),
+# so this is not mass in isolation -- same caveat as the aluminium arm. The COM
+# and the tensor's shape are unchanged; only the scale differs.
+#
+# The URDF is rewritten in place and restored on exit; the USD is baked per run,
+# so the change only takes effect for the run that follows it.
+
+set -uo pipefail
+
+REPO_ROOT="/share/portal/kk837/depthbasedRL"
+URDF="$REPO_ROOT/assets/urdf/fabrica/beam_3x/insertion_fixtures/part_0_sdf_hybrid.urdf"
+RUN_DIR="$REPO_ROOT/train_dir/fig4/beam_3x_teachers/beam_3x_part_0_finetune_rgf0_dr_wrench_2026-05-25_05-40-24"
+CHECKPOINT="$(ls "$RUN_DIR"/*/last/model.pth | head -1)"
+TRAIN_OVERRIDES="$RUN_DIR/.hydra/overrides.yaml"
+OUT_DIR="$REPO_ROOT/plot_figures/rebuttal/experiments/outputs"
+
+NUM_ENVS=512
+SEED=42
+HOLE_X="[-0.14,0.14]"
+TARGET_MASS=5.0
+LOG="$OUT_DIR/beam2mass_unbolted_5000g.txt"
+
+mkdir -p "$OUT_DIR" "$REPO_ROOT/plot_figures/rebuttal/experiments/logs"
+cd "$REPO_ROOT"
+source .venv_isaacsim/bin/activate
+export OMNI_KIT_ACCEPT_EULA=YES
+export OMNI_KIT_CACHE_PATH="/tmp/${USER}_ov_cache_beam2mass5kg"
+mkdir -p "$OMNI_KIT_CACHE_PATH"
+
+# Restore the fixture no matter how we exit -- the previous mass-sweep job left
+# the URDF at its committed 0.690 kg and this must too.
+BACKUP="$(mktemp)"; cp "$URDF" "$BACKUP"
+restore() { cp "$BACKUP" "$URDF"; echo "restored $URDF"; }
+trap restore EXIT
+
+echo "### setting fixture mass to ${TARGET_MASS} kg"
+python scripts/compute_urdf_inertial.py "$URDF" --mass "$TARGET_MASS" --write | tail -4
+# compute_urdf_inertial.py refuses to write invalid XML, but confirm the mass
+# actually landed before burning a GPU-hour on a fixture that did not change.
+ACTUAL="$(grep -oE '<mass value="[0-9.]+"' "$URDF" | head -1)"
+echo "### fixture now: $ACTUAL"
+case "$ACTUAL" in
+  *'"5.0000"'*) ;;
+  *) echo "FATAL: fixture mass did not take ($ACTUAL); aborting"; exit 1 ;;
+esac
+
+echo "############ unbolted_5000g (bolted=False, mass=$ACTUAL)"
+
+# Isaac Sim hangs in Kit teardown after the JSON is written; run detached and
+# stop on the "=> wrote" marker rather than waiting for the process to exit.
+python -u peg_in_hole_dynamic/offline_eval_teacher_robustness.py \
+    --teacher-checkpoint "$CHECKPOINT" --train-overrides "$TRAIN_OVERRIDES" \
+    --exact-train --num-envs "$NUM_ENVS" --seed "$SEED" \
+    --override env.domain_randomization.force_scale=0.0 \
+    --override env.domain_randomization.torque_scale=0.0 \
+    --override "env.peg_in_hole.hole_x_range=$HOLE_X" \
+    --override env.peg_in_hole.fixture_bolted=False \
+    --output-json "$OUT_DIR/beam2mass_unbolted_5000g.json" > "$LOG" 2>&1 &
+PID=$!
+for i in $(seq 1 480); do
+  grep -q "=> wrote" "$LOG" 2>/dev/null && break
+  kill -0 $PID 2>/dev/null || break
+  sleep 10
+done
+grep -E "no early drop|terminations:|Traceback|Error" "$LOG" || true
+kill -9 $PID 2>/dev/null
+sleep 8
+
+echo "############ SUMMARY (Assemble-beam Step 2 mass sweep, unbolted, clamped)"
+python - <<'PY'
+import json
+OUT = "/share/portal/kk837/depthbasedRL/plot_figures/rebuttal/experiments/outputs"
+prior = [("bolted            0.690 kg", "beam2mass_bolted_690g"),
+         ("unbolted          0.690 kg", "beam2mass_unbolted_690g"),
+         ("unbolted (alu)    1.502 kg", "beam2mass_unbolted_1502g"),
+         ("unbolted (probe)  5.000 kg", "beam2mass_unbolted_5000g")]
+for label, stem in prior:
+    try:
+        r = json.load(open(f"{OUT}/{stem}.json"))["results"][0]
+        e, t = r["early_drop_filtered"], r["termination_counts"]
+        late = t["fall"] - r.get("dropped_early", 0)
+        print(f"{label:28s} {100*e['retract_rate']:6.2f}%  (n={e['n']})  "
+              f"fall={t['fall']} (late~{late}) timeout={t['timeout']}")
+    except Exception as exc:
+        print(f"{label:28s} unavailable ({exc})")
+print("\n5 kg on 556.3 cm^3 is 8988 kg/m^3 -- denser than steel. Mechanism probe "
+      "for whether tipping resistance is the binding constraint, NOT a "
+      "manufacturable fixture spec.")
+PY
+echo "############ DONE"

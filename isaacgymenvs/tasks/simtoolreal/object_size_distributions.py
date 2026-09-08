@@ -110,7 +110,7 @@ OBJECT_SIZE_DISTRIBUTIONS: List[ObjectSizeDistribution] = [
     ObjectSizeDistribution(
         type="hammer",
         handle_min_lengths=(0.15, 0.02, 0.015),  # Box
-        handle_max_lengths=(0.3, 0.04, 0.03),
+        handle_max_lengths=(0.30, 0.04, 0.03),
         head_min_lengths=(0.02, 0.05, 0.02),
         head_max_lengths=(0.06, 0.12, 0.06),
         handle_min_density=LOW_DENSITY_MIN,
@@ -121,7 +121,7 @@ OBJECT_SIZE_DISTRIBUTIONS: List[ObjectSizeDistribution] = [
     ObjectSizeDistribution(
         type="hammer",
         handle_min_lengths=(0.15, 0.015),  # Cylinder
-        handle_max_lengths=(0.3, 0.03),
+        handle_max_lengths=(0.30, 0.03),
         head_min_lengths=(0.02, 0.05, 0.02),
         head_max_lengths=(0.06, 0.12, 0.06),
         handle_min_density=LOW_DENSITY_MIN,

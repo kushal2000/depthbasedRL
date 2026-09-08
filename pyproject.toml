@@ -73,12 +73,13 @@ dev = [
 [tool.setuptools.packages.find]
 include = [
     "isaacgymenvs*",
+    "isaacsimenvs*",
+    "isaacsim_conversion*",
     "dextoolbench*",
     "deployment*",
-    "fabrica*",
     "baselines*",
     "recorded_data*",
-    "peg_in_hole*",
+    "peg_in_hole_dynamic*",
 ]
 
 [tool.uv]

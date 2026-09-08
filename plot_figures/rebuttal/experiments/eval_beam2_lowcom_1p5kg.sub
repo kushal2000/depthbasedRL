@@ -1,0 +1,162 @@
+#!/bin/bash
+#SBATCH -N 1
+#SBATCH -n 1
+#SBATCH --cpus-per-task=12
+#SBATCH --get-user-env
+#SBATCH --mem=200000
+#SBATCH -t 0-02:00:00
+#SBATCH --partition=portal
+#SBATCH --exclude=portal-compute-01
+#SBATCH --gres=gpu:1
+#SBATCH -J eval_beam2_lowcom_1p5kg
+#SBATCH -o /share/portal/kk837/depthbasedRL/plot_figures/rebuttal/experiments/logs/eval_beam2_lowcom_1p5kg_%j.out
+#SBATCH -e /share/portal/kk837/depthbasedRL/plot_figures/rebuttal/experiments/logs/eval_beam2_lowcom_1p5kg_%j.err
+
+# Assemble-beam Step 2 (part_0), unbolted, 1.502 kg with the COM lowered to
+# z=0.020. Paired A/B against the aluminium arm from job 853133, which used the
+# SAME mass at the geometric COM z=0.058864 and scored 64.57%. Mass is held, so
+# this isolates COM height -- the aluminium arm changed mass and inertia
+# together and could not separate the two.
+#
+# Sweep so far (hole_x_range clamped, 512 envs, wrench off, seed 42):
+#   bolted   0.690 kg  z=0.0589   98.37%  (n=430)  late falls   3  timeout  1
+#   unbolted 0.690 kg  z=0.0589   49.78%  (n=458)  late falls 129  timeout 83
+#   unbolted 1.502 kg  z=0.0589   64.57%  (n=460)  late falls  77  timeout 64
+#   unbolted 5.000 kg  z=0.0589   (job 853869)
+#   unbolted 1.502 kg  z=0.0200   THIS RUN
+#
+# WHY COM HEIGHT, AND WHY IT IS NOT THE STATIC CONDITION. Static tipping about
+# the table edge depends on the HORIZONTAL COM offset d and the height of the
+# applied force -- not on COM height. What z_com controls is whether a tip that
+# has started COMPLETES: the body must rotate past theta_crit = atan(d/z_com)
+# before the COM crosses the pivot and it goes over.
+#
+#   d = 0.0731 (half-width) - 0.0222 (|com x|) = 0.0509 m
+#   z_com 0.0589 -> theta_crit 40.8 deg
+#   z_com 0.0200 -> theta_crit 68.5 deg
+#
+# So a momentary tip that is unrecoverable today should recover here. z=0.020 is
+# chosen to match part_2 (Assemble-beam Step 1, geometric COM z=0.019), the
+# squat fixture that survived unbolted at 93.7% -- this run is effectively
+# "part_2's COM height on part_0's geometry".
+#
+# TIPPING IS CONFIRMED VISUALLY (viser, unbolted): the plate goes over on
+# contact. This is not an inferred mechanism.
+#
+# SYNTHETIC FIXTURE. --com-z moves the COM while the collision geometry and the
+# inertia tensor are held, i.e. it models ballasting the base with a denser
+# material. A real ballasted plate would have a slightly different tensor. That
+# is deliberate: holding the tensor is what makes this a single-variable test.
+# Report it as a mechanism probe, not a manufacturable spec.
+#
+# SERIALIZATION. This rewrites the same URDF as job 853869 and both restore it
+# via trap on exit, so they must not overlap -- 853869's restore would clobber
+# this fixture mid-run and the eval would silently score the wrong body.
+# Submitted with --dependency=afterany:853869.
+
+set -uo pipefail
+
+REPO_ROOT="/share/portal/kk837/depthbasedRL"
+URDF="$REPO_ROOT/assets/urdf/fabrica/beam_3x/insertion_fixtures/part_0_sdf_hybrid.urdf"
+RUN_DIR="$REPO_ROOT/train_dir/fig4/beam_3x_teachers/beam_3x_part_0_finetune_rgf0_dr_wrench_2026-05-25_05-40-24"
+CHECKPOINT="$(ls "$RUN_DIR"/*/last/model.pth | head -1)"
+TRAIN_OVERRIDES="$RUN_DIR/.hydra/overrides.yaml"
+OUT_DIR="$REPO_ROOT/plot_figures/rebuttal/experiments/outputs"
+
+NUM_ENVS=512
+SEED=42
+HOLE_X="[-0.14,0.14]"
+TARGET_MASS=1.502
+TARGET_COM_Z=0.020
+LOG="$OUT_DIR/beam2mass_unbolted_1502g_lowcom.txt"
+
+mkdir -p "$OUT_DIR" "$REPO_ROOT/plot_figures/rebuttal/experiments/logs"
+cd "$REPO_ROOT"
+source .venv_isaacsim/bin/activate
+export OMNI_KIT_ACCEPT_EULA=YES
+export OMNI_KIT_CACHE_PATH="/tmp/${USER}_ov_cache_beam2lowcom"
+mkdir -p "$OMNI_KIT_CACHE_PATH"
+
+BACKUP="$(mktemp)"; cp "$URDF" "$BACKUP"
+restore() { cp "$BACKUP" "$URDF"; echo "restored $URDF"; }
+trap restore EXIT
+
+# The dependency should guarantee this, but a stale 5 kg fixture here would mean
+# silently re-running the previous arm and reporting it as this one.
+BEFORE="$(grep -oE '<mass value="[0-9.]+"' "$URDF" | head -1)"
+echo "### fixture on entry: $BEFORE (expect 0.6898 -- the committed value)"
+case "$BEFORE" in
+  *'"0.6898"'*) ;;
+  *) echo "FATAL: URDF not at its committed mass on entry ($BEFORE); a prior job's"
+     echo "       restore may not have run. Refusing to build a backup from it."; exit 1 ;;
+esac
+
+echo "### setting mass=${TARGET_MASS} kg, com z=${TARGET_COM_Z} m"
+python scripts/compute_urdf_inertial.py "$URDF" \
+    --mass "$TARGET_MASS" --com-z "$TARGET_COM_Z" --write | tail -6
+
+# Read the origin INSIDE <inertial>, not the first <origin> in the file -- the
+# collision/visual origins come first and a naive grep matches those instead.
+read -r ACTUAL_M ACTUAL_COM_Z <<<"$(python - "$URDF" <<'PY'
+import sys, xml.etree.ElementTree as ET
+root = ET.parse(sys.argv[1]).getroot()
+for link in root.iter("link"):
+    inr = link.find("inertial")
+    if inr is None:
+        continue
+    m = float(inr.find("mass").get("value"))
+    o = inr.find("origin")
+    z = float((o.get("xyz") if o is not None else "0 0 0").split()[2])
+    print(f"{m:.4f} {z:.6f}")
+    break
+PY
+)"
+echo "### fixture now: mass=$ACTUAL_M com_z=$ACTUAL_COM_Z"
+[ "$ACTUAL_M" = "1.5020" ]     || { echo "FATAL: mass did not take ($ACTUAL_M); aborting"; exit 1; }
+[ "$ACTUAL_COM_Z" = "0.020000" ] || { echo "FATAL: com z did not take ($ACTUAL_COM_Z); aborting"; exit 1; }
+
+echo "############ unbolted_1502g_lowcom (bolted=False, mass=$ACTUAL_M, com_z=$TARGET_COM_Z)"
+
+# Isaac Sim hangs in Kit teardown after the JSON is written; run detached and
+# stop on the "=> wrote" marker rather than waiting for the process to exit.
+python -u peg_in_hole_dynamic/offline_eval_teacher_robustness.py \
+    --teacher-checkpoint "$CHECKPOINT" --train-overrides "$TRAIN_OVERRIDES" \
+    --exact-train --num-envs "$NUM_ENVS" --seed "$SEED" \
+    --override env.domain_randomization.force_scale=0.0 \
+    --override env.domain_randomization.torque_scale=0.0 \
+    --override "env.peg_in_hole.hole_x_range=$HOLE_X" \
+    --override env.peg_in_hole.fixture_bolted=False \
+    --output-json "$OUT_DIR/beam2mass_unbolted_1502g_lowcom.json" > "$LOG" 2>&1 &
+PID=$!
+for i in $(seq 1 480); do
+  grep -q "=> wrote" "$LOG" 2>/dev/null && break
+  kill -0 $PID 2>/dev/null || break
+  sleep 10
+done
+grep -E "no early drop|terminations:|Traceback|Error" "$LOG" || true
+kill -9 $PID 2>/dev/null
+sleep 8
+
+echo "############ SUMMARY (Assemble-beam Step 2, unbolted, clamped)"
+python - <<'PY'
+import json
+OUT = "/share/portal/kk837/depthbasedRL/plot_figures/rebuttal/experiments/outputs"
+rows = [("bolted    0.690 kg  z=0.0589", "beam2mass_bolted_690g"),
+        ("unbolted  0.690 kg  z=0.0589", "beam2mass_unbolted_690g"),
+        ("unbolted  1.502 kg  z=0.0589", "beam2mass_unbolted_1502g"),
+        ("unbolted  5.000 kg  z=0.0589", "beam2mass_unbolted_5000g"),
+        ("unbolted  1.502 kg  z=0.0200", "beam2mass_unbolted_1502g_lowcom")]
+for label, stem in rows:
+    try:
+        r = json.load(open(f"{OUT}/{stem}.json"))["results"][0]
+        e, t = r["early_drop_filtered"], r["termination_counts"]
+        late = t["fall"] - r.get("dropped_early", 0)
+        print(f"{label:30s} {100*e['retract_rate']:6.2f}%  (n={e['n']})  "
+              f"fall={t['fall']} (late~{late}) timeout={t['timeout']}")
+    except Exception as exc:
+        print(f"{label:30s} unavailable ({exc})")
+print("\nCompare rows 3 and 5: same mass, only COM height differs.")
+print("theta_crit = atan(d/z_com), d=0.0509:  z=0.0589 -> 40.8 deg,  z=0.0200 -> 68.5 deg")
+print("Reference: Step 1 (part_2, geometric COM z=0.019) survives unbolted at 93.7%.")
+PY
+echo "############ DONE"

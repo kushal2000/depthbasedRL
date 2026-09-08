@@ -1,0 +1,114 @@
+#!/bin/bash
+#SBATCH -N 1
+#SBATCH -n 1
+#SBATCH --cpus-per-task=12
+#SBATCH --get-user-env
+#SBATCH --mem=200000
+#SBATCH -t 0-03:00:00
+#SBATCH --partition=portal
+#SBATCH --exclude=portal-compute-01
+#SBATCH --gres=gpu:1
+#SBATCH -J eval_peg_beam1_bolted_unbolted
+#SBATCH -o /share/portal/kk837/depthbasedRL/plot_figures/rebuttal/experiments/logs/eval_peg_beam1_%j.out
+#SBATCH -e /share/portal/kk837/depthbasedRL/plot_figures/rebuttal/experiments/logs/eval_peg_beam1_%j.err
+
+# The two tasks missing from the bolted-vs-unbolted figure: Tight Insertion
+# (peg) and Assemble-beam Step 1 (part_2). Four arms, bolted + unbolted each.
+#
+# WHY RE-RUN RATHER THAN REUSE. The earlier numbers for these two (peg -10.5
+# pts, Step 1 -4.1 pts i.e. 93.7%) were produced by runs that never passed
+# --output-json, so there is nothing on disk to plot. Step 1's number is also
+# contaminated: it used the default hole_x_range where its fixture overhangs.
+#
+# PLACEMENT RANGE IS PER-TASK, set to the widest that keeps the fixture fully
+# supported on table_narrow (half-extent 0.2375 m). Measured half-widths:
+#
+#   peg hole   0.0400  ->  0.1875 + 0.0400 = 0.2275  OK at the default
+#   part_2     0.0731  ->  0.1875 + 0.0731 = 0.2606  OVERHANGS by 2.3 cm
+#                          0.1400 + 0.0731 = 0.2131  OK
+#
+# So peg keeps its training range (clamping it would needlessly shrink the
+# distribution the teacher trained on) and part_2 is clamped to +/-0.14, the
+# same clamp already applied to Step 2 and Screw-Leg. Each task's bolted and
+# unbolted arms share a range, which is what the comparison requires; the range
+# differing ACROSS tasks is fine, since their fixture geometry differs anyway.
+#
+# Fixtures are used at their committed, geometry-derived inertials:
+#   peg hole  0.4360 kg  com_z 0.0295
+#   part_2    0.3826 kg  com_z 0.0190   <- already squat, unlike part_0's 0.0589
+#
+# Both teachers trained with force/torque scale 0 (peg's overrides.yaml sets it
+# explicitly); passing it here keeps every arm on the same footing as the beam
+# Step 2 and Screw-Leg runs already in the figure.
+
+set -uo pipefail
+
+REPO_ROOT="/share/portal/kk837/depthbasedRL"
+OUT_DIR="$REPO_ROOT/plot_figures/rebuttal/experiments/outputs"
+
+PEG_RUN="$REPO_ROOT/train_dir/fig4/peg_matchedmass_teachers/peg_matchedmass_tol0p5mm_finetune_rgf0_dr_2026-05-23_02-11-56"
+B1_RUN="$REPO_ROOT/train_dir/fig4/beam_3x_teachers/beam_3x_part_2_finetune_rgf0_dr_wrench_2026-05-25_05-40-24"
+
+NUM_ENVS=512
+SEED=42
+
+mkdir -p "$OUT_DIR" "$REPO_ROOT/plot_figures/rebuttal/experiments/logs"
+cd "$REPO_ROOT"
+source .venv_isaacsim/bin/activate
+export OMNI_KIT_ACCEPT_EULA=YES
+export OMNI_KIT_CACHE_PATH="/tmp/${USER}_ov_cache_pegbeam1"
+mkdir -p "$OMNI_KIT_CACHE_PATH"
+
+# Isaac Sim hangs in Kit teardown after the JSON is written; run detached and
+# stop on the "=> wrote" marker rather than waiting for the process to exit.
+run_eval () {  # $1=tag  $2=run_dir  $3=bolted  $4=hole_x_range
+  local tag="$1" run_dir="$2" bolted="$3" hx="$4"
+  local log="$OUT_DIR/${tag}.txt"
+  local ckpt; ckpt="$(ls "$run_dir"/*/last/model.pth | head -1)"
+  echo "############ $tag (bolted=$bolted, hole_x_range=$hx)"
+  python -u peg_in_hole_dynamic/offline_eval_teacher_robustness.py \
+      --teacher-checkpoint "$ckpt" \
+      --train-overrides "$run_dir/.hydra/overrides.yaml" \
+      --exact-train --num-envs "$NUM_ENVS" --seed "$SEED" \
+      --override env.domain_randomization.force_scale=0.0 \
+      --override env.domain_randomization.torque_scale=0.0 \
+      --override "env.peg_in_hole.hole_x_range=$hx" \
+      --override "env.peg_in_hole.fixture_bolted=$bolted" \
+      --output-json "$OUT_DIR/${tag}.json" > "$log" 2>&1 &
+  local pid=$!
+  local i
+  for i in $(seq 1 360); do
+    grep -q "=> wrote" "$log" 2>/dev/null && break
+    kill -0 $pid 2>/dev/null || break
+    sleep 10
+  done
+  grep -E "no early drop|terminations:|Traceback|Error" "$log" || true
+  kill -9 $pid 2>/dev/null
+  sleep 8
+}
+
+run_eval peg_bolted     "$PEG_RUN" True  "[-0.1875,0.1875]"
+run_eval peg_unbolted   "$PEG_RUN" False "[-0.1875,0.1875]"
+run_eval beam1_bolted   "$B1_RUN"  True  "[-0.14,0.14]"
+run_eval beam1_unbolted "$B1_RUN"  False "[-0.14,0.14]"
+
+echo "############ SUMMARY"
+python - <<'PY'
+import json
+OUT = "/share/portal/kk837/depthbasedRL/plot_figures/rebuttal/experiments/outputs"
+for label, bt, ut in (("Tight Insertion     ", "peg_bolted",   "peg_unbolted"),
+                      ("Assemble-beam Step 1", "beam1_bolted", "beam1_unbolted")):
+    out = [label]
+    for tag in (bt, ut):
+        try:
+            r = json.load(open(f"{OUT}/{tag}.json"))["results"][0]
+            e = r["early_drop_filtered"]
+            out.append(f"{100*e['retract_rate']:6.2f}% (n={e['n']}, cens={r['unfinished_envs']})")
+        except Exception as exc:
+            out.append(f"FAILED ({exc})")
+    print(f"{out[0]}  bolted {out[1]}   unbolted {out[2]}")
+print("\nAlready in the figure (per-run denominators, matching the logs):")
+print("  Assemble-beam Step 2   bolted  98.37%   unbolted  73.45%  (1.5 kg, com_z 0.020)")
+print("  Screw-Leg              bolted  84.60%   unbolted  pending")
+PY
+echo "############ DONE"

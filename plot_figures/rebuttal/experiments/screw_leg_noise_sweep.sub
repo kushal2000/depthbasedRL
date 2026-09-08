@@ -1,0 +1,87 @@
+#!/bin/bash
+#SBATCH -N 1
+#SBATCH -n 1
+#SBATCH --cpus-per-task=12
+#SBATCH --get-user-env
+#SBATCH --mem=200000
+#SBATCH -t 0-08:00:00
+#SBATCH --partition=portal
+#SBATCH --exclude=portal-compute-01
+#SBATCH --gres=gpu:1
+#SBATCH -J screw_leg_noise_sweep
+#SBATCH -o /share/portal/kk837/depthbasedRL/plot_figures/rebuttal/experiments/logs/screw_leg_noise_sweep_%j.out
+#SBATCH -e /share/portal/kk837/depthbasedRL/plot_figures/rebuttal/experiments/logs/screw_leg_noise_sweep_%j.err
+
+# Screw-Leg (furniture_bench one_leg) object-pose observation-noise sweep.
+#
+# 10 points along the TRAINING noise ratio (1 cm : 5 deg), 0 -> 10 cm / 50 deg,
+# matching the peg / beam Step 1 / beam Step 2 sweeps so the four curves overlay.
+#
+# Why slurm rather than an interactive run: each point needs a 3000-step budget
+# (the one_leg problem has 10 subgoals and the env resets episode_length_buf on
+# every subgoal success, so episodes legitimately outrun the 600-step default),
+# which puts a point at ~650-900 s and the full sweep at ~2.5 h. A previous
+# interactive attempt was SIGKILLed partway through when it had to share the
+# node with other Isaac Sim processes.
+#
+# Wrench DR is forced off to match the bolted baseline this teacher was
+# evaluated against; random_goal_fraction is forced to 0 so every env runs the
+# insertion task rather than the co-training random-goal mix.
+
+set -euo pipefail
+
+REPO_ROOT="/share/portal/kk837/depthbasedRL"
+RUN_DIR="$REPO_ROOT/train_dir/fig4/long_leg_screwing_teachers/furniture_bench_leg4_200mm_finetune_rgf10_dr_wrench_2026-05-25_22-16-15"
+CHECKPOINT="$(ls "$RUN_DIR"/*/last/model.pth | head -1)"
+TRAIN_OVERRIDES="$RUN_DIR/.hydra/overrides.yaml"
+
+OUT_DIR="$REPO_ROOT/plot_figures/rebuttal/experiments/outputs"
+OUT_JSON="$OUT_DIR/screw_leg_ratio_sweep.json"
+
+NUM_ENVS=512
+SEED=42
+POINTS=10
+XYZ_MAX=0.10          # metres
+ROT_MAX=50.0          # degrees
+MAX_STEPS=3000
+
+mkdir -p "$OUT_DIR" "$(dirname "$SLURM_JOB_NAME")" 2>/dev/null || true
+mkdir -p "$REPO_ROOT/plot_figures/rebuttal/experiments/logs"
+
+cd "$REPO_ROOT"
+source .venv_isaacsim/bin/activate
+export OMNI_KIT_ACCEPT_EULA=YES
+export OMNI_KIT_CACHE_PATH="/tmp/${USER}_ov_cache_screwleg"
+mkdir -p "$OMNI_KIT_CACHE_PATH"
+
+echo "checkpoint : $CHECKPOINT"
+echo "overrides  : $TRAIN_OVERRIDES"
+echo "output     : $OUT_JSON"
+
+# Detached + marker-polled: Isaac Sim can hang in Kit teardown after the JSON
+# is on disk, which would hold the node until the walltime limit for nothing.
+SWEEP_LOG="$OUT_DIR/screw_leg_ratio_sweep.log"
+python -u peg_in_hole_dynamic/offline_eval_obj_pose_noise_sweep.py \
+    --teacher-checkpoint "$CHECKPOINT" \
+    --train-overrides "$TRAIN_OVERRIDES" \
+    --num-envs "$NUM_ENVS" \
+    --seed "$SEED" \
+    --points "$POINTS" \
+    --xyz-max "$XYZ_MAX" \
+    --rot-max "$ROT_MAX" \
+    --max-steps-per-episode "$MAX_STEPS" \
+    --override env.domain_randomization.force_scale=0.0 \
+    --override env.domain_randomization.torque_scale=0.0 \
+    --override env.peg_in_hole.random_goal_fraction=0.0 \
+    --output-json "$OUT_JSON" > "$SWEEP_LOG" 2>&1 &
+SWEEP_PID=$!
+# 10 points at ~650-900 s each -> allow ~4 h before giving up.
+for i in $(seq 1 1440); do
+  grep -q "=> wrote" "$SWEEP_LOG" 2>/dev/null && break
+  kill -0 $SWEEP_PID 2>/dev/null || break
+  sleep 10
+done
+grep -E "SWEEP\]|Traceback|Error" "$SWEEP_LOG" || true
+kill -9 $SWEEP_PID 2>/dev/null
+
+echo "=== sweep complete: $OUT_JSON ==="

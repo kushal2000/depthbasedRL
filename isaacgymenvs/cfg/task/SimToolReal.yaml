@@ -71,6 +71,11 @@ env:
   keypointRewScale: 200.0
   distanceDeltaRewScale: 50.0
   reachGoalBonus: 1000.0
+  # Grasp-pretraining knob: when True, the keypoint reward + near_goal
+  # success criterion use ‖object_pos − goal_pos‖ instead of the rotation-
+  # dependent max-keypoint distance. Per-keypoint observation tensors are
+  # unaffected. Default False — backward compatible with all other recipes.
+  useTranslationOnlyReward: False
   kukaActionsPenaltyScale: 0.03
   handActionsPenaltyScale: 0.003
   fallDistance: 0.24
@@ -100,6 +105,14 @@ env:
   finalGoalToleranceCurriculumInterval: 3000   # env steps between updates
   finalGoalToleranceCurriculumSuccessThreshold: 0.8  # min all_goals_hit_ratio to trigger decay
   maxConsecutiveSuccesses: 50
+  # Multiplier on maxConsecutiveSuccesses inside the tolerance-curriculum
+  # gate `mean_successes_per_episode >= min(3.0, scale * max)`. Default
+  # 0.8 reproduces the historical behavior (sparse modes get a tight gate,
+  # dense modes capped at 3.0). Lower values loosen the gate — e.g. with
+  # maxConsecutiveSuccesses=1, scale=0.5 → gate at 50% of episodes
+  # succeeding instead of 80%. Has no effect on dense mode (max≥4) where
+  # the 3.0 cap dominates.
+  toleranceCurriculumSuccessScale: 0.8
   successSteps: 10  # how many steps we should be within the tolerance before we declare a success
   forceConsecutiveNearGoalSteps: False  # If True, require near goal consecutively for successSteps
 
@@ -231,6 +244,12 @@ env:
   goalObjectPose: ${eval:"None"}  # If None, does nothing. Otherwise, forces the goal object pose to be this value. Must be a 7-element list of [x, y, z, qx, qy, qz, qw]
 
   handleHeadTypes: ["hammer", "screwdriver", "marker", "spatula", "eraser", "brush"]
+  # Procedural-pool sizing knobs. Defaults preserve legacy training behavior
+  # (100 samples per type, randomly shuffled). Debug/parity rollouts under
+  # debug_differences/ override these to (1, False) to lock pool[0] to the
+  # first matching ObjectSizeDistribution.
+  numAssetsPerType: 100
+  randomizeAssetOrder: True
 
   # asset Friction settings
   modifyAssetFrictions: True

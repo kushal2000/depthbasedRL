@@ -1,0 +1,60 @@
+#!/bin/bash
+#SBATCH -N 1
+#SBATCH -n 1
+#SBATCH --cpus-per-task=12
+#SBATCH --get-user-env
+#SBATCH --mem=200000
+#SBATCH -t 0-04:00:00
+#SBATCH --partition=portal
+#SBATCH --exclude=portal-compute-01
+#SBATCH --gres=gpu:1
+#SBATCH -J eval_uni_furniture
+#SBATCH -o /share/portal/kk837/depthbasedRL/plot_figures/rebuttal/experiments/logs/eval_uni_furniture_%j.out
+#SBATCH -e /share/portal/kk837/depthbasedRL/plot_figures/rebuttal/experiments/logs/eval_uni_furniture_%j.err
+
+# Evaluate the fixed-fixture 0.5 mm four-way unified teacher on Furniture.
+
+set -uo pipefail
+
+REPO_ROOT=/share/portal/kk837/depthbasedRL
+RUN_DIR="$REPO_ROOT/train_dir/multiproblem/cotrain/multiproblem_4way_canonroot_2026-08-09_14-52-12"
+CHECKPOINT="$RUN_DIR/eval_snapshot_fixed0p5_20260809.pth"
+TRAIN_OVERRIDES="$RUN_DIR/.hydra/overrides.yaml"
+PROBLEM=furniture_bench.one_leg_leg4_200mm_matchedmass_sdf_hybrid_super_dense
+OUT_DIR="$REPO_ROOT/plot_figures/rebuttal/experiments/outputs/unified_fixed0p5_checkpoints"
+OUTPUT_JSON="$OUT_DIR/furniture_fixed_job${SLURM_JOB_ID}.json"
+DETAIL_LOG="$OUT_DIR/furniture_fixed_job${SLURM_JOB_ID}.log"
+
+mkdir -p "$OUT_DIR" "$REPO_ROOT/plot_figures/rebuttal/experiments/logs"
+cd "$REPO_ROOT"
+source .venv_isaacsim/bin/activate
+export OMNI_KIT_ACCEPT_EULA=YES
+export OMNI_KIT_CACHE_PATH="/tmp/${USER}_ov_cache_uni_furniture_${SLURM_JOB_ID}"
+mkdir -p "$OMNI_KIT_CACHE_PATH"
+
+python -u peg_in_hole_dynamic/offline_eval_teacher_robustness.py \
+  --teacher-checkpoint "$CHECKPOINT" \
+  --train-overrides "$TRAIN_OVERRIDES" \
+  --exact-train --num-envs 512 --seed 42 --max-steps-per-episode 3000 \
+  --override "env.peg_in_hole.problems=[$PROBLEM]" \
+  --override env.peg_in_hole.random_goal_fraction=0.0 \
+  --override env.domain_randomization.force_scale=0.0 \
+  --override env.domain_randomization.torque_scale=0.0 \
+  --output-json "$OUTPUT_JSON" > "$DETAIL_LOG" 2>&1 &
+EVAL_PID=$!
+
+COMPLETED=0
+for _ in $(seq 1 360); do
+  if grep -q "=> wrote" "$DETAIL_LOG" 2>/dev/null; then COMPLETED=1; break; fi
+  kill -0 "$EVAL_PID" 2>/dev/null || break
+  sleep 10
+done
+kill -9 "$EVAL_PID" 2>/dev/null || true
+wait "$EVAL_PID" 2>/dev/null || true
+
+grep -E "problem=|all envs|no early drop|terminations:|Traceback|Error|=> wrote" "$DETAIL_LOG" || true
+if [ "$COMPLETED" -ne 1 ] || [ ! -s "$OUTPUT_JSON" ]; then
+  echo "FAILED: evaluation did not produce $OUTPUT_JSON" >&2
+  exit 1
+fi
+jq -r '.results[0] | "RESULT all_envs insertion=\(.all_envs.insertion_rate) retract=\(.all_envs.retract_rate); filtered insertion=\(.early_drop_filtered.insertion_rate) retract=\(.early_drop_filtered.retract_rate); n=\(.early_drop_filtered.n); unfinished=\(.unfinished_envs)"' "$OUTPUT_JSON"

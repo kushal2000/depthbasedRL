@@ -1,0 +1,82 @@
+#!/bin/bash
+#SBATCH -N 1
+#SBATCH -n 1
+#SBATCH --cpus-per-task=12
+#SBATCH --get-user-env
+#SBATCH --mem=200000
+#SBATCH -t 0-02:00:00
+#SBATCH --partition=portal
+#SBATCH --exclude=portal-compute-01
+#SBATCH --gres=gpu:1
+#SBATCH -J eval_beam_solo_unclamped
+#SBATCH -o /share/portal/kk837/depthbasedRL/plot_figures/rebuttal/experiments/logs/eval_beam_solo_unclamped_%j.out
+#SBATCH -e /share/portal/kk837/depthbasedRL/plot_figures/rebuttal/experiments/logs/eval_beam_solo_unclamped_%j.err
+
+# Solo beam teachers at the DEFAULT hole_x_range, to make the co-training
+# comparison exactly matched.
+#
+# The co-trained eval (job 853012) ran at the default +/-0.1875; the solo
+# numbers currently in the figure come from job 854131, which clamped to
+# +/-0.14 for the unbolted experiment. Both arms are BOLTED, so the fixture is
+# kinematic and the clamp is immaterial -- measured 98.37% clamped vs 98.25%
+# unclamped on Step 2, a 0.12 pt difference. This removes the caveat anyway,
+# since it costs ~10 minutes.
+#
+# Everything else matches the co-trained eval: rgf 0, wrench off, 512 envs,
+# seed 42, --exact-train against each solo teacher's own overrides.
+
+set -uo pipefail
+REPO_ROOT="/share/portal/kk837/depthbasedRL"
+OUT_DIR="$REPO_ROOT/plot_figures/rebuttal/experiments/outputs"
+B1="$REPO_ROOT/train_dir/fig4/beam_3x_teachers/beam_3x_part_2_finetune_rgf0_dr_wrench_2026-05-25_05-40-24"
+B2="$REPO_ROOT/train_dir/fig4/beam_3x_teachers/beam_3x_part_0_finetune_rgf0_dr_wrench_2026-05-25_05-40-24"
+
+mkdir -p "$OUT_DIR"
+cd "$REPO_ROOT"
+source .venv_isaacsim/bin/activate
+export OMNI_KIT_ACCEPT_EULA=YES
+export OMNI_KIT_CACHE_PATH="/tmp/${USER}_ov_cache_beamsolo_unclamped"
+mkdir -p "$OMNI_KIT_CACHE_PATH"
+
+run_eval () {  # $1=tag $2=run_dir
+  local tag="$1" run_dir="$2"
+  local log="$OUT_DIR/solo_unclamped_${tag}.txt"
+  local ckpt; ckpt="$(ls "$run_dir"/*/last/model.pth | head -1)"
+  echo "############ $tag (bolted, default hole_x_range)"
+  python -u peg_in_hole_dynamic/offline_eval_teacher_robustness.py \
+      --teacher-checkpoint "$ckpt" \
+      --train-overrides "$run_dir/.hydra/overrides.yaml" \
+      --exact-train --num-envs 512 --seed 42 \
+      --override env.peg_in_hole.random_goal_fraction=0.0 \
+      --override env.domain_randomization.force_scale=0.0 \
+      --override env.domain_randomization.torque_scale=0.0 \
+      --output-json "$OUT_DIR/solo_unclamped_${tag}.json" > "$log" 2>&1 &
+  local pid=$!
+  local i
+  for i in $(seq 1 360); do
+    grep -q "=> wrote" "$log" 2>/dev/null && break
+    kill -0 $pid 2>/dev/null || break
+    sleep 10
+  done
+  grep -E "no early drop|terminations:|Traceback|Error" "$log" || true
+  kill -9 $pid 2>/dev/null
+  sleep 8
+}
+
+run_eval step1_part2 "$B1"
+run_eval step2_part0 "$B2"
+
+echo "############ SUMMARY (matched to the co-trained eval)"
+python - <<'PY'
+import json
+OUT="/share/portal/kk837/depthbasedRL/plot_figures/rebuttal/experiments/outputs"
+for tag,label in (("step1_part2","Assemble-beam Step 1"),("step2_part0","Assemble-beam Step 2")):
+    row=[label]
+    for stem in (f"solo_unclamped_{tag}", f"cotrained_beam_{tag}"):
+        try:
+            r=json.load(open(f"{OUT}/{stem}.json"))["results"][0]; e=r["early_drop_filtered"]
+            row.append(f"{100*e['retract_rate']:6.2f}% (n={e['n']})")
+        except Exception as exc: row.append(f"FAILED ({exc})")
+    print(f"{row[0]:22s} solo {row[1]}   co-trained {row[2]}")
+PY
+echo "############ DONE"
